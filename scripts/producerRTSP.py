@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 # ================= CẤU HÌNH =================
 API_URL = "http://<REDACTED_IP>:8000"
-KAFKA_BROKER = "http://kafka:9092"
+# Lưu ý: Kafka Broker thường không có "http://", chỉ là "host:port"
+KAFKA_BROKER = "kafka:9092" 
 KAFKA_TOPIC = "urban-safety-alerts"
 METADATA_FILE = "./data/metadata/camera_registry.csv"
 
@@ -31,7 +32,7 @@ try:
     print(f"Kết nối Kafka thành công tới {KAFKA_BROKER}")
 except Exception as e:
     print(f"Lỗi Fatal Kafka: {e}")
-    sys.exit(1)
+    # sys.exit(1) # Tạm bỏ exit để debug nếu cần, hoặc uncomment lại
 
 # ================= HÀM XỬ LÝ =================
 
@@ -53,26 +54,6 @@ def load_camera_registry(csv_path):
         print(f"Lỗi đọc CSV: {e}")
         return {}
 
-def start_ai_processing(camera_list):
-    print("Đang kích hoạt AI cho các Camera...")
-    for cam_id, info in camera_list.items():
-        rtsp_url = info['rtsp_url']
-        try:
-            # Gọi API start
-            response = requests.post(
-                f"{API_URL}/camera/start",
-                params={"camera_id": cam_id, "rtsp_url": rtsp_url},
-                timeout=3
-            )
-            if response.status_code == 200:
-                print(f"   + {cam_id}: Started")
-            elif "already running" in response.text:
-                print(f"   = {cam_id}: Running")
-            else:
-                print(f"   - {cam_id}: Failed ({response.text})")
-        except Exception as e:
-            print(f"   ! {cam_id}: Error API ({e})")
-
 # Biến lưu thời gian gửi cuối cùng
 last_sent_time = {}
 
@@ -80,7 +61,7 @@ def process_camera(cam_id, cam_metadata):
     global last_sent_time
     
     try:
-        # 1. Gọi API lấy trạng thái
+        # 1. Gọi API lấy trạng thái (Không gọi start nữa)
         try:
             resp = requests.get(f"{API_URL}/camera/status/{cam_id}", timeout=2)
         except requests.exceptions.RequestException:
@@ -88,18 +69,18 @@ def process_camera(cam_id, cam_metadata):
             return
 
         if resp.status_code != 200:
-            print(f"[{cam_id}] API Error: {resp.status_code}")
+            # Có thể camera chưa được bật bên API server
+            # print(f"[{cam_id}] API Error: {resp.status_code}")
             return
 
         ai_data = resp.json()
         
-        # 2. Kiểm tra trạng thái Camera
-        if ai_data.get("status") == "offline":
-            # In ra để biết là nó đang chờ, chứ không phải bị lỗi
-            # (Chỉ in 5s một lần cho đỡ spam terminal)
+        # 2. Kiểm tra dữ liệu trả về
+        if ai_data.get("status") == "offline" or ai_data.get("status") == "error":
+            # Camera bên server đang tắt hoặc lỗi
             now = time.time()
-            if now - last_sent_time.get(cam_id, 0) > 5.0:
-                 print(f"[{cam_id}] Đang khởi động/Mất tín hiệu...")
+            if now - last_sent_time.get(cam_id, 0) > 10.0:
+                 print(f"[{cam_id}] Offline/Chưa start bên Server.")
                  last_sent_time[cam_id] = now
             return
 
@@ -107,12 +88,9 @@ def process_camera(cam_id, cam_metadata):
         is_violent = ai_data.get("is_violent", False)
         
         # --- QUAN TRỌNG: LẤY SCORE CHÍNH XÁC ---
-        # Ưu tiên lấy 'score' (đã làm mịn), nếu không có thì lấy 'fight_prob' hoặc 'raw_prob'
         score = ai_data.get("score")
         if score is None:
              score = ai_data.get("fight_prob", 0.0)
-        
-        # Đảm bảo score là float
         score = float(score)
         # ---------------------------------------
 
@@ -130,7 +108,7 @@ def process_camera(cam_id, cam_metadata):
             "timestamp": datetime.now().isoformat(),
             "ai_timestamp": ai_data.get("timestamp"),
             "is_violent": is_violent,
-            "score": score, # Giá trị thực, không bao giờ là 0 (trừ khi model trả về 0)
+            "score": score,
             "fps": ai_data.get("fps", 0),
             "latency_ms": ai_data.get("latency_ms", 0),
             "image_preview": ai_data.get("image_preview", ""),
@@ -142,12 +120,11 @@ def process_camera(cam_id, cam_metadata):
         
         last_sent_time[cam_id] = now
         
-        # Log ra màn hình để biết đang chạy
+        # Log ra màn hình
         status_icon = "VIOLENCE" if is_violent else "Normal"
         print(f"Sent Kafka [{cam_id}] {status_icon} | Score: {score:.4f} | FPS: {enriched_data['fps']}")
 
     except Exception as e:
-        # IN LỖI RA THAY VÌ PASS
         print(f"Error processing {cam_id}: {e}")
 
 # ================= MAIN LOOP =================
@@ -156,10 +133,10 @@ def main():
     registry = load_camera_registry(METADATA_FILE)
     if not registry: return
 
-    start_ai_processing(registry)
+    # Không gọi start_ai_processing nữa
     
-    print("\n🎧 Producer đang chạy... (Chờ khoảng 10s để Camera khởi động)")
-    print(f"Topic: {KAFKA_TOPIC}\n")
+    print(f"\nProducer đang chạy... Theo dõi topic: {KAFKA_TOPIC}")
+    print(f"Lấy dữ liệu từ: {API_URL}\n")
 
     executor = ThreadPoolExecutor(max_workers=8)
 
