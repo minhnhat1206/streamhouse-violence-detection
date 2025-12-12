@@ -86,4 +86,4 @@ def load_camera_registry(metadata_file: Path):
 
 if __name__ == '__main__':
     # Chỉ chạy thử nghiệm
-    generate_and_save_metadata(16, "rtsp://<REDACTED_IP>:8554", Path("../data/metadata/camera_registry.csv"))
+    generate_and_save_metadata(16, "rtsp://mediamtx:8554", Path("../data/metadata/camera_registry.csv"))
