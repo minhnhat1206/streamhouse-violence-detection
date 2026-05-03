@@ -21,3 +21,11 @@ logs/
 tmp/
 *.pid
 pids/
+
+# Claude Code - agent-specific (do not share)
+.claude/settings.local.json
+.claude/conversations/
+.claude/context/
+.claude/cache/
+.claude/agent-memory/
+CLAUDE.local.md

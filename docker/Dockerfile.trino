@@ -1,7 +1,11 @@
 FROM trinodb/trino:476
 
-# Đồng thời cũng thêm vào plugin Iceberg vì Trino Iceberg không tự chia sẻ classpath
+# Iceberg plugin: Hadoop + AWS JARs cho MinIO/S3 support
 ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.6/hadoop-aws-3.3.6.jar /usr/lib/trino/plugin/iceberg/
 ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-common/3.3.6/hadoop-common-3.3.6.jar /usr/lib/trino/plugin/iceberg/
 ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-auth/3.3.6/hadoop-auth-3.3.6.jar /usr/lib/trino/plugin/iceberg/
 ADD https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.11.1026/aws-java-sdk-bundle-1.11.1026.jar /usr/lib/trino/plugin/iceberg/
+
+# NOTE: paimon-trino connector for Trino 476 has no pre-built release artifact.
+# Paimon warm queries are routed through Flink SQL Gateway (port 8083) instead.
+# See scripts/chatbot/components/trino_client.py — query_paimon() method.

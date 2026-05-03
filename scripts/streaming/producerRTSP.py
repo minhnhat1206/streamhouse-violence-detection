@@ -1,6 +1,7 @@
 import time
 import json
 import csv
+import os
 import requests
 import sys
 from kafka import KafkaProducer
@@ -8,10 +9,13 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 # ================= CONFIGURATION =================
-API_URL = "http://viomobilenet_api:8000"
-KAFKA_BROKER = "kafka:9092" 
-KAFKA_TOPIC = "urban-safety-alerts"
-METADATA_FILE = "./data/metadata/camera_registry.csv"
+API_URL = os.getenv("API_URL", "http://viomobilenet_api:8000")
+KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "urban-safety-alerts")
+METADATA_FILE = os.getenv("METADATA_FILE", "./data/metadata/camera_registry.csv")
+
+# Manual stop: tạo file này để dừng script
+STOP_FILE = os.getenv("STOP_FILE", "/app/tmp/STOP")
 
 HEARTBEAT_INTERVAL = 5.0
 ALERT_INTERVAL = 0.5
@@ -119,21 +123,29 @@ def process_camera(cam_id, cam_metadata):
 def main():
     registry = load_camera_registry(METADATA_FILE)
     if not registry: return
-    
+
+    # Xóa stop file cũ nếu còn tồn tại từ lần chạy trước
+    if os.path.exists(STOP_FILE):
+        os.remove(STOP_FILE)
+        print(f"Cleared old stop file: {STOP_FILE}")
+
     print(f"\nProducer is running... Monitoring topic: {KAFKA_TOPIC}")
-    print(f"Fetching data from: {API_URL}\n")
+    print(f"Fetching data from: {API_URL}")
+    print(f"To stop: touch {STOP_FILE}\n")
 
     # Limit threads to match number of cameras
     executor = ThreadPoolExecutor(max_workers=10)
 
     try:
-        while True:
+        while not os.path.exists(STOP_FILE):
             for cam_id, meta in registry.items():
                 executor.submit(process_camera, cam_id, meta)
-            time.sleep(0.2) 
-            
+            time.sleep(0.2)
+
+        print(f"Stop file detected: {STOP_FILE}. Shutting down gracefully...")
     except KeyboardInterrupt:
         print("\nStopping Producer...")
+    finally:
         executor.shutdown(wait=False)
         if producer:
             producer.close()

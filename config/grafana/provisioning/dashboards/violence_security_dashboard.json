@@ -499,7 +499,7 @@
         "multi": true,
         "name": "camera_id",
         "options": [],
-        "query": "SELECT DISTINCT camera_id FROM iceberg.default.bronzeviolence ORDER BY camera_id",
+        "query": "SELECT DISTINCT camera_id FROM iceberg.default.violence_incidents ORDER BY camera_id",
         "refresh": 1,
         "type": "query"
       }

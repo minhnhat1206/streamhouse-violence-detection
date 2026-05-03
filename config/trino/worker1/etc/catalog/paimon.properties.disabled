@@ -1,0 +1,10 @@
+connector.name=paimon
+warehouse=s3://warehouse/paimon
+metastore=filesystem
+s3.endpoint=http://minio:9000
+s3.access-key=minio
+s3.secret-key=mypassword
+s3.path.style.access=true
+
+scan.infer-parallelism=true
+scan.split-target-size=134217728

@@ -23,7 +23,12 @@ scrape_configs:
     static_configs:
       - targets: ['spark-worker:8081']
 
-  # JOB CHINH: JOB BRONZE LAYER (Lay metrics tu Python/prometheus_client)
-  - job_name: 'spark-bronze' 
+  # JOB CHINH: JOB WARM LAYER (Lay metrics tu Python/prometheus_client)
+  - job_name: 'spark-warm'
     static_configs:
       - targets: ['spark-master:8005']
+
+  # JOB FLINK: Flink REST API metrics
+  - job_name: 'flink'
+    static_configs:
+      - targets: ['jobmanager:8081']

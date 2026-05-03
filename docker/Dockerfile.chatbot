@@ -1,30 +1,46 @@
-# Sử dụng base image nhẹ
+# FastAPI Chatbot - LangGraph Agentic RAG
 FROM python:3.10-slim
 
 WORKDIR /app
 
-# 1. Cài đặt các gói hệ thống cần thiết
+# 1. System dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Cài đặt dependencies trước để cache layer
-COPY docker/requirements_chatbot.txt .
-RUN pip install --no-cache-dir -r requirements_chatbot.txt
+# 2. Install Python dependencies
+COPY docker/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 3. TÁCH BIỆT: Tải Model Embedding
-# Copy script tải model và chạy ngay để lưu vào một layer riêng
-COPY scripts/chatbot/download_model.py .
-RUN python download_model.py
+# 3. Download embedding model (separate layer for caching)
+RUN pip install -q sentence-transformers && \
+    python -c "from sentence_transformers import SentenceTransformer; \
+    SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 
-# 4. Copy toàn bộ mã nguồn ứng dụng (Thay đổi thường xuyên)
-COPY scripts/chatbot/ .
+# 4. Copy application code
+COPY scripts/chatbot/ /app/scripts/chatbot/
+COPY config/ /app/config/
 
-# Biến môi trường chỉ định đường dẫn model
-ENV EMBEDDING_MODEL_PATH=/app/models/embedding_model
+# Set Python path - chatbot dir first so "from config import settings" resolves correctly
+ENV PYTHONPATH=/app/scripts/chatbot:/app:$PYTHONPATH
+ENV PYTHONUNBUFFERED=1
+
+# Configuration
+ENV API_PORT=5002
 ENV CHROMA_DIR=/data/chroma
+ENV DEBUG=False
+ENV LOG_FORMAT=json
 
-# Port cho Flask Chatbot
+# Expose port
 EXPOSE 5002
 
-CMD ["python", "app.py"]
+# Health check
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
+    CMD curl -f http://localhost:5002/health || exit 1
+
+# Start FastAPI app with uvicorn
+CMD ["uvicorn", "scripts.chatbot.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "5002", \
+     "--log-level", "info"]

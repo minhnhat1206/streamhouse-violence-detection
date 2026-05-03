@@ -1,0 +1,19 @@
+connector.name=paimon
+
+# Paimon Warehouse — phải trùng với warehouse trong init_paimon_tables.py
+warehouse=s3://warehouse/paimon
+
+# Metastore: filesystem (không dùng Hive Metastore, catalog lưu trực tiếp trên S3)
+metastore=filesystem
+
+# MinIO / S3 configuration
+s3.endpoint=http://minio:9000
+s3.access-key=${ENV:MINIO_ROOT_USER}
+s3.secret-key=${ENV:MINIO_ROOT_PASSWORD}
+s3.path.style.access=true
+
+# ── Scan optimization ──────────────────────────────────────────
+# Tự động suy ra parallelism từ số file / bucket
+scan.infer-parallelism=true
+# Target split size 128MB → giảm scheduling overhead với file nhỏ
+scan.split-target-size=134217728

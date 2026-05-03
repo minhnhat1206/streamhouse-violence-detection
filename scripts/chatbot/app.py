@@ -1,21 +1,38 @@
 import os
 import re
-from flask import Flask, request, jsonify
+import boto3
+from flask import Flask, request, jsonify, send_file
 from dotenv import load_dotenv
 import google.generativeai as genai
 from rag_store import RAGStore
 from ingest import run_ingest
 import json
 from flask_cors import CORS
+from io import BytesIO
 
 load_dotenv()
 
 CHROMA_DIR = os.getenv("CHROMA_DIR", "/data/chroma")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
+# S3/MinIO configuration for frame retrieval
+S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
+S3_BUCKET = "evidence-frames"
+S3_ACCESS_KEY = os.getenv("MINIO_ROOT_USER", "minio")
+S3_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD", "mypassword")
+
 app = Flask(__name__)
 CORS(app)
 rag = RAGStore(CHROMA_DIR)
+
+# Initialize S3 client for frame retrieval
+s3_client = boto3.client(
+    "s3",
+    endpoint_url=S3_ENDPOINT,
+    aws_access_key_id=S3_ACCESS_KEY,
+    aws_secret_access_key=S3_SECRET_KEY,
+    region_name="us-east-1",
+)
 
 def extract_filters(question: str):
     """Helper function to extract metadata from question for Hybrid Search"""
@@ -123,6 +140,83 @@ def chat():
             "raw_body": raw,
             "detail": str(e)
         }), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/evidence/<incident_id>/frame", methods=["GET"])
+def get_evidence_frame(incident_id: str):
+    """
+    Retrieve evidence frame for an incident from S3.
+
+    Query params:
+      - format: 'image' (default) or 'url' (return S3 URL only)
+
+    Returns:
+        - format=image: JPEG image file
+        - format=url: JSON with frame_url
+    """
+    try:
+        format_type = request.args.get("format", "image").lower()
+
+        # Query Trino/Paimon to find frame location
+        # For now, we'll construct S3 path based on incident_id
+        # In production, query should be:
+        # SELECT frame_url, camera_id, timestamp FROM paimon.security.violence_incidents
+        # WHERE incident_id = ?
+
+        # Fallback: Try common S3 path patterns
+        # Pattern: evidence-frames/{camera_id}/{YYYY-MM-DD}/{incident_id}.jpg
+        # We can query the RAG store for metadata
+
+        query_result = rag.collection.get(
+            where={"incident_id": incident_id},
+            include=["metadatas"]
+        )
+
+        if not query_result or not query_result.get("metadatas"):
+            return jsonify({
+                "error": f"No incident found with ID: {incident_id}",
+                "hint": "Ensure incident_id is correct and has been processed"
+            }), 404
+
+        metadata = query_result["metadatas"][0] if query_result["metadatas"] else {}
+        camera_id = metadata.get("camera_id", "unknown")
+        incident_date = metadata.get("date", "2026-04-28")
+
+        s3_key = f"{camera_id}/{incident_date}/{incident_id}.jpg"
+
+        # Return based on requested format
+        if format_type == "url":
+            return jsonify({
+                "incident_id": incident_id,
+                "camera_id": camera_id,
+                "incident_date": incident_date,
+                "frame_url": f"s3://{S3_BUCKET}/{s3_key}",
+                "s3_endpoint": S3_ENDPOINT
+            }), 200
+
+        # Default: return actual image
+        try:
+            response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
+            image_data = response["Body"].read()
+            return send_file(
+                BytesIO(image_data),
+                mimetype="image/jpeg",
+                as_attachment=False,
+                download_name=f"{incident_id}.jpg"
+            )
+        except s3_client.exceptions.NoSuchKey:
+            return jsonify({
+                "error": f"Frame not found in S3: {s3_key}",
+                "s3_bucket": S3_BUCKET,
+                "s3_key": s3_key
+            }), 404
+        except Exception as e:
+            return jsonify({
+                "error": f"Failed to retrieve frame from S3: {str(e)}"
+            }), 500
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
