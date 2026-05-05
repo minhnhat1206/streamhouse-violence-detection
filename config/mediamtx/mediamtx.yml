@@ -17,7 +17,7 @@ hlsSegmentCount: 10
 webrtc: yes
 webrtcAddress: :8889
 
-webrtcAllowOrigin: 'http://localhost:3002'
+webrtcAllowOrigin: '*'
 # -----------------------
 
 paths:
