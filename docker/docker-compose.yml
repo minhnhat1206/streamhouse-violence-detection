@@ -334,6 +334,57 @@ services:
       - violence-detection-net
     restart: unless-stopped
 
+  # ─── Airflow (Orchestration) ────────────────────────────────────────────────
+  airflow:
+    image: apache/airflow:2.9.1-python3.11
+    container_name: airflow
+    profiles: [orchestration]
+    user: root
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-changeme32charfernetkeyhere1234}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-changeme_secret_key}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "60"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+      AIRFLOW__WEBSERVER__WORKERS: "1"
+      AIRFLOW__WEBSERVER__WORKER_TIMEOUT: "300"
+      FLINK_API: http://jobmanager:8081
+      TRINO_HOST: trino-coordinator
+      TRINO_PORT: "8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8089:8080"
+    networks:
+      - violence-detection-net
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        pip install trino==0.328.0 requests==2.31.0 --quiet --no-warn-script-location 2>&1 | grep -v "WARNING\|pip as root" || true
+        airflow db init
+        airflow users create \
+          --username admin --password admin \
+          --firstname Admin --lastname User \
+          --role Admin --email admin@vigilance.ai 2>/dev/null || true
+        airflow pools set default_pool 128 "Default pool" 2>/dev/null || true
+        airflow scheduler &
+        exec airflow webserver
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+          cpus: "0.50"
+
 volumes:
   zookeeper_data:
   kafka_data:
