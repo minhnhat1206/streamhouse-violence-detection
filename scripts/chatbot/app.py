@@ -1,7 +1,8 @@
 """
 Vigilance AI Chatbot Backend — FastAPI service (port 5002)
 Provides REST endpoints for the vigilance-ai dashboard:
-  GET  /api/recent-incidents  — query Iceberg via Trino
+  GET  /api/recent-incidents  — query Iceberg via Trino (includes frame_url from MinIO)
+  GET  /api/evidence          — retrieve evidence images from MinIO by camera+date
   GET  /api/stats             — aggregated analytics from Iceberg via Trino
   POST /api/chat              — Agentic RAG using Gemini + Trino
 """
@@ -10,6 +11,7 @@ import os
 import asyncio
 import logging
 import time
+import xml.etree.ElementTree as ET
 from typing import Optional
 
 import httpx
@@ -34,7 +36,71 @@ TRINO_PORT = int(os.getenv("TRINO_PORT", "8082"))
 TRINO_USER = os.getenv("TRINO_USER", "admin")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
+MINIO_INTERNAL = os.getenv("MINIO_ENDPOINT", "minio:9000")
+MINIO_EXTERNAL = os.getenv("MINIO_EXTERNAL_URL", "http://localhost:9000")
+EVIDENCE_BUCKET = "evidence-frames"
+
 TRINO_BASE = f"http://{TRINO_HOST}:{TRINO_PORT}"
+
+
+# ---------------------------------------------------------------------------
+# MinIO helpers — image retrieval
+# ---------------------------------------------------------------------------
+
+async def _minio_list_objects(prefix: str, max_keys: int = 1) -> list[str]:
+    """List object keys in evidence-frames bucket using S3 XML API (no auth, public bucket)."""
+    url = f"http://{MINIO_INTERNAL}/{EVIDENCE_BUCKET}"
+    params = {"list-type": "2", "prefix": prefix, "max-keys": str(max_keys)}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                return []
+        # Parse S3 XML response
+        root = ET.fromstring(resp.text)
+        ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+        keys = [c.findtext("s3:Key", namespaces=ns) or c.findtext("Key", "") for c in root.findall(".//s3:Contents", ns) or root.findall(".//Contents")]
+        return [k for k in keys if k]
+    except Exception as exc:
+        logger.warning("MinIO list failed for prefix=%s: %s", prefix, exc)
+        return []
+
+
+async def _get_frame_url(camera_id: str, incident_date: str, incident_id: str) -> str | None:
+    """Return a public MinIO URL for the evidence frame.
+    Priority:
+      1. Direct match: evidence-frames/{camera_id}/{date}/{incident_id}.jpg
+      2. First object in evidence-frames/{camera_id}/{date}/
+      3. First object in evidence-frames/{camera_id}/ (any date — fallback for seed data)
+    """
+    direct_key = f"{camera_id}/{incident_date}/{incident_id}.jpg"
+    direct_url = f"{MINIO_EXTERNAL}/{EVIDENCE_BUCKET}/{direct_key}"
+
+    # Try direct URL (HEAD request)
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            head = await client.head(direct_url)
+            if head.status_code == 200:
+                return direct_url
+    except Exception:
+        pass
+
+    # Fallback 1: first image for this camera+date
+    prefix = f"{camera_id}/{incident_date}/"
+    keys = await _minio_list_objects(prefix, max_keys=1)
+    if keys:
+        return f"{MINIO_EXTERNAL}/{EVIDENCE_BUCKET}/{keys[0]}"
+
+    # Fallback 2: any image for this camera (seed data may have different dates)
+    prefix_any = f"{camera_id}/"
+    keys_any = await _minio_list_objects(prefix_any, max_keys=1)
+    if keys_any:
+        # Skip folder-only entries (keys ending with /)
+        img_keys = [k for k in keys_any if not k.endswith("/") and k.endswith(".jpg")]
+        if img_keys:
+            return f"{MINIO_EXTERNAL}/{EVIDENCE_BUCKET}/{img_keys[0]}"
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -82,13 +148,14 @@ async def get_recent_incidents(limit: int = Query(50, ge=1, le=500)):
     SELECT
         incident_id,
         camera_id,
-        CAST(timestamp AS VARCHAR) AS timestamp,
+        CAST(timestamp AS VARCHAR)  AS timestamp,
         risk_score,
-        label,
+        COALESCE(event_type, 'Anomaly') AS label,
         location,
-        model_version,
-        'Unreviewed' AS status
-    FROM iceberg.security.violence_incidents
+        'VioMobileNet-v2.1'         AS model_version,
+        'Unreviewed'                AS status,
+        CAST(incident_date AS VARCHAR) AS incident_date
+    FROM iceberg.security.historical_violence_incidents
     ORDER BY timestamp DESC
     LIMIT {limit}
     """
@@ -98,20 +165,52 @@ async def get_recent_incidents(limit: int = Query(50, ge=1, le=500)):
         logger.error("Trino error (recent-incidents): %s", e)
         raise HTTPException(status_code=503, detail=f"Trino unavailable: {e}")
 
-    return [
-        {
-            "event_id": r[0],
-            "camera_id": r[1],
-            "timestamp": r[2],
+    # Fetch frame_url for each row concurrently (with timeout)
+    async def build_row(r: list) -> dict:
+        incident_id  = r[0] or ""
+        camera_id    = r[1] or ""
+        incident_date = r[8] or ""
+        frame_url = await _get_frame_url(camera_id, incident_date, incident_id)
+        return {
+            "event_id":       incident_id,
+            "camera_id":      camera_id,
+            "timestamp":      r[2],
             "violence_score": float(r[3]) if r[3] is not None else 0.0,
-            "label": r[4] or "Anomaly",
-            "location": r[5] or r[1],
-            "model_version": r[6] or "v2.1.0",
-            "clip_link": "#",
-            "status": r[7],
+            "label":          r[4] or "Anomaly",
+            "location":       r[5] or camera_id,
+            "model_version":  r[6] or "VioMobileNet-v2.1",
+            "status":         r[7],
+            "frame_url":      frame_url,
         }
-        for r in rows
+
+    results = await asyncio.gather(*[build_row(r) for r in rows])
+    return list(results)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/evidence  — list evidence images from MinIO by camera + date
+# ---------------------------------------------------------------------------
+
+@app.get("/api/evidence")
+async def get_evidence(
+    camera_id: str = Query(..., description="Camera ID, e.g. cam_01"),
+    date: str = Query(..., description="Date in YYYY-MM-DD format"),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """Return public MinIO URLs for evidence images of a given camera and date."""
+    prefix = f"{camera_id}/{date}/"
+    keys = await _minio_list_objects(prefix, max_keys=limit)
+    if not keys:
+        return {"camera_id": camera_id, "date": date, "images": []}
+
+    images = [
+        {
+            "key": k,
+            "url": f"{MINIO_EXTERNAL}/{EVIDENCE_BUCKET}/{k}",
+        }
+        for k in keys
     ]
+    return {"camera_id": camera_id, "date": date, "images": images}
 
 
 # ---------------------------------------------------------------------------
