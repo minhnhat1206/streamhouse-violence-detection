@@ -3,7 +3,9 @@
 /tmp/
 /logs/
 /pids/
-/frontend/vigilance-ai_-violence-detection-dashboard/node_modules
+Violence-Urban-Safety-UI/frontend/node_modules
+Violence-Urban-Safety-UI/frontend/dist
+.claude/worktrees/
 package-lock.json
 .env
 docker/.env
