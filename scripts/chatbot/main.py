@@ -10,6 +10,7 @@ Agentic RAG system for Violence Detection with LangGraph orchestration.
 
 import json
 import logging
+import os
 import traceback
 import time as time_module
 from contextlib import asynccontextmanager
@@ -487,14 +488,204 @@ async def get_evidence_frame(
 # Exception Handlers
 # ============================================================================
 
+# ============================================================================
+# Dashboard data endpoints — Trino Iceberg + Kafka
+# ============================================================================
+
+async def _trino_query(sql: str, timeout: float = 20.0) -> list:
+    """Execute Trino SQL and return all rows via nextUri chain."""
+    import httpx
+    trino_host = os.getenv("TRINO_HOST", "trino-coordinator")
+    trino_port = os.getenv("TRINO_PORT", "8080")
+    trino_user = os.getenv("TRINO_USER", "trino")
+    base = f"http://{trino_host}:{trino_port}"
+    headers = {
+        "X-Trino-User": trino_user,
+        "X-Trino-Catalog": "iceberg",
+        "X-Trino-Schema": "security",
+        "Content-Type": "text/plain",
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(f"{base}/v1/statement", content=sql, headers=headers)
+        resp.raise_for_status()
+        body = resp.json()
+        rows: list = []
+        if body.get("data"):
+            rows.extend(body["data"])
+        next_uri = body.get("nextUri")
+        while next_uri:
+            resp = await client.get(next_uri, headers=headers)
+            resp.raise_for_status()
+            body = resp.json()
+            if body.get("data"):
+                rows.extend(body["data"])
+            next_uri = body.get("nextUri")
+            state = body.get("stats", {}).get("state", "")
+            if state in ("FAILED", "CANCELED"):
+                raise RuntimeError(body.get("error", {}).get("message", "Trino query failed"))
+    return rows
+
+
+@app.get("/api/recent-incidents")
+async def get_recent_incidents(limit: int = 50):
+    """Latest incidents from Iceberg cold layer via Trino."""
+    sql = f"""
+    SELECT
+        incident_id, camera_id,
+        CAST(timestamp AS VARCHAR) AS timestamp,
+        risk_score, event_type, location,
+        is_violent
+    FROM iceberg.security.historical_violence_incidents
+    ORDER BY timestamp DESC
+    LIMIT {limit}
+    """
+    try:
+        rows = await _trino_query(sql)
+    except Exception as e:
+        logger.error(f"Trino error (recent-incidents): {e}")
+        raise HTTPException(status_code=503, detail=f"Trino unavailable: {e}")
+
+    return [
+        {
+            "event_id": r[0], "camera_id": r[1], "timestamp": r[2],
+            "violence_score": float(r[3]) if r[3] is not None else 0.0,
+            "label": r[4] or "Anomaly", "location": r[5] or r[1],
+            "model_version": "VioMobileNet v2.1", "clip_link": "#",
+            "status": "Unreviewed" if r[6] else "False Alarm",
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/stats")
+async def get_stats():
+    """Aggregated analytics from Iceberg for the dashboard."""
+    hours_sql = """
+    SELECT
+        date_format(date_trunc('hour', timestamp), '%H:00') AS hour_label,
+        COUNT(*) AS alert_count
+    FROM iceberg.security.historical_violence_incidents
+    WHERE timestamp >= NOW() - INTERVAL '24' HOUR
+    GROUP BY date_trunc('hour', timestamp)
+    ORDER BY date_trunc('hour', timestamp)
+    """
+    loc_sql = """
+    SELECT location, COUNT(*) AS cnt
+    FROM iceberg.security.historical_violence_incidents
+    GROUP BY location ORDER BY cnt DESC LIMIT 5
+    """
+    type_sql = """
+    SELECT event_type, COUNT(*) AS cnt
+    FROM iceberg.security.historical_violence_incidents
+    GROUP BY event_type
+    """
+    score_sql = """
+    SELECT
+        date_format(CAST(timestamp AS DATE), '%b %d') AS day_label,
+        AVG(risk_score) AS avg_score
+    FROM iceberg.security.historical_violence_incidents
+    GROUP BY CAST(timestamp AS DATE)
+    ORDER BY CAST(timestamp AS DATE)
+    """
+    import asyncio as _asyncio
+    results = await _asyncio.gather(
+        _trino_query(hours_sql), _trino_query(loc_sql),
+        _trino_query(type_sql), _trino_query(score_sql),
+        return_exceptions=True,
+    )
+    def safe(r): return r if isinstance(r, list) else []
+
+    return {
+        "alertsPerHour": [{"name": r[0], "alerts": int(r[1])} for r in safe(results[0])],
+        "topLocations":  [{"name": r[0] or "Unknown", "alerts": int(r[1])} for r in safe(results[1])],
+        "alertTypes":    [{"name": r[0] or "Unknown", "value": int(r[1])} for r in safe(results[2])],
+        "avgScore":      [{"name": r[0], "score": round(float(r[1]), 3) if r[1] else 0} for r in safe(results[3])],
+    }
+
+
+@app.get("/api/camera-status")
+async def get_camera_status():
+    """
+    Real-time camera violence status from Kafka.
+    Runs blocking Kafka IO in a thread executor to avoid blocking the event loop.
+    """
+    import asyncio as _asyncio
+
+    def _read_kafka_sync() -> dict:
+        import json as _json
+        from datetime import datetime, timezone
+        from kafka import KafkaConsumer, TopicPartition
+
+        kafka_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+        topics = ["hot-violence-alerts-valid"]
+        cutoff_ms = int((datetime.now(timezone.utc).timestamp() - 300) * 1000)
+        status_map: dict = {}
+        try:
+            consumer = KafkaConsumer(
+                bootstrap_servers=kafka_servers,
+                value_deserializer=lambda v: _json.loads(v.decode("utf-8")),
+                auto_offset_reset="latest",
+                consumer_timeout_ms=1000,
+                group_id=None,
+            )
+            all_tps = []
+            for topic in topics:
+                partitions = consumer.partitions_for_topic(topic) or set()
+                all_tps.extend([TopicPartition(topic, p) for p in partitions])
+            if all_tps:
+                consumer.assign(all_tps)
+                # Snapshot end offsets BEFORE seeking — read only up to this point
+                end_offsets = consumer.end_offsets(all_tps)
+                read_targets: dict = {}
+                for tp in all_tps:
+                    end = end_offsets[tp]
+                    if end == 0:
+                        continue
+                    start = max(0, end - 50)
+                    consumer.seek(tp, start)
+                    read_targets[tp] = end  # stop reading at this offset
+                remaining = set(read_targets.keys())
+                for msg in consumer:
+                    if not remaining:
+                        break
+                    tp = TopicPartition(msg.topic, msg.partition)
+                    # Stop reading this partition once we've reached end
+                    if msg.offset >= read_targets.get(tp, 0) - 1:
+                        remaining.discard(tp)
+                    ts = msg.timestamp or 0
+                    if ts < cutoff_ms:
+                        continue
+                    val = msg.value or {}
+                    cam = val.get("camera_id") or val.get("cam_id")
+                    if not cam:
+                        continue
+                    is_violent = val.get("is_violent", False) or val.get("violence_detected", False)
+                    score = float(val.get("risk_score") or val.get("violence_score") or 0)
+                    if is_violent or score >= 0.5:
+                        status_map[cam] = "VIOLENCE_DETECTED"
+                    elif cam not in status_map:
+                        status_map[cam] = "NORMAL"
+            consumer.close()
+        except Exception as e:
+            logger.warning(f"Kafka camera-status error: {e}")
+        return status_map
+
+    loop = _asyncio.get_event_loop()
+    status_map = await loop.run_in_executor(None, _read_kafka_sync)
+    return {"cameras": status_map, "window_seconds": 300}
+
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTP exceptions."""
-    return {
-        "error": exc.detail if isinstance(exc.detail, str) else str(exc.detail),
-        "error_code": f"HTTP_{exc.status_code}",
-        "timestamp": __import__('datetime').datetime.utcnow().isoformat() + "Z",
-    }
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.detail if isinstance(exc.detail, str) else str(exc.detail),
+            "error_code": f"HTTP_{exc.status_code}",
+        },
+    )
 
 
 # ============================================================================

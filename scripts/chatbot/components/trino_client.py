@@ -284,25 +284,35 @@ class TrinoClient:
 
     @staticmethod
     def _adapt_sql_to_iceberg(sql: str) -> str:
-        """Rewrite SQL targeting Paimon/Fluss tables to use Iceberg equivalents."""
+        """Rewrite SQL targeting Paimon/Fluss tables to use Iceberg equivalents.
+
+        Only iceberg.security.historical_violence_incidents actually exists.
+        Queries against aggregate tables (daily_incident_stats, camera_stats)
+        are rewritten to inline aggregations over historical_violence_incidents.
+        """
         import re
+
+        RAW = "iceberg.security.historical_violence_incidents"
         result = sql
 
-        # Step 1: Fully-qualified catalog references (most specific first).
-        # Must run before bare-prefix and unqualified replacements.
+        # ── Step 1: Strip catalog/schema prefixes from aggregate table refs ──────
         for old, new in [
-            ("paimon.security.violence_incidents",    "iceberg.security.historical_violence_incidents"),
-            ("paimon.security.daily_incident_stats",  "iceberg.security.historical_daily_stats"),
-            ("paimon.security.camera_stats",          "iceberg.security.historical_camera_stats"),
-            ("fluss.security.hot_violence_alerts",    "iceberg.security.historical_violence_incidents"),
-            ("fluss.security.violence_incidents",     "iceberg.security.historical_violence_incidents"),
-            ("fluss.security.daily_incident_stats",   "iceberg.security.historical_daily_stats"),
-            ("fluss.security.camera_stats",           "iceberg.security.historical_camera_stats"),
-            # Iceberg paths missing the historical_ prefix (Gemini sometimes emits these)
-            ("iceberg.security.violence_incidents",   "iceberg.security.historical_violence_incidents"),
-            ("iceberg.security.daily_incident_stats", "iceberg.security.historical_daily_stats"),
-            ("iceberg.security.camera_stats",         "iceberg.security.historical_camera_stats"),
-            # Bare catalog prefixes
+            # daily_incident_stats → always rewrite to raw table
+            ("paimon.security.daily_incident_stats",  "daily_incident_stats"),
+            ("fluss.security.daily_incident_stats",   "daily_incident_stats"),
+            ("iceberg.security.daily_incident_stats", "daily_incident_stats"),
+            ("iceberg.security.historical_daily_stats", "daily_incident_stats"),
+            # camera_stats → always rewrite to raw table
+            ("paimon.security.camera_stats",          "camera_stats"),
+            ("fluss.security.camera_stats",           "camera_stats"),
+            ("iceberg.security.camera_stats",         "camera_stats"),
+            ("iceberg.security.historical_camera_stats", "camera_stats"),
+            # violence_incidents → map to the real Iceberg table
+            ("paimon.security.violence_incidents",    RAW),
+            ("fluss.security.hot_violence_alerts",    RAW),
+            ("fluss.security.violence_incidents",     RAW),
+            ("iceberg.security.violence_incidents",   RAW),
+            # Bare catalog prefixes (catch remaining paimon./fluss. refs)
             ("paimon.security.", "iceberg.security."),
             ("paimon.",          "iceberg."),
             ("fluss.security.",  "iceberg.security."),
@@ -310,16 +320,57 @@ class TrinoClient:
         ]:
             result = result.replace(old, new)
 
-        # Step 2: Unqualified table names — only when standalone.
-        # Negative lookbehind for word chars / dot prevents matching inside
-        # 'historical_violence_incidents' (preceded by '_') or after a catalog prefix.
+        # ── Step 2: Unqualified standalone table names ───────────────────────────
         for pattern, replacement in [
-            (r"(?<![.\w])violence_incidents\b",   "iceberg.security.historical_violence_incidents"),
-            (r"(?<![.\w])daily_incident_stats\b", "iceberg.security.historical_daily_stats"),
-            (r"(?<![.\w])camera_stats\b",         "iceberg.security.historical_camera_stats"),
-            (r"(?<![.\w])hot_violence_alerts\b",  "iceberg.security.historical_violence_incidents"),
+            (r"(?<![.\w])violence_incidents\b",   RAW),
+            (r"(?<![.\w])hot_violence_alerts\b",  RAW),
         ]:
             result = re.sub(pattern, replacement, result)
+
+        # ── Step 3: Rewrite queries against non-existent aggregate tables ──────────
+        # daily_incident_stats and camera_stats only exist in Paimon, not Iceberg.
+        # Replace the entire SQL with an equivalent query over the raw incidents table.
+        for agg_table in ("daily_incident_stats", "camera_stats"):
+            if not re.search(rf"\b{agg_table}\b", result, re.IGNORECASE):
+                continue
+
+            # Extract time filter interval if present (e.g. INTERVAL '24' HOUR, INTERVAL '7' DAY)
+            interval_match = re.search(
+                r"INTERVAL\s+'?(\d+)'?\s+(HOUR|DAY|MINUTE|MONTH|YEAR)",
+                result, re.IGNORECASE
+            )
+            if interval_match:
+                qty, unit = interval_match.group(1), interval_match.group(2).upper()
+                time_filter = f"timestamp >= NOW() - INTERVAL '{qty}' {unit}"
+            else:
+                time_filter = "1=1"  # no time restriction
+
+            # Detect GROUP BY camera — use camera-level aggregation
+            if agg_table == "camera_stats" or re.search(r"\bcamera_id\b", result, re.IGNORECASE):
+                result = (
+                    f"SELECT camera_id, COUNT(*) AS total_incidents,\n"
+                    f"       SUM(CASE WHEN is_violent THEN 1 ELSE 0 END) AS violent_incidents,\n"
+                    f"       AVG(risk_score) AS avg_risk_score\n"
+                    f"FROM {RAW}\n"
+                    f"WHERE {time_filter}\n"
+                    f"GROUP BY camera_id\n"
+                    f"ORDER BY violent_incidents DESC\n"
+                    f"LIMIT 20"
+                )
+            else:
+                # Generic daily aggregation
+                result = (
+                    f"SELECT CAST(timestamp AS DATE) AS stat_date,\n"
+                    f"       COUNT(*) AS total_incidents,\n"
+                    f"       SUM(CASE WHEN is_violent THEN 1 ELSE 0 END) AS violent_incidents,\n"
+                    f"       AVG(risk_score) AS avg_risk_score\n"
+                    f"FROM {RAW}\n"
+                    f"WHERE {time_filter}\n"
+                    f"GROUP BY CAST(timestamp AS DATE)\n"
+                    f"ORDER BY stat_date DESC\n"
+                    f"LIMIT 30"
+                )
+            break  # only one rewrite needed
 
         return result
 
@@ -366,13 +417,9 @@ class TrinoClient:
     def query_iceberg(self, sql: str, timeout: int = 30) -> List[Dict[str, Any]]:
         """Query COLD layer (Iceberg) via Trino."""
         logger.info(f"Querying Iceberg (COLD): {sql[:100]}...")
-
-        if "iceberg.security." not in sql and "iceberg." not in sql:
-            sql = sql.replace(
-                "historical_violence_incidents",
-                "iceberg.security.historical_violence_incidents"
-            )
-
+        # Always normalise table references — handles both direct Iceberg routing
+        # and Paimon/Fluss fallback paths
+        sql = self._adapt_sql_to_iceberg(sql)
         return self._query_trino(sql, catalog="iceberg", schema="security", timeout=timeout)
 
     def route_query(
@@ -390,7 +437,8 @@ class TrinoClient:
         _infra_errors = (
             "catalog_not_found", "catalog", "connection refused",
             "connection timeout", "timeout", "unable to connect",
-            "refused", "connect timed out",
+            "refused", "connect timed out", "table_not_found",
+            "does not exist", "no such table",
         )
 
         if "FLUSS" in layer_str or layer == DataLayer.FLUSS:
