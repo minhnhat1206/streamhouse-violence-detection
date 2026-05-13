@@ -15,20 +15,17 @@ from airflow.operators.python import PythonOperator
 
 FLINK_API = "http://jobmanager:8081"
 
-# Jobs that must always be running for the Streamhouse pipeline
+# Jobs identified by substring match against Flink job names.
+# Flink names jobs after the sink table, e.g. "insert-into_fluss.security.hot_violence_alerts"
 REQUIRED_JOBS = [
-    "sink_to_fluss",
-    "sink_to_paimon",
-    "archive_to_iceberg",
-    "aggregate_paimon",
+    "hot_violence_alerts",       # sink_to_fluss → insert-into_fluss.security.hot_violence_alerts
+    "violence_incidents",        # sink_to_paimon → insert-into_paimon.security.violence_incidents
 ]
 
-# Map job name → PyFlink script path inside jobmanager container
+# Map job key → PyFlink script path inside jobmanager container
 JOB_SCRIPTS = {
-    "sink_to_fluss":      "/opt/flink/usrlib/sink_to_fluss.py",
-    "sink_to_paimon":     "/opt/flink/usrlib/sink_to_paimon.py",
-    "archive_to_iceberg": "/opt/flink/usrlib/archive_to_iceberg.py",
-    "aggregate_paimon":   "/opt/flink/usrlib/aggregate_paimon.py",
+    "hot_violence_alerts": "/opt/flink/scripts/sink_to_fluss.py",
+    "violence_incidents":  "/opt/flink/scripts/sink_to_paimon.py",
 }
 
 
@@ -45,11 +42,15 @@ def check_and_restart_flink_jobs(**context) -> dict:
         log.error("Cannot reach Flink API at %s: %s", FLINK_API, exc)
         raise
 
-    running = {j["name"] for j in jobs_data if j["state"] == "RUNNING"}
-    log.info("Currently running Flink jobs: %s", running)
+    running_names = {j["name"] for j in jobs_data if j["state"] == "RUNNING"}
+    log.info("Currently running Flink jobs: %s", running_names)
 
-    missing = [name for name in REQUIRED_JOBS if name not in running]
-    results = {"checked": REQUIRED_JOBS, "running": list(running), "missing": missing, "restarted": []}
+    # Match by substring — Flink names jobs after the sink table
+    def is_running(key):
+        return any(key in name for name in running_names)
+
+    missing = [key for key in REQUIRED_JOBS if not is_running(key)]
+    results = {"checked": REQUIRED_JOBS, "running": list(running_names), "missing": missing, "restarted": []}
 
     for job_name in missing:
         script = JOB_SCRIPTS.get(job_name)
@@ -60,12 +61,12 @@ def check_and_restart_flink_jobs(**context) -> dict:
         log.warning("Flink job '%s' NOT running — attempting restart via PyFlink.", job_name)
         try:
             cmd = [
-                "docker", "exec", "flink-jobmanager",
-                "/opt/flink/bin/flink", "run",
+                "docker", "exec", "jobmanager",
+                "/opt/flink/bin/flink", "run", "--detached",
                 "--python", script,
-                "--pyFiles", "/opt/flink/usrlib/",
+                "--pyFiles", "/opt/flink/scripts/",
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
                 log.info("Job '%s' restarted successfully.", job_name)
                 results["restarted"].append(job_name)
