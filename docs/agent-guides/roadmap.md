@@ -55,8 +55,6 @@
 
 
 
-uuuuuuuu
-
 ---
 
 ## Week 7-8: Agentic AI & Demo + Frame Evidence Storage
@@ -137,15 +135,24 @@ uuuuuuuu
 - [ ] Docker image optimization - Size, layer caching efficiency
 - **Deliverable**: Production-ready system, fully tested, documented
 
-#### ⏳ Week 8: React Frontend Integration (NEXT PRIORITY)
-- [ ] Scaffold Vite + React + Tailwind app in `frontend/vigilance-ai_-violence-detection-dashboard/`
-- [ ] Vigilance Terminal page — chatbot UI wired to `POST http://localhost:5002/chat`
-- [ ] Command Center page — real-time incident feed polling Paimon/Iceberg
-- [ ] Incident Data Viewer — paginated table with filters
-- [ ] Analytics Dashboard — charts (daily counts, camera stats, risk score distribution)
-- [ ] CORS config in FastAPI (allow React dev server origin `localhost:5173`)
-- [ ] Docker service for frontend (nginx static serve, port 3000)
-- **Deliverable**: Fully integrated React dashboard for live demo
+#### ✅ Streamhouse Architecture Consolidation (Phiên 24 — 2026-05-13)
+- [x] Merge hoàn chỉnh kiến trúc Streamhouse từ Claude worktree vào `devNhat`
+- [x] Xóa toàn bộ Spark-era files (Dockerfile.spark, config/spark/, backend Node.js)
+- [x] Fix data contract bypass — cả 2 producer đều đi qua validator
+- [x] Fix duplicate Kafka messages — `KAFKA_TOPIC` về `urban-safety-alerts`
+- [x] Thêm 4 Kafka topics đúng vào `create-topics.sh`
+- [x] Tạo `start-pipeline.sh` — bootstrap 8 bước tự động
+- [x] Viết lại README — xóa Spark docs, mô tả đúng Streamhouse
+- [x] Xóa API key bị lộ khỏi git history (`git-filter-repo`)
+- [x] Thêm `Violence-Urban-Safety-UI` làm git submodule hợp lệ
+
+#### ⏳ Week 8: Full Pipeline Test + React Frontend (CURRENT PRIORITY)
+- [ ] **[P0] Test pipeline end-to-end với RTSP thật** — xem `TEST_PLAN.md`
+- [ ] **[P0] Validate chatbot truy vấn đúng layer** (HOT/WARM/COLD routing)
+- [ ] **[P1] React Frontend** — `Violence-Urban-Safety-UI` kết nối chatbot API port 5002
+- [ ] CORS config trong FastAPI cho React dev server
+- [ ] Prometheus/Grafana dashboard cho latency per layer
+- [ ] Airflow DAG verify tự restart Flink jobs khi mất
 
 **Deliverable (Week 7-8 Complete)**: Complete working Agentic RAG system + frame evidence + demo ready
 
@@ -223,6 +230,88 @@ uuuuuuuu
 - <1 min for warm queries (Paimon)
 - <5 min for cold queries (Iceberg)
 - Show Grafana dashboard with latency metrics
+
+---
+
+## 🧪 Test Plan — 2 Giờ: Pipeline RTSP + Chatbot (2026-05-13)
+
+> Mục tiêu: Xác nhận pipeline từ RTSP thật → Streamhouse → Chatbot hoạt động đúng.
+> File chi tiết: `docs/agent-guides/TEST_PLAN_PIPELINE.md`
+
+### Phase 1 — Khởi động (0:00–0:20)
+
+| Bước | Lệnh | Kết quả kỳ vọng |
+|------|------|-----------------|
+| 1. Tạo network | `docker network create violence-detection-net` | OK hoặc "already exists" |
+| 2. Bootstrap pipeline | `bash scripts/setup/start-pipeline.sh --profile streaming` | 8 bước OK, 4 Flink jobs submitted |
+| 3. Dừng inference-mock | `docker exec inference-mock touch /app/tmp/STOP` | Tránh duplicate data |
+| 4. Kiểm tra Flink UI | http://localhost:8081 | Running Jobs = 4 |
+| 5. Kiểm tra MinIO | http://localhost:9001 | Bucket `warehouse` tồn tại |
+
+### Phase 2 — Verify RTSP data flow (0:20–0:50)
+
+| Bước | Kiểm tra | Kết quả kỳ vọng |
+|------|---------|-----------------|
+| 6. Kafka raw topic | `kafka-console-consumer --topic urban-safety-alerts --max-messages 5` | JSON events từ cam_01..cam_15 |
+| 7. Kafka validated topic | `kafka-console-consumer --topic hot-violence-alerts-valid --max-messages 5` | Cùng events với `is_valid: true` |
+| 8. Kafka quarantine | `kafka-console-consumer --topic urban-safety-quarantine --max-messages 3` | Trống (mock data luôn hợp lệ) |
+| 9. Paimon snapshot | `mc ls minio/warehouse/paimon/security.db/violence_incidents/snapshot/` | `snapshot-1`, `snapshot-2`... xuất hiện sau 30-60s |
+| 10. Data contract test | Inject record lỗi vào `urban-safety-alerts` | Xuất hiện trong quarantine với `violations` |
+
+**Test data contract:**
+```bash
+docker exec kafka /opt/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server localhost:9092 --topic urban-safety-alerts << 'EOF'
+{"event_id":"bad-001","camera_id":"INVALID","timestamp":"2099-01-01T00:00:00Z","is_violent":true,"risk_score":1.5,"confidence":0.9}
+EOF
+```
+
+### Phase 3 — Chatbot layer routing (0:50–1:30)
+
+Sau khi có data trong Paimon (chờ ít nhất 2-3 phút sau khi Flink jobs chạy):
+
+| Query | Layer kỳ vọng | Kiểm tra |
+|-------|--------------|---------|
+| `"15 phút qua có bao nhiêu alert?"` | HOT (Fluss) | `layer: hot` trong response |
+| `"1 tiếng qua có bao nhiêu sự cố?"` | HOT (Fluss) | `layer: hot` |
+| `"Hôm nay camera nào nhiều sự cố nhất?"` | WARM (Paimon) | `layer: warm`, rows > 0 |
+| `"24 giờ qua tổng cộng bao nhiêu vụ bạo lực?"` | WARM (Paimon) | `layer: warm`, số thực tế |
+| `"7 ngày qua xu hướng bạo lực như thế nào?"` | WARM (Paimon) | `layer: warm` |
+| `"Tháng trước có bao nhiêu vụ lịch sử?"` | COLD (Iceberg) | `layer: cold` |
+
+```bash
+# Template test chatbot
+curl -s -X POST http://localhost:5002/chat \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Hôm nay camera nào nhiều sự cố nhất?"}' | python -m json.tool
+```
+
+Response hợp lệ phải có:
+- `answer`: câu trả lời tiếng Việt, > 20 ký tự
+- `layer`: đúng với kỳ vọng (hot/warm/cold)
+- `citations.source_table`: tên bảng thực tế
+- `citations.row_count`: > 0 (nếu WARM/COLD có data)
+
+### Phase 4 — Stress test & cleanup (1:30–2:00)
+
+| Bước | Mục tiêu |
+|------|---------|
+| Query liên tiếp 5 câu | Chatbot không bị queue deadlock |
+| Query tiếng Việt không dấu | Routing vẫn đúng ("hom nay" → WARM) |
+| Dừng pipeline | `docker exec rtsp-inference-mock touch /app/tmp/STOP` |
+| Verify Paimon accumulate | Count tăng so với Phase 2 |
+
+### Kết quả Pass/Fail
+
+| Tiêu chí | Pass |
+|---------|------|
+| 4 Flink jobs RUNNING | ✓ |
+| Kafka `urban-safety-alerts` nhận data từ RTSP | ✓ |
+| Validator route đúng valid/invalid | ✓ |
+| Paimon có snapshot sau 60s | ✓ |
+| Chatbot routing HOT/WARM/COLD đúng 6/6 | ✓ |
+| Chatbot response có citations | ✓ |
+| Không có 500 error trong 10 queries | ✓ |
 
 ---
 
