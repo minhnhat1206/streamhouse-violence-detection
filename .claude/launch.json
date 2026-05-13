@@ -7,6 +7,13 @@
       "runtimeArgs": ["run", "dev"],
       "port": 5173,
       "cwd": "e2e-test-dashboard"
+    },
+    {
+      "name": "violence-ui",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5174"],
+      "port": 5174,
+      "cwd": "C:/Users/user/Desktop/Khoa_Luan/realtime-violence-detection/Violence-Urban-Safety-UI/frontend"
     }
   ]
 }

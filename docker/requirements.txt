@@ -1,6 +1,28 @@
-# docker/requirements.txt
-opencv-python-headless 
-minio                   
-kafka-python           
-requests               
-numpy                  
+# Core Dependencies
+requests
+boto3
+minio
+kafka-python
+
+# FastAPI & Web
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-multipart==0.0.6
+
+# LangGraph & LLM (compatible versions tested)
+langchain>=0.2.10
+langgraph>=0.1.10
+google-generativeai>=0.5.0
+
+# Vector DB & Embeddings
+chromadb>=0.4.14
+sentence-transformers>=2.2.2
+
+# Database
+trino>=0.320.0
+
+# Utilities
+python-dotenv==1.0.0
+python-json-logger==2.0.7

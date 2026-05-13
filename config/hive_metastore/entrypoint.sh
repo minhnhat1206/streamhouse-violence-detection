@@ -16,6 +16,20 @@ MYSQL_DB=${METASTORE_DB_NAME:-metastore}
 echo "[entrypoint] Hive Metastore startup wrapper"
 echo "[entrypoint] HIVE_CONF_DIR=${HIVE_CONF_DIR}, ACTION=${ACTION}"
 
+# Resolve ${env:...} placeholders in hive-site.xml (JDO/schematool doesn't support them)
+# Config file is bind-mounted read-only, so copy to writable dir and re-export HIVE_CONF_DIR
+WRITABLE_CONF="/tmp/hive-conf"
+mkdir -p "${WRITABLE_CONF}"
+cp "${HIVE_CONF_DIR}/hive-site.xml" "${WRITABLE_CONF}/hive-site.xml"
+sed -i \
+  -e "s|\${env:METASTORE_DB_USER}|${MYSQL_USER}|g" \
+  -e "s|\${env:METASTORE_DB_PASSWORD}|${MYSQL_PASS}|g" \
+  -e "s|\${env:MINIO_ROOT_USER}|${MINIO_ROOT_USER:-minio}|g" \
+  -e "s|\${env:MINIO_ROOT_PASSWORD}|${MINIO_ROOT_PASSWORD:-mypassword}|g" \
+  "${WRITABLE_CONF}/hive-site.xml"
+export HIVE_CONF_DIR="${WRITABLE_CONF}"
+echo "[entrypoint] Resolved env vars, HIVE_CONF_DIR=${HIVE_CONF_DIR}"
+
 wait_for_mysql() {
   echo "[entrypoint] waiting for ${WAIT_FOR_HOST}:${WAIT_FOR_PORT} (timeout ${WAIT_TIMEOUT}s)..."
   local n=0
