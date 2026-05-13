@@ -1,138 +1,160 @@
-"""
-Inference Mock — simple data generator (no RTSP dependency).
-Generates mock violence detection events and publishes to Kafka.
-Use when RTSP streams are unavailable or for baseline throughput testing.
-"""
-
-import csv
-import json
-import logging
-import os
-import random
-import sys
 import time
+import json
+import random
+import csv
+import sys
+import os
 import uuid
-from datetime import datetime, timezone
-from pathlib import Path
-
 from kafka import KafkaProducer
-from kafka.errors import NoBrokersAvailable
+from datetime import datetime, timezone
 
-# ── CONFIG ─────────────────────────────────────────────────────────────────────
-KAFKA_BROKER  = os.getenv("KAFKA_BROKER", "kafka:9092")
-KAFKA_TOPIC   = os.getenv("KAFKA_TOPIC",  "urban-safety-alerts")
+# ================= CONFIGURATION =================
+# Ưu tiên lấy từ biến môi trường nếu có
+KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "urban-safety-alerts")
 METADATA_FILE = os.getenv("METADATA_FILE", "/app/data/metadata/camera_registry.csv")
-INTERVAL_S    = float(os.getenv("INTERVAL_S", "2.0"))
-STOP_FILE     = os.getenv("STOP_FILE", "/app/tmp/STOP")
-MODEL_VERSION = "VioMobileNet-mock-v2.1"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-log = logging.getLogger("inference-mock")
+# Manual stop: tạo file này để dừng script
+STOP_FILE = os.getenv("STOP_FILE", "/app/tmp/STOP")
 
+# Tần suất gửi dữ liệu (giây)
+HEARTBEAT_INTERVAL = 5.0  # Khi bình thường
+ALERT_INTERVAL = 0.5      # Khi có bạo lực
 
-# ── KAFKA INIT ─────────────────────────────────────────────────────────────────
-def _connect_kafka(max_retries: int = 5) -> KafkaProducer:
-    for attempt in range(1, max_retries + 1):
-        try:
-            return KafkaProducer(
-                bootstrap_servers=[KAFKA_BROKER],
-                value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-                key_serializer=lambda k: k.encode("utf-8") if k else None,
-                acks="all",
-                retries=3,
-            )
-        except NoBrokersAvailable as e:
-            log.warning("Waiting for Kafka... (%d retries left): %s", max_retries - attempt, e)
-            if attempt < max_retries:
-                time.sleep(4)
-    log.error("Could not connect to Kafka. Exiting.")
-    sys.exit(1)
+# Xác suất chuyển đổi trạng thái (để tạo dữ liệu biến động)
+PROB_START_VIOLENCE = 0.02  # 2% cơ hội bắt đầu bạo lực mỗi vòng lặp
+PROB_STOP_VIOLENCE = 0.15   # 15% cơ hội kết thúc bạo lực
 
+EVENT_TYPES = ["FIGHTING", "ASSAULT", "STABBING", "SHOOTING"]
 
-# ── CAMERA REGISTRY ────────────────────────────────────────────────────────────
-def load_cameras() -> list[dict]:
+def json_serializer(data):
+    return json.dumps(data).encode("utf-8")
+
+def load_camera_registry(csv_path):
+    registry = {}
     try:
-        with open(METADATA_FILE, newline="", encoding="utf-8") as f:
-            cameras = list(csv.DictReader(f))
-        log.info("Loaded %d cameras from registry.", len(cameras))
-        return cameras
-    except FileNotFoundError:
-        log.error("Registry not found: %s — generating synthetic cameras.", METADATA_FILE)
-        return [{"camera_id": f"cam_{i:02d}", "street": f"Street {i}", "district": "Quận 1",
-                 "city": "TP. Hồ Chí Minh", "latitude": "10.77", "longitude": "106.70",
-                 "ward": ""} for i in range(1, 16)]
+        if not os.path.exists(csv_path):
+            print(f"Error: Metadata file {csv_path} not found.")
+            return {}
+            
+        with open(csv_path, mode='r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    row['latitude'] = float(row['latitude'])
+                    row['longitude'] = float(row['longitude'])
+                except: pass
+                registry[row['camera_id']] = row
+        print(f"Loaded {len(registry)} cameras from CSV.")
+        return registry
+    except Exception as e:
+        print(f"CSV Read Error: {e}")
+        return {}
 
-
-# ── EVENT GENERATOR ────────────────────────────────────────────────────────────
-_LABELS_WEIGHTS = [("normal", 0.70), ("violence", 0.20), ("crowd", 0.07), ("anomaly", 0.03)]
-_LABELS, _WEIGHTS = zip(*_LABELS_WEIGHTS)
-
-
-def generate_event(camera: dict) -> dict:
-    label = random.choices(_LABELS, weights=_WEIGHTS, k=1)[0]
-    if label == "normal":
-        score = random.uniform(0.02, 0.45)
-    elif label == "violence":
-        score = random.uniform(0.75, 0.99)
-    elif label == "crowd":
-        score = random.uniform(0.50, 0.80)
-    else:
-        score = random.uniform(0.40, 0.65)
-
-    return {
-        "incident_id":   str(uuid.uuid4()),
-        "camera_id":     camera["camera_id"],
-        "timestamp":     datetime.now(timezone.utc).isoformat(),
-        "risk_score":    round(score, 4),
-        "label":         label,
-        "location":      camera.get("street", camera.get("ward", "Unknown")),
-        "district":      camera.get("district", ""),
-        "city":          camera.get("city", "TP. Hồ Chí Minh"),
-        "latitude":      float(camera.get("latitude", 0) or 0),
-        "longitude":     float(camera.get("longitude", 0) or 0),
-        "model_version": MODEL_VERSION,
-        "frame_path":    f"mock-frames/{camera['camera_id']}/{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg",
-        "source":        "inference_mock",
-    }
-
-
-# ── MAIN ───────────────────────────────────────────────────────────────────────
 def main():
-    cameras  = load_cameras()
-    producer = _connect_kafka()
-    log.info("Inference Mock started. Publishing to %s every %.1fs per camera.", KAFKA_TOPIC, INTERVAL_S)
+    print(f"Starting Mock Inference Producer...")
+    print(f"Kafka Broker: {KAFKA_BROKER}")
+    print(f"Topic: {KAFKA_TOPIC}")
 
-    counter = 0
+    # 1. Kết nối Kafka
+    producer = None
+    retries = 5
+    while retries > 0:
+        try:
+            producer = KafkaProducer(
+                bootstrap_servers=[KAFKA_BROKER],
+                value_serializer=json_serializer,
+                acks=1
+            )
+            print("Successfully connected to Kafka.")
+            break
+        except Exception as e:
+            print(f"Waiting for Kafka... ({retries} retries left): {e}")
+            retries -= 1
+            time.sleep(5)
+    
+    if not producer:
+        print("Could not connect to Kafka. Exiting.")
+        sys.exit(1)
+
+    # 2. Load Camera Metadata
+    registry = load_camera_registry(METADATA_FILE)
+    if not registry:
+        sys.exit(1)
+
+    # 3. Xóa stop file cũ nếu còn tồn tại từ lần chạy trước
+    if os.path.exists(STOP_FILE):
+        os.remove(STOP_FILE)
+        print(f"Cleared old stop file: {STOP_FILE}")
+
+    # 4. Quản lý trạng thái camera (để giả lập logic thời gian thực)
+    camera_states = {cam_id: {"is_violent": False, "last_sent": 0} for cam_id in registry}
+    msg_count = 0
+
     try:
-        while True:
-            if Path(STOP_FILE).exists():
-                log.info("STOP file found. Exiting.")
-                break
+        while not os.path.exists(STOP_FILE):
+            now = time.time()
+            
+            for cam_id, meta in registry.items():
+                state = camera_states[cam_id]
+                
+                # Logic chuyển đổi trạng thái ngẫu nhiên
+                if not state["is_violent"]:
+                    if random.random() < PROB_START_VIOLENCE:
+                        state["is_violent"] = True
+                        print(f"!!! [ALERT] Violence detected on {cam_id}")
+                else:
+                    if random.random() < PROB_STOP_VIOLENCE:
+                        state["is_violent"] = False
+                        print(f"--- [NORMAL] Situation cleared on {cam_id}")
 
-            camera = random.choice(cameras)
-            event  = generate_event(camera)
-            producer.send(KAFKA_TOPIC, value=event, key=camera["camera_id"])
-            counter += 1
+                # Kiểm tra tần suất gửi
+                interval = ALERT_INTERVAL if state["is_violent"] else HEARTBEAT_INTERVAL
+                if now - state["last_sent"] >= interval:
+                    
+                    # Tạo dữ liệu giả theo Data Contract
+                    risk_score = random.uniform(0.75, 0.99) if state["is_violent"] else random.uniform(0.01, 0.15)
+                    event_type = random.choice(EVENT_TYPES) if state["is_violent"] else None
+                    confidence = round(random.uniform(0.85, 0.99), 4) if state["is_violent"] else round(random.uniform(0.3, 0.7), 4)
 
-            if event["label"] != "normal":
-                log.info("[%d] %s label=%s score=%.3f", counter, camera["camera_id"],
-                         event["label"], event["risk_score"])
-            elif counter % 50 == 0:
-                log.info("[%d] heartbeat — last: %s normal %.3f",
-                         counter, camera["camera_id"], event["risk_score"])
+                    payload = {
+                        "event_id": str(uuid.uuid4()),
+                        "camera_id": cam_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "is_violent": state["is_violent"],
+                        "risk_score": round(risk_score, 4),
+                        "confidence": confidence,
+                        "event_type": event_type,
+                        "location": {
+                            "city": meta.get("city", "Unknown"),
+                            "district": meta.get("district", "Unknown"),
+                            "ward": meta.get("ward", "Unknown"),
+                            "street": meta.get("street", "Unknown"),
+                            "lat": meta.get("latitude"),
+                            "long": meta.get("longitude")
+                        },
+                        "metadata": {
+                            "fps": random.randint(24, 30),
+                            "latency_ms": random.randint(10, 50),
+                            "mock": True
+                        }
+                    }
 
-            time.sleep(INTERVAL_S)
+                    # Gửi tới Kafka
+                    producer.send(KAFKA_TOPIC, value=payload)
+                    state["last_sent"] = now
+                    msg_count += 1
 
+            # Sleep ngắn để giảm tải CPU
+            time.sleep(0.1)
+
+        print(f"Stop file detected: {STOP_FILE}. Shutting down gracefully...")
     except KeyboardInterrupt:
-        log.info("KeyboardInterrupt — stopping.")
+        print("Stopping Mock Inference Producer...")
     finally:
-        producer.flush()
-        producer.close()
-        log.info("Sent %d events total.", counter)
-
+        print(f"Total messages sent: {msg_count}")
+        if producer:
+            producer.close()
 
 if __name__ == "__main__":
     main()
