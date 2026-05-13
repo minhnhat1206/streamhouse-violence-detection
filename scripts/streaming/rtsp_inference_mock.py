@@ -34,7 +34,6 @@ from kafka import KafkaProducer
 # ================= CONFIGURATION =================
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "urban-safety-alerts")
-KAFKA_VALIDATED_TOPIC = "hot-violence-alerts-valid"  # Frame extractor listens on this
 METADATA_FILE = os.getenv("METADATA_FILE", "/app/data/metadata/camera_registry.csv")
 STOP_FILE = os.getenv("STOP_FILE", "/app/tmp/STOP")
 CAPTURE_FPS = float(os.getenv("RTSP_FPS", "1"))       # frames/sec per camera
@@ -208,12 +207,11 @@ class CameraWorker(threading.Thread):
                 "rtsp_connected": True,
                 "thumbnail": result["thumbnail_b64"],
             },
-            "is_valid": True,  # Data contract validation passed
         }
-        # Publish to both raw topic AND validated topic (frame extractor expects validated)
+        # Note: is_valid is NOT set here — data_contract_validator Flink job sets it
+        # Publish raw event — data_contract_validator Flink job routes to hot-violence-alerts-valid
         self.producer.send(KAFKA_TOPIC, value=payload)
-        self.producer.send(KAFKA_VALIDATED_TOPIC, value=payload)
-        self.producer.flush()  # Ensure messages are sent immediately
+        self.producer.flush()
         self.last_sent = time.time()
 
         # DEBUG: Log payload structure
