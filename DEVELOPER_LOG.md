@@ -44,6 +44,67 @@ Xây dựng và tối ưu hóa hệ thống phát hiện bạo lực thời gian
 ## 🤝 Handover Protocol (MUST READ)
 *Mỗi khi chuyển đổi Agent (Gemini <-> Claude), Agent hiện tại PHẢI cập nhật phần "Last State" bên dưới.*
 
+### 📍 Last State (Updated: 2026-05-07 — Phiên 23) ✅ AIRFLOW + IMAGE RETRIEVAL VERIFIED
+
+- **Agent vừa làm:** Claude (Session 23 — Airflow Orchestration + Chatbot Image Retrieval)
+- **Trạng thái:** ✅ HOÀN THÀNH: Airflow deployed và DAGs load (3 DAGs), chatbot image retrieval fixed và verified end-to-end, committed 2 commits.
+
+---
+
+**🎯 Mục tiêu phiên 23:**
+1. Đọc `docs/agent-guides/STREAMHOUSE_AND_CHATBOT_2026-05-07.md` (worktree) và implement Airflow service
+2. Test Airflow hoạt động thành công
+3. Kiểm tra + fix chức năng truy xuất ảnh trong Violence-Urban-Safety-UI
+
+---
+
+**✅ Việc đã làm:**
+
+**Commit 1 — `6a810b3`**: `feat: airflow orchestration service + 3 DAGs for Streamhouse pipeline`
+- Thêm Airflow 2.9.1 vào `docker/docker-compose.yml` (profile `orchestration`, port 8089)
+- Tạo `docker/airflow/dags/`:
+  - `flink_jobs_monitor.py` — mỗi 15 phút, poll Flink REST API `/jobs/overview`, restart job nào bị thiếu (4 jobs: sink_to_fluss, sink_to_paimon, archive_to_iceberg, aggregate_paimon)
+  - `streamhouse_archive.py` — Chủ Nhật 02:00, archive Paimon→Iceberg + expire snapshots >30d/90d
+  - `iceberg_data_quality.py` — Hàng ngày 06:00, validate null counts, 24h ingestion rate, violent ratio
+- Tạo `docker/airflow/requirements.txt`, `.gitignore`
+- Config: SequentialExecutor + SQLite (LocalExecutor không work với SQLite), 768m RAM, 1 gunicorn worker, auto-create default_pool
+- **Lessons learned**: `airflow db migrate` → fail (cần `airflow db init` lần đầu), default_pool phải tạo bằng `airflow pools set`, 512m OOM với 4 workers → giảm còn 1 worker + tăng lên 768m
+
+**Commit 2 — `2ab5c04`**: `feat: chatbot image retrieval — frame_url in /api/recent-incidents + /api/evidence`
+- **Bug fix**: `scripts/chatbot/app.py` query sai table `violence_incidents` → fix thành `historical_violence_incidents`
+- Thêm `_minio_list_objects()` — dùng S3 XML API (không cần MinIO client library)
+- Thêm `_get_frame_url()` — 3 priority fallbacks:
+  1. Direct HEAD check: `evidence-frames/{camera_id}/{date}/{incident_id}.jpg`
+  2. List `evidence-frames/{camera_id}/{date}/` → first object
+  3. List `evidence-frames/{camera_id}/` → any image (fallback cho seed data inc_XXX)
+- Thêm `GET /api/evidence?camera_id=X&date=YYYY-MM-DD` endpoint mới
+- **Kết quả test**: 5/5 incidents có `frame_url`, images return HTTP 200 + JPEG magic bytes FFD8
+
+---
+
+**📊 Trạng thái hệ thống sau phiên 23:**
+
+```
+Airflow:      ✅ RUNNING — port 8089 (admin/admin), 3 DAGs loaded, scheduler healthy
+              Start: docker compose --profile orchestration up -d airflow
+MinIO:        ✅ RUNNING — evidence-frames bucket (public), cam_01~15, dates 2026-04-28~05-03
+Trino:        ✅ RUNNING — iceberg.security.historical_violence_incidents (10 seed rows)
+Chatbot API:  ✅ /api/recent-incidents trả frame_url (MinIO images) + /api/evidence endpoint
+UI:           ✅ Violence-Urban-Safety-UI chạy port 3000 (npm run dev), proxy → port 5002
+```
+
+**⚠️ Trạng thái Flink jobs (2026-05-07):**
+- Jobmanager đang chạy (orphan container từ stack cũ)
+- Flink jobs có thể đã mất sau các lần restart — cần re-submit nếu không có data HOT/WARM
+
+---
+
+**🔜 Việc cần làm tiếp (ưu tiên cao nhất):**
+
+👉 **[P0] Flink Auto-Submit Script + Full Demo Stack Startup** — Xem plan chi tiết trong session này.
+
+---
+
 ### 📍 Last State (Updated: 2026-05-02 — Phiên 22) ✅ FULL E2E 8/8 PASS + CHATBOT DOCS
 
 - **Agent vừa làm:** Claude (Session 22 — Full E2E Verification, Pipeline Proof & Chatbot Documentation)
