@@ -27,6 +27,9 @@ tmp/
 *.pid
 pids/
 
+# Test files with hardcoded credentials — never commit
+scripts/chatbot/test_e2e_gemini.py
+
 # Claude Code - agent-specific (do not share)
 .claude/settings.local.json
 .claude/conversations/
