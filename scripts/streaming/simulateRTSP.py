@@ -1,167 +1,184 @@
+"""
+simulateRTSP.py — Simulate RTSP streams using RWF-2000 video clips.
+Reads playlist files and pushes each camera as an RTSP stream to MediaMTX.
+
+Usage:
+    python simulateRTSP.py start
+"""
+
+import glob
+import logging
 import os
-import random
+import signal
 import subprocess
+import sys
+import threading
 import time
-import csv
-import requests
-from natsort import natsorted
+from pathlib import Path
 
-# ================= CẤU HÌNH =================
-VIOLENCE_DIR = "/app/data/raw/RWF-2000/norTrain/Fight"
-NON_VIOLENCE_DIR = "/app/data/raw/RWF-2000/norTrain/NonFight"
-PLAYLIST_DIR = "/app/data/playlist"
-METADATA_FILE = "/app/data/metadata/camera_registry.csv"
+# ── CONFIG ─────────────────────────────────────────────────────────────────────
+MEDIAMTX_HOST = os.getenv("MEDIAMTX_HOST", "mediamtx")
+MEDIAMTX_PORT = int(os.getenv("MEDIAMTX_PORT", "8554"))
+PLAYLIST_DIR  = os.getenv("PLAYLIST_DIR",  "/app/data/playlist")
+FPS           = os.getenv("STREAM_FPS",    "15")
+STOP_FILE     = os.getenv("STOP_FILE",     "/app/tmp/STOP")
 
-API_HOST_IP = "192.168.0.200"
-API_PORT = 8000
-API_URL = f"http://{API_HOST_IP}:{API_PORT}"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+log = logging.getLogger("simulateRTSP")
 
-TOTAL_TO_START = 8
-SIMULATION_DURATION_MINUTES = 60
+# ── BANNER ─────────────────────────────────────────────────────────────────────
+print("=" * 55)
+print("  simulateRTSP — RWF-2000 RTSP Stream Simulator")
+print("=" * 55)
+print(f"  MediaMTX: {MEDIAMTX_HOST}:{MEDIAMTX_PORT}")
+print(f"  Playlists: {PLAYLIST_DIR}")
+print(f"  FPS: {FPS}")
+print("=" * 55)
 
-# ================= VIDEO MANAGER =================
 
-class VideoManager:
-    def __init__(self, v_dir, nv_dir):
-        self.v_events = self._load_and_group_videos(v_dir)
-        self.nv_events = self._load_and_group_videos(nv_dir)
-        print(f"[*] Loaded {len(self.v_events)} violence & {len(self.nv_events)} non-violence events")
+def get_playlists():
+    """Return sorted list of (cam_id, playlist_path) tuples."""
+    pattern = os.path.join(PLAYLIST_DIR, "playlist_*.txt")
+    files = sorted(glob.glob(pattern))
+    result = []
+    for f in files:
+        name = Path(f).stem  # e.g. playlist_cam_01
+        cam_id = name.replace("playlist_", "")  # e.g. cam_01
+        result.append((cam_id, f))
+    return result
 
-    def _load_and_group_videos(self, directory):
-        groups = {}
-        if not os.path.exists(directory):
-            print(f"[!] Warning: Directory {directory} not found")
-            return []
-        for f in os.listdir(directory):
-            if not f.endswith(('.mp4', '.avi')):
-                continue
-            base = "_".join(f.split('_')[:-1])
-            groups.setdefault(base, []).append(os.path.join(directory, f))
-        return [natsorted(v) for v in groups.values()]
 
-    def random_event(self, violence=False):
-        source = self.v_events if violence else self.nv_events
-        return random.choice(source) if source else []
+def stream_camera(cam_id: str, playlist_path: str, stop_event: threading.Event):
+    """Stream a single camera via ffmpeg → RTSP to MediaMTX (loops forever)."""
+    rtsp_url = f"rtsp://{MEDIAMTX_HOST}:{MEDIAMTX_PORT}/{cam_id}"
+    logger = logging.getLogger(f"cam.{cam_id}")
+    logger.info("Starting stream → %s", rtsp_url)
 
-# ================= CAMERA SIM =================
+    while not stop_event.is_set():
+        # Wait for MediaMTX to be ready
+        time.sleep(1)
 
-class CameraSimulator:
-    def __init__(self, cam_id, rtsp_url, vm, risk_level):
-        self.cam_id = cam_id
-        self.rtsp_url = rtsp_url
-        self.vm = vm
-        self.risk_level = risk_level
-        self.playlist = f"{PLAYLIST_DIR}/playlist_{cam_id}.txt"
-
-    def generate_playlist(self):
-        playlist = []
-        current = 0
-        target = SIMULATION_DURATION_MINUTES * 60
-
-        config = {
-            "high": {"prob": 0.8, "min_safe": 60, "max_safe": 120},
-            "medium": {"prob": 0.5, "min_safe": 300, "max_safe": 600},
-            "low": {"prob": 0.2, "min_safe": 900, "max_safe": 1800}
-        }
-        cfg = config.get(self.risk_level.lower(), config["low"])
-
-        while current < target:
-            # 1. SAFE video segment (Non-Violence)
-            # Add loop logic for safe clips to avoid too fast scene switching
-            safe_time_target = random.randint(cfg["min_safe"], cfg["max_safe"])
-            t_safe = 0
-            while t_safe < safe_time_target:
-                ev = self.vm.random_event(False)
-                if not ev: break
-                
-                # Loop each safe clip 3 times for stable image
-                for _ in range(3):
-                    playlist.extend(ev)
-                    t_safe += len(ev) * 5 # Assume each clip is 5s long
-            current += t_safe
-
-            # 2. VIOLENCE video segment (Violence)
-            if random.random() < cfg["prob"]:
-                ev = self.vm.random_event(True)
-                if ev:
-                    # REQUIREMENT: Lasts 1 - 2 minutes (60s - 120s)
-                    # Assume each original clip is 5s -> need 12 to 24 loops
-                    loop_count = random.randint(12, 24)
-                    
-                    # Add to playlist
-                    for _ in range(loop_count):
-                        playlist.extend(ev)
-                    
-                    actual_duration_sec = loop_count * 5
-                    current += actual_duration_sec
-                    
-                    print(f"[SIM] {self.cam_id}: Injected violence lasting {actual_duration_sec}s (~{actual_duration_sec/60:.1f} minutes)")
-
-        with open(self.playlist, "w") as f:
-            for p in playlist:
-                f.write("file '{}'\n".format(p.replace("\\", "/")))
-
-    def start(self):
         cmd = [
-            "ffmpeg", "-re",
-            "-f", "concat", "-safe", "0",
-            "-i", self.playlist,
-            "-c:v", "libx264",
-            "-profile:v", "baseline",
-            "-level", "3.1",
-            "-bf", "0",
-            "-preset", "ultrafast",
-            "-tune", "zerolatency",
-            "-pix_fmt", "yuv420p",
-            "-an",
-            "-f", "rtsp", "-rtsp_transport", "tcp",
-            self.rtsp_url
+            "ffmpeg",
+            "-re",                          # Read at native frame rate
+            "-stream_loop", "-1",           # Loop indefinitely
+            "-f", "concat",                 # Concat demuxer
+            "-safe", "0",                   # Allow absolute paths
+            "-i", playlist_path,            # Input playlist
+            "-vf", f"fps={FPS}",            # Set output FPS
+            "-c:v", "libx264",             # H.264 encoder
+            "-preset", "ultrafast",         # Low latency
+            "-tune", "zerolatency",         # Zero latency tuning
+            "-pix_fmt", "yuv420p",          # Compatible pixel format
+            "-g", "30",                     # Keyframe every 30 frames
+            "-b:v", "800k",                 # Video bitrate
+            "-an",                          # No audio
+            "-f", "rtsp",                   # RTSP output format
+            "-rtsp_transport", "tcp",       # Use TCP for reliability
+            rtsp_url,
         ]
-        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-# ================= API & MAIN =================
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
 
-def register_camera(cam_id, rtsp_url, risk_level):
-    try:
-        r = requests.post(
-            f"{API_URL}/camera/start",
-            params={"camera_id": cam_id, "rtsp_url": rtsp_url, "risk_level": risk_level},
-            timeout=10
-        )
-        print(f"[API] {cam_id} ({risk_level}): Status {r.status_code}")
-    except Exception as e:
-        print(f"[API] {cam_id}: ERROR: {e}")
+            # Monitor process
+            while not stop_event.is_set():
+                if proc.poll() is not None:
+                    stderr_tail = ""
+                    try:
+                        stderr_tail = proc.stderr.read()[-200:]
+                    except Exception:
+                        pass
+                    logger.warning("ffmpeg exited (code %d). Restarting in 3s... %s",
+                                   proc.returncode, stderr_tail[-100:] if stderr_tail else "")
+                    break
+                time.sleep(2)
+
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+        except FileNotFoundError:
+            logger.error("ffmpeg not found! Is it installed in the container?")
+            stop_event.wait(10)
+        except Exception as e:
+            logger.error("Stream error: %s. Retrying in 3s...", e)
+
+        if not stop_event.is_set():
+            time.sleep(3)
+
+    logger.info("Stopped.")
+
 
 def main():
-    os.makedirs(PLAYLIST_DIR, exist_ok=True)
-    if not os.path.exists(METADATA_FILE): return
+    playlists = get_playlists()
+    if not playlists:
+        log.error("No playlist files found in %s", PLAYLIST_DIR)
+        sys.exit(1)
 
-    with open(METADATA_FILE, newline='', encoding="utf-8") as f:
-        registry = list(csv.DictReader(f))
+    log.info("Found %d camera playlists: %s", len(playlists),
+             [c for c, _ in playlists])
 
-    selected = registry[:TOTAL_TO_START]
-    vm = VideoManager(VIOLENCE_DIR, NON_VIOLENCE_DIR)
-    camera_processes = []
+    # Wait a few seconds for MediaMTX to be fully ready
+    log.info("Waiting 5s for MediaMTX to be ready...")
+    time.sleep(5)
 
-    for cam_info in selected:
-        cid, curl, crisk = cam_info["camera_id"], cam_info["rtsp_url"], cam_info.get("risk_level", "low")
-        sim = CameraSimulator(cid, curl, vm, crisk)
-        sim.generate_playlist()
-        proc = sim.start()
-        camera_processes.append({"camera_id": cid, "rtsp_url": curl, "risk_level": crisk, "process": proc, "simulator": sim})
-        print(f"[RTSP] {cid} started.")
-        time.sleep(2)
-        register_camera(cid, curl, crisk)
+    stop_event = threading.Event()
+
+    # Handle SIGTERM/SIGINT
+    def _shutdown(sig, frame):
+        log.info("Shutdown signal received.")
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    # Start per-camera threads
+    threads = []
+    for cam_id, playlist_path in playlists:
+        t = threading.Thread(
+            target=stream_camera,
+            args=(cam_id, playlist_path, stop_event),
+            name=f"cam-{cam_id}",
+            daemon=True,
+        )
+        t.start()
+        threads.append(t)
+        time.sleep(0.5)  # Stagger starts slightly
+
+    log.info("All %d camera streams started. Monitoring stop file: %s",
+             len(threads), STOP_FILE)
 
     try:
-        while True:
-            time.sleep(10)
-            for i, cam in enumerate(camera_processes):
-                if cam["process"].poll() is not None:
-                    new_proc = cam["simulator"].start()
-                    camera_processes[i]["process"] = new_proc
+        while not stop_event.is_set():
+            if Path(STOP_FILE).exists():
+                log.info("STOP file detected. Shutting down.")
+                stop_event.set()
+                break
+            time.sleep(2)
     except KeyboardInterrupt:
-        for cam in camera_processes: cam["process"].kill()
+        log.info("KeyboardInterrupt — shutting down.")
+        stop_event.set()
+
+    for t in threads:
+        t.join(timeout=10)
+
+    log.info("All streams stopped.")
+
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "start":
+        main()
+    else:
+        main()

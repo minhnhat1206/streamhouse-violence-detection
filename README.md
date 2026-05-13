@@ -1,417 +1,276 @@
-# Smart Security Monitoring — Streamhouse Architecture
 
-Hệ thống giám sát an ninh thông minh phát hiện bạo lực real-time, sử dụng kiến trúc **Streamhouse** với Apache Flink, Fluss, Paimon và Iceberg.
+##  Hướng Dẫn Thiết Lập và Chạy Dự Án 
 
-## Kiến trúc tổng quan
+Dự án này thiết lập một pipeline xử lý video streaming theo thời gian thực sử dụng Kafka, Spark Structured Streaming và MinIO (S3) cho Data Lakehouse.
+
+### 1\.  Chuẩn bị Cấu trúc Dữ liệu và Mã nguồn
+
+Tải bộ dataset RWF2000 và lưu trong folder raw của data
+```
+realtime-violence-detection/
+├── data/
+│   ├── raw/
+│   │   └── RWF-2000
+├── docker/
+│   ├── grafana/ ...                 <-- Cấu hình Grafana Provisioning
+│   ├── prometheus/ ...              <-- Cấu hình Prometheus
+│   ├── spark-conf/ ...              <-- Cấu hình Metrics Spark
+│   └── docker-compose.yml
+└── scripts/
+    └── prepare_cameras_dataset.py (chia các clip được dùng để mô phỏng streaming cũng như metadata của từng cam)
+    └── simulate_rtsp_streams.py (giả lập luồng dữ liệu camera, dùng giao thức RTSP và chạy bằng rtsp_pusher để gửi dữ liệu cho Mediamtx)
+    └── rtsp_frame_publisher.py (Producer: gửi dữ liệu metadata đến kafka)
+    └── kafka_parquet_sink.py (tiêu thụ kết quả từ Kafka và ghi vào MinIO (Iceberg/Parquet))
+    └── inference_worker.py (giả lập service Model để lưu kết quả vào model.inference.results)
 
 ```
-Camera (RTSP) → VioMobileNet → Kafka → Flink
-                                         ├─ Data Contract Validator
-                                         │   ├─ Valid   → hot-violence-alerts-valid
-                                         │   └─ Invalid → urban-safety-quarantine
-                                         │
-                                         ├─ Fluss  (HOT)  — <100ms,  1-2 giờ retention
-                                         ├─ Paimon (WARM) — phút,    7-30 ngày retention
-                                         └─ Iceberg (COLD) — phút+,  năm retention
-                                                ↓
-                                         Trino (Federated SQL)
-                                                ↓
-                                         Agentic RAG (Gemini + ChromaDB)
-                                                ↓
-                                         React Dashboard
+sau đó chạy script `prepare_cameras_dataset.py` để chia các clip được dùng để mô phỏng streaming cũng như metadata của từng cam
+
+Sau khi chạy xong thì folder data sẽ có cấu trúc như sau:
 ```
-
-## Yêu cầu hệ thống
-
-| Yêu cầu | Tối thiểu |
-|----------|-----------|
-| RAM | 16 GB |
-| CPU | 4 cores (khuyến nghị 8) |
-| Disk | 20 GB trống |
-| Docker | v24+ với Docker Compose v2 |
-| OS | Windows 10/11, macOS, hoặc Linux |
-
-## Cấu trúc thư mục
-
+realtime-violence-detection/
+├── data/
+│   ├── metadata/
+│   │   └── camera_registry.csv  <-- CHỨA DANH SÁCH CAMERA VÀ PLAYLIST
+│   └── processed/
+│   │  └── clips_for_streaming/ <-- CHỨA CÁC FILE VIDEO (.avi, .mp4)
+│   ├── raw/
+│   │   └── RWF-2000
 ```
-├── scripts/
-│   ├── streaming/       # Kafka producers, mock inference
-│   ├── transform/       # Flink jobs (validator, sinks, init tables)
-│   ├── chatbot/         # Agentic RAG (Gemini + ChromaDB)
-│   └── setup/           # Kafka topic creation
-├── docker/              # docker-compose.yml, Dockerfiles, .env
-├── config/              # Kafka, Trino, Hive, Grafana, Prometheus
-├── frontend/            # React dashboard
-├── data/                # Datasets & metadata
-└── docs/                # Architecture docs & agent guides
-```
+-----
 
-## Ports
+### 2\.  Thiết lập Cổng (Ports) và Truy cập Dịch vụ
 
-| Service | Port | URL |
-|---------|------|-----|
-| Kafka | 19092 | — |
-| Kafka UI | 18085 | http://localhost:18085 |
-| Flink Web UI | 8081 | http://localhost:8081 |
-| MinIO Console | 9001 | http://localhost:9001 |
-| MinIO API | 9000 | — |
-| Trino | 8082 | — |
-| Hive Metastore | 9083 | — |
-| Fluss Coordinator | 9123 | — |
-| Prometheus | 9090 | http://localhost:9090 |
-| Grafana | 3001 | http://localhost:3001 |
-| Chatbot API | 5002 | http://localhost:5002 |
+| Dịch vụ | Cổng Host | Mục đích |
+| :--- | :--- | :--- |
+| **MediaMTX (RTSP)** | `8554` | Xem luồng video trực tiếp bằng VLC. |
+| **MediaMTX (HTTP)** | `8888` | Xem luồng trên Web Dashboard (HLS/DASH). |
+| **Spark UI** | `8080` | Giám sát Spark Master và các ứng dụng. |
+| **MinIO** | `9001` | Truy cập Dashboard MinIO (Web). |
+| **Prometheus** | `9090` | Truy cập Prometheus UI. |
+| **Grafana** | `3001` | **Giám sát Dashboard** (Login mặc định: `admin`/`admin`). |
+| **Kafka** | `9092` | (Chỉ nội bộ Docker) |
 
----
+-----
 
-## Hướng dẫn cài đặt & chạy từng bước
+### 3\.  Build và Khởi động Tất cả Dịch vụ
 
-### Bước 0 — Clone repo & chuẩn bị environment
 
 ```bash
-git clone https://github.com/minhnhat1206/violence-detection-system.git
-cd violence-detection-system
+docker compose up -d --build --force-recreate
 ```
 
-Tạo file `.env` từ template:
+Lệnh này sẽ:
+
+1.  Tải và build tất cả các images cần thiết (bao gồm cả **Spark** và **Monitoring Stack**).
+2.  Khởi tạo tất cả các dịch vụ (Kafka, Spark, MinIO, Prometheus, Grafana).
+
+-----
+
+### 4\.  Khởi tạo Topic Kafka (Chỉ chạy lần đầu)
+
+Tạo topic
 
 ```bash
-cp docker/.env.example docker/.env
+docker exec kafka /usr/local/bin/create-topics.sh
 ```
 
-Mở `docker/.env` và điền `GEMINI_API_KEY` (lấy từ [Google AI Studio](https://aistudio.google.com/apikey)):
+Kiểm tra dữ liệu được nạp vào topic
 
-```env
-GEMINI_API_KEY=your_actual_api_key_here
+```
+docker exec -it kafka kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic ingest.media.events --from-beginning
+```
+Đây là metadata được lưu ở kafka, sau khi thay model thì kiểm tra kết quả trong model.inference.results
+
+```
+docker exec -it kafka kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic model.inference.results --from-beginning
 ```
 
-Các giá trị còn lại có default sẵn, không cần thay đổi.
+-----
+# 5\. Spark Streaming Job → Ghi dữ liệu vào Iceberg (MinIO)
 
-### Bước 1 — Tạo Docker network
+### Chạy ứng dụng:
 
-```bash
-docker network create violence-detection-net
 ```
-
-> Network này dùng chung cho tất cả containers. Chỉ cần tạo **một lần duy nhất**.
-
-### Bước 2 — Khởi động infrastructure cơ bản
-
-```bash
-docker compose -f docker/docker-compose.yml up -d kafka minio minio_client mysql
-```
-
-Đợi Kafka và MySQL healthy (~30 giây):
-
-```bash
-# Kiểm tra status
-docker ps --format "table {{.Names}}\t{{.Status}}"
-```
-
-Kết quả mong đợi:
-```
-NAMES          STATUS
-kafka          Up ... (healthy)
-minio          Up ... (healthy)
-minio_client   Up ...
-mysql          Up ... (healthy)
-```
-
-> **Mẹo:** Nếu muốn xem chi tiết health:
-> ```bash
-> docker inspect --format='{{.State.Health.Status}}' kafka mysql minio
-> ```
-
-### Bước 3 — Khởi động Hive Metastore
-
-Hive Metastore dùng MySQL làm backend, phục vụ catalog cho Paimon và Iceberg.
-
-```bash
-docker compose -f docker/docker-compose.yml up -d hive-metastore
-```
-
-Đợi ~15 giây, kiểm tra:
-
-```bash
-docker logs hive-metastore --tail 5
-```
-
-Kết quả mong đợi:
-```
-schemaTool completed
-[entrypoint] Starting Hive Metastore service...
-```
-
-> Nếu thấy `schemaTool failed` hoặc container restart liên tục, kiểm tra MySQL đã healthy chưa.
-
-### Bước 4 — Khởi động Apache Flink
-
-```bash
-docker compose -f docker/docker-compose.yml up -d jobmanager taskmanager
-```
-
-Đợi ~30 giây. Kiểm tra Flink Web UI: **http://localhost:8081**
-
-Verify TaskManager đã đăng ký:
-
-```bash
-curl -s http://localhost:8081/taskmanagers | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-tms = d.get('taskmanagers', [])
-print(f'TaskManagers: {len(tms)}')
-for t in tms:
-    print(f'  slots={t[\"slotsNumber\"]}, free={t[\"freeSlots\"]}')
+docker exec -it spark-master bash -lc "
+spark-submit \
+    --master spark://spark-master:7077 \
+    /opt/bitnami/spark/scripts/kafka_iceberg_sink.py
 "
 ```
 
-Kết quả mong đợi:
+Sau 30–60s dữ liệu sẽ xuất hiện trong:
+
 ```
-TaskManagers: 1
-  slots=4, free=4
+s3a://inference-results/iceberg_warehouse/inference_results/
 ```
-
-### Bước 5 — Khởi động Apache Fluss (Hot Storage)
-
-```bash
-docker compose -f docker/docker-compose.yml up -d fluss-zookeeper fluss-coordinator fluss-tablet
-```
-
-Đợi ~20 giây, kiểm tra:
-
-```bash
-docker ps --filter "name=fluss" --format "table {{.Names}}\t{{.Status}}"
-```
-
-Kết quả mong đợi — cả 3 service đều `Up` và `(healthy)`:
-```
-NAMES              STATUS
-fluss-tablet       Up ... (healthy)
-fluss-coordinator  Up ... (healthy)
-fluss-zookeeper    Up ... (healthy)
-```
-
-### Bước 6 — Tạo Kafka Topics
-
-```bash
-docker exec kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 --create \
-  --topic urban-safety-alerts --partitions 3 --replication-factor 1
-
-docker exec kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 --create \
-  --topic hot-violence-alerts-valid --partitions 3 --replication-factor 1
-
-docker exec kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 --create \
-  --topic urban-safety-quarantine --partitions 3 --replication-factor 1
-```
-
-Verify:
-
-```bash
-docker exec kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 --list
-```
-
-Kết quả mong đợi:
-```
-hot-violence-alerts-valid
-urban-safety-alerts
-urban-safety-quarantine
-```
-
-### Bước 7 — Khởi tạo Fluss & Paimon tables
-
-Chạy trong Flink JobManager container:
-
-```bash
-# Init Fluss tables (Hot Storage)
-docker exec jobmanager python /opt/flink/scripts/init_fluss_tables.py
-
-# Init Paimon tables (Warm Storage)
-docker exec jobmanager python /opt/flink/scripts/init_paimon_tables.py
-```
-
-Kết quả mong đợi:
-```
-[SUCCESS] Fluss Catalog and Tables initialized successfully.
-[SUCCESS] Paimon Catalog and violence_incidents table initialized successfully.
-```
-
-### Bước 8 — Submit Flink Streaming Jobs
-
-Submit 3 jobs theo thứ tự. Mỗi job chiếm 1 slot trong TaskManager.
-
-**Job 1 — Data Contract Validator** (Kafka raw → validated + quarantine):
-
-```bash
-docker exec jobmanager flink run -py /opt/flink/scripts/data_contract_validator.py
-```
-
-**Job 2 — Sink to Fluss** (validated → Fluss hot storage):
-
-```bash
-docker exec jobmanager flink run -py /opt/flink/scripts/sink_to_fluss.py
-```
-
-**Job 3 — Sink to Paimon** (validated → Paimon warm storage):
-
-```bash
-docker exec jobmanager flink run -py /opt/flink/scripts/sink_to_paimon.py
-```
-
-Verify trên Flink Web UI (http://localhost:8081) hoặc:
-
-```bash
-curl -s http://localhost:8081/jobs/overview | python3 -c "
-import sys, json
-for j in json.load(sys.stdin).get('jobs', []):
-    print(f'{j[\"state\"]:10s} | {j[\"name\"]}')
-"
-```
-
-Kết quả mong đợi — **3 jobs RUNNING**:
-```
-RUNNING    | Data Contract Validator Job
-RUNNING    | insert-into_fluss.security.hot_violence_alerts
-RUNNING    | insert-into_paimon.security.violence_incidents
-```
-
-### Bước 9 — Test pipeline với Mock Inference
-
-Khởi động inference-mock để sinh dữ liệu test:
-
-```bash
-docker compose -f docker/docker-compose.yml up -d inference-mock
-```
-
-Xem dữ liệu đang được tạo:
-
-```bash
-docker logs -f inference-mock
-```
-
-Kết quả mong đợi (mỗi giây 1 message):
-```
-!!! [ALERT] Violence detected on cam_06
---- [NORMAL] Situation cleared on cam_12
-!!! [ALERT] Violence detected on cam_09
-```
-
-### Bước 10 — Verify dữ liệu trong Paimon (MinIO)
-
-Đợi ~40 giây (để checkpoint Paimon chạy ít nhất 1 lần), rồi kiểm tra:
-
-```bash
-docker exec minio mc ls local/warehouse/paimon/security.db/violence_incidents/ --recursive | head -10
-```
-
-Kết quả mong đợi — thấy file `.orc` (data) và `snapshot`:
-```
-[...] 20KiB STANDARD bucket-0/data-xxx.orc
-[...] 20KiB STANDARD bucket-0/changelog-xxx.orc
-[...] 781B  STANDARD manifest/...
-[...] 585B  STANDARD snapshot/snapshot-1
-```
-
-### Bước 11 — Dừng Mock Inference
-
-**Quan trọng**: inference-mock chạy vô tận. Sau khi test xong, **bắt buộc** dừng:
-
-```bash
-docker exec inference-mock touch /app/tmp/STOP
-```
-
-> Container sẽ tự dừng sau vài giây. Khi restart lần sau, stop file tự xóa.
 
 ---
 
-## Services tùy chọn (Profiles)
+# 6\. Kiểm tra dữ liệu bằng Spark
 
-Các service không thiết yếu được gom vào profiles để tiết kiệm RAM:
-
-```bash
-# Kafka UI — quản lý topics, xem messages
-docker compose -f docker/docker-compose.yml --profile ui up -d
-
-# Monitoring — Prometheus + Grafana dashboards
-docker compose -f docker/docker-compose.yml --profile monitoring up -d
-
-# Streaming — RTSP camera simulation
-docker compose -f docker/docker-compose.yml --profile streaming up -d
-
-# Trino workers — tăng query performance
-docker compose -f docker/docker-compose.yml --profile scaling up -d
+```
+docker exec -it spark-master bash -lc "spark-shell --conf spark.driver.host=spark-master"
 ```
 
-## Trino & Chatbot (chưa tích hợp đầy đủ)
+Trong Spark Shell:
 
-```bash
-# Khởi động Trino (query engine) và Chatbot (Agentic RAG)
-docker compose -f docker/docker-compose.yml up -d trino-coordinator chatbot
+```scala
+val df = spark.read.format("iceberg").load("iceberg.default.inference_results")
+df.show(5)
 ```
-
-> Trino hiện chỉ có Iceberg catalog. Paimon và Fluss catalogs sẽ được thêm trong các bước tiếp theo.
 
 ---
 
-## Lệnh hữu ích
+# 7\. Giám sát bằng Prometheus + Grafana
 
-```bash
-# Xem tất cả containers
-docker compose -f docker/docker-compose.yml ps
+### Kiểm tra metric Prometheus:
 
-# Xem logs của service
-docker compose -f docker/docker-compose.yml logs -f <service-name>
-
-# Dừng tất cả
-docker compose -f docker/docker-compose.yml down
-
-# Dừng và xóa volumes (reset dữ liệu)
-docker compose -f docker/docker-compose.yml down -v
-
-# Cancel 1 Flink job (thay JOB_ID)
-curl -X PATCH "http://localhost:8081/jobs/<JOB_ID>?mode=cancel"
+```
+curl "http://localhost:9090/api/v1/query?query=spark_driver_streaming_processed_records_total"
+curl "http://localhost:9090/api/v1/query?query=spark_driver_streaming_end_to_end_latency_seconds"
 ```
 
-## Resource Budget (16 GB RAM)
+### Grafana Dashboard:
 
-| Service | RAM | CPU | Profile |
-|---------|-----|-----|---------|
-| kafka | 512m | 0.50 | core |
-| minio | 512m | 0.50 | core |
-| minio_client | 64m | 0.10 | core |
-| inference-mock | 256m | 0.25 | core |
-| jobmanager | 1g | 0.50 | core |
-| taskmanager | 2g | 2.00 | core |
-| fluss-zookeeper | 256m | 0.25 | core |
-| fluss-coordinator | 512m | 0.50 | core |
-| fluss-tablet | 512m | 0.50 | core |
-| mysql | 512m | 0.50 | core |
-| hive-metastore | 512m | 0.25 | core |
-| trino-coordinator | 1536m | 1.00 | core |
-| chatbot | 1536m | 1.00 | core |
-| **Tổng core** | **~9.6 GB** | **7.85** | |
+* Truy cập: [http://localhost:3001](http://localhost:3001)
+* Login: `admin` / `admin`
 
-## Tech Stack
+Dashboard hiển thị:
 
-| Layer | Technology |
-|-------|-----------|
-| Message Broker | Apache Kafka (KRaft) |
-| Stream Processing | Apache Flink 1.18 (PyFlink) |
-| Hot Storage | Apache Fluss 0.9 |
-| Warm Storage | Apache Paimon 0.8 |
-| Cold Storage | Apache Iceberg (planned) |
-| Object Store | MinIO (S3-compatible) |
-| Query Engine | Trino |
-| AI/LLM | Google Gemini 2.0 Flash |
-| Vector DB | ChromaDB |
-| Frontend | React.js + Tailwind CSS |
+* Throughput (records per batch)
+* Avg latency
+* Worker health
+* JVM metrics
 
-## Tác giả
+---
 
-- Nguyen Ngoc Minh Nhat
-- Nguyen Quoc Huy
+# 8\. **TRUY VẤN DỮ LIỆU ICEBERG BẰNG TRINO** 
 
-Khoa luan tot nghiep — Dai hoc Ton Duc Thang.
+Sau khi Spark đã ghi dữ liệu vào MinIO dưới dạng Iceberg table, bạn dùng Trino để truy vấn.
+
+---
+
+## 8.1. Truy cập Trino CLI
+
+**Không dùng bash để chạy SQL**, hãy dùng CLI:
+
+```
+docker exec -it trino-coordinator trino
+```
+
+Bạn sẽ thấy prompt:
+
+```
+trino>
+```
+
+---
+
+## 8.2. Kiểm tra catalog
+
+```
+SHOW CATALOGS;
+```
+
+Bạn sẽ thấy:
+
+```
+iceberg
+system
+tpch
+```
+
+---
+
+## 8.3. Kiểm tra namespace Iceberg
+
+```
+SHOW SCHEMAS FROM iceberg;
+```
+
+Mặc định:
+
+```
+default
+```
+
+---
+
+## 8.4. Xem danh sách bảng
+
+```
+SHOW TABLES FROM iceberg.default;
+```
+
+Nếu đúng, bạn sẽ thấy:
+
+```
+inference_results
+```
+
+---
+
+## 8.5. Truy vấn dữ liệu Iceberg
+
+### Xem 10 dòng mới nhất:
+
+```
+SELECT *
+FROM iceberg.default.inference_results
+ORDER BY timestamp_utc DESC
+LIMIT 10;
+```
+
+### Lấy số lượng record:
+
+```
+SELECT count(*) FROM iceberg.default.inference_results;
+```
+
+### Thống kê label:
+
+```
+SELECT label, count(*) 
+FROM iceberg.default.inference_results
+GROUP BY label;
+```
+
+### Thống kê latency:
+
+```
+SELECT avg(latency_ms) AS avg_latency_ms,
+       max(latency_ms) AS max_latency_ms
+FROM iceberg.default.inference_results;
+```
+
+---
+
+# 9\. Kiểm tra luồng trực tiếp
+
+* VLC RTSP:
+
+```
+rtsp://localhost:8554/cam_01
+```
+
+* MinIO Dashboard:
+
+```
+http://localhost:9001
+```
+
+Bucket:
+
+* `violence-frames` → ảnh frame
+* `inference-results` → Iceberg warehouse
+
+---
+
+# 10\. Dừng toàn bộ hệ thống
+
+```
+docker compose down
+```
+
+---

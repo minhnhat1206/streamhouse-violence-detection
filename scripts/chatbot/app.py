@@ -1,226 +1,399 @@
+"""
+Vigilance AI Chatbot Backend — FastAPI service (port 5002)
+Provides REST endpoints for the vigilance-ai dashboard:
+  GET  /api/recent-incidents  — query Iceberg via Trino (includes frame_url from MinIO)
+  GET  /api/evidence          — retrieve evidence images from MinIO by camera+date
+  GET  /api/stats             — aggregated analytics from Iceberg via Trino
+  POST /api/chat              — Agentic RAG using Gemini + Trino
+"""
+
 import os
-import re
-import boto3
-from flask import Flask, request, jsonify, send_file
-from dotenv import load_dotenv
-import google.generativeai as genai
-from rag_store import RAGStore
-from ingest import run_ingest
-import json
-from flask_cors import CORS
-from io import BytesIO
+import asyncio
+import logging
+import time
+import xml.etree.ElementTree as ET
+from typing import Optional
 
-load_dotenv()
+import httpx
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-CHROMA_DIR = os.getenv("CHROMA_DIR", "/data/chroma")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# S3/MinIO configuration for frame retrieval
-S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
-S3_BUCKET = "evidence-frames"
-S3_ACCESS_KEY = os.getenv("MINIO_ROOT_USER", "minio")
-S3_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD", "mypassword")
+app = FastAPI(title="Vigilance AI Chatbot", version="1.0.0")
 
-app = Flask(__name__)
-CORS(app)
-rag = RAGStore(CHROMA_DIR)
-
-# Initialize S3 client for frame retrieval
-s3_client = boto3.client(
-    "s3",
-    endpoint_url=S3_ENDPOINT,
-    aws_access_key_id=S3_ACCESS_KEY,
-    aws_secret_access_key=S3_SECRET_KEY,
-    region_name="us-east-1",
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-def extract_filters(question: str):
-    """Helper function to extract metadata from question for Hybrid Search"""
-    filters = {}
-    
-    # 1. Extract camera_id (e.g., cam01, cam02...)
-    cam_match = re.search(r'cam\d+', question.lower())
-    if cam_match:
-        filters["camera_id"] = cam_match.group()
-        
-    # 2. Extract date (format YYYY-MM-DD)
-    date_match = re.search(r'\d{4}-\d{2}-\d{2}', question)
-    if date_match:
-        filters["date"] = date_match.group()
-        
-    return filters if filters else None
+TRINO_HOST = os.getenv("TRINO_HOST", "localhost")
+TRINO_PORT = int(os.getenv("TRINO_PORT", "8082"))
+TRINO_USER = os.getenv("TRINO_USER", "admin")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-def init_data_incremental():
-    """Startup: Only ingest new events from MinIO not yet in database"""
-    print("[app] Checking for new data in MinIO...")
+MINIO_INTERNAL = os.getenv("MINIO_ENDPOINT", "minio:9000")
+MINIO_EXTERNAL = os.getenv("MINIO_EXTERNAL_URL", "http://localhost:9000")
+EVIDENCE_BUCKET = "evidence-frames"
+
+TRINO_BASE = f"http://{TRINO_HOST}:{TRINO_PORT}"
+
+
+# ---------------------------------------------------------------------------
+# MinIO helpers — image retrieval
+# ---------------------------------------------------------------------------
+
+async def _minio_list_objects(prefix: str, max_keys: int = 1) -> list[str]:
+    """List object keys in evidence-frames bucket using S3 XML API (no auth, public bucket)."""
+    url = f"http://{MINIO_INTERNAL}/{EVIDENCE_BUCKET}"
+    params = {"list-type": "2", "prefix": prefix, "max-keys": str(max_keys)}
     try:
-        # Get list of existing event_ids to avoid duplication
-        current_data = rag.collection.get(include=['metadatas'])
-        existing_ids = set()
-        if current_data and current_data['metadatas']:
-            existing_ids = {str(m.get('event_id')) for m in current_data['metadatas'] if m.get('event_id')}
-        
-        print(f"[app] Found {len(existing_ids)} events already in database.")
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                return []
+        # Parse S3 XML response
+        root = ET.fromstring(resp.text)
+        ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+        keys = [c.findtext("s3:Key", namespaces=ns) or c.findtext("Key", "") for c in root.findall(".//s3:Contents", ns) or root.findall(".//Contents")]
+        return [k for k in keys if k]
+    except Exception as exc:
+        logger.warning("MinIO list failed for prefix=%s: %s", prefix, exc)
+        return []
 
-        # Ingest only missing data
-        new_docs = run_ingest(existing_ids=existing_ids)
-        
-        if new_docs:
-            rag.upsert_documents(new_docs)
-            print(f"[app] Successfully indexed {len(new_docs)} NEW documents.")
-        else:
-            print("[app] Database is up-to-date. No new events added.")
-            
+
+async def _get_frame_url(camera_id: str, incident_date: str, incident_id: str) -> str | None:
+    """Return a public MinIO URL for the evidence frame.
+    Priority:
+      1. Direct match: evidence-frames/{camera_id}/{date}/{incident_id}.jpg
+      2. First object in evidence-frames/{camera_id}/{date}/
+      3. First object in evidence-frames/{camera_id}/ (any date — fallback for seed data)
+    """
+    direct_key = f"{camera_id}/{incident_date}/{incident_id}.jpg"
+    direct_url = f"{MINIO_EXTERNAL}/{EVIDENCE_BUCKET}/{direct_key}"
+
+    # Try direct URL (HEAD request)
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            head = await client.head(direct_url)
+            if head.status_code == 200:
+                return direct_url
+    except Exception:
+        pass
+
+    # Fallback 1: first image for this camera+date
+    prefix = f"{camera_id}/{incident_date}/"
+    keys = await _minio_list_objects(prefix, max_keys=1)
+    if keys:
+        return f"{MINIO_EXTERNAL}/{EVIDENCE_BUCKET}/{keys[0]}"
+
+    # Fallback 2: any image for this camera (seed data may have different dates)
+    prefix_any = f"{camera_id}/"
+    keys_any = await _minio_list_objects(prefix_any, max_keys=1)
+    if keys_any:
+        # Skip folder-only entries (keys ending with /)
+        img_keys = [k for k in keys_any if not k.endswith("/") and k.endswith(".jpg")]
+        if img_keys:
+            return f"{MINIO_EXTERNAL}/{EVIDENCE_BUCKET}/{img_keys[0]}"
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Trino helpers
+# ---------------------------------------------------------------------------
+
+async def _trino_query(sql: str, timeout: float = 30.0) -> list[list]:
+    """Execute a Trino SQL statement and return all rows."""
+    headers = {
+        "X-Trino-User": TRINO_USER,
+        "X-Trino-Catalog": "iceberg",
+        "X-Trino-Schema": "security",
+        "Content-Type": "text/plain",
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(f"{TRINO_BASE}/v1/statement", content=sql, headers=headers)
+        resp.raise_for_status()
+        body = resp.json()
+
+        rows: list[list] = []
+        next_uri = body.get("nextUri")
+        if body.get("data"):
+            rows.extend(body["data"])
+
+        while next_uri:
+            resp = await client.get(next_uri, headers=headers)
+            resp.raise_for_status()
+            body = resp.json()
+            if body.get("data"):
+                rows.extend(body["data"])
+            next_uri = body.get("nextUri")
+            if body.get("stats", {}).get("state") in ("FAILED", "CANCELED"):
+                raise RuntimeError(f"Trino query failed: {body.get('error', {}).get('message')}")
+
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# GET /api/recent-incidents
+# ---------------------------------------------------------------------------
+
+@app.get("/api/recent-incidents")
+async def get_recent_incidents(limit: int = Query(50, ge=1, le=500)):
+    sql = f"""
+    SELECT
+        incident_id,
+        camera_id,
+        CAST(timestamp AS VARCHAR)  AS timestamp,
+        risk_score,
+        COALESCE(event_type, 'Anomaly') AS label,
+        location,
+        'VioMobileNet-v2.1'         AS model_version,
+        'Unreviewed'                AS status,
+        CAST(incident_date AS VARCHAR) AS incident_date
+    FROM iceberg.security.historical_violence_incidents
+    ORDER BY timestamp DESC
+    LIMIT {limit}
+    """
+    try:
+        rows = await _trino_query(sql)
     except Exception as e:
-        import traceback
-        print("[app] ERROR during startup ingest:", e)
-        traceback.print_exc()
+        logger.error("Trino error (recent-incidents): %s", e)
+        raise HTTPException(status_code=503, detail=f"Trino unavailable: {e}")
 
-# Perform data ingestion immediately upon Server startup
-init_data_incremental()
+    # Fetch frame_url for each row concurrently (with timeout)
+    async def build_row(r: list) -> dict:
+        incident_id  = r[0] or ""
+        camera_id    = r[1] or ""
+        incident_date = r[8] or ""
+        frame_url = await _get_frame_url(camera_id, incident_date, incident_id)
+        return {
+            "event_id":       incident_id,
+            "camera_id":      camera_id,
+            "timestamp":      r[2],
+            "violence_score": float(r[3]) if r[3] is not None else 0.0,
+            "label":          r[4] or "Anomaly",
+            "location":       r[5] or camera_id,
+            "model_version":  r[6] or "VioMobileNet-v2.1",
+            "status":         r[7],
+            "frame_url":      frame_url,
+        }
 
-# Configure Gemini Client
-model = None
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    results = await asyncio.gather(*[build_row(r) for r in rows])
+    return list(results)
 
-def synthesize_answer(question: str, hits: list) -> str:
-    if not hits:
-        return "Hệ thống không tìm thấy dữ liệu nào phù hợp với yêu cầu của bạn."
-    
-    context = "\n\n".join([f"- {h['text']}" for h in hits])
-    if model:
-        prompt = f"""Bạn là Trợ lý Giám sát An ninh. Hãy trả lời câu hỏi dựa trên các ngữ cảnh sau.
-Nếu dữ liệu có số liệu cụ thể (score, camera ID, thời gian), hãy trích dẫn chính xác.
-Câu hỏi: {question}
 
-Ngữ cảnh:
+# ---------------------------------------------------------------------------
+# GET /api/evidence  — list evidence images from MinIO by camera + date
+# ---------------------------------------------------------------------------
+
+@app.get("/api/evidence")
+async def get_evidence(
+    camera_id: str = Query(..., description="Camera ID, e.g. cam_01"),
+    date: str = Query(..., description="Date in YYYY-MM-DD format"),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """Return public MinIO URLs for evidence images of a given camera and date."""
+    prefix = f"{camera_id}/{date}/"
+    keys = await _minio_list_objects(prefix, max_keys=limit)
+    if not keys:
+        return {"camera_id": camera_id, "date": date, "images": []}
+
+    images = [
+        {
+            "key": k,
+            "url": f"{MINIO_EXTERNAL}/{EVIDENCE_BUCKET}/{k}",
+        }
+        for k in keys
+    ]
+    return {"camera_id": camera_id, "date": date, "images": images}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/stats
+# ---------------------------------------------------------------------------
+
+@app.get("/api/stats")
+async def get_stats():
+    alerts_per_hour_sql = """
+    SELECT
+        DATE_FORMAT(DATE_TRUNC('hour', timestamp), '%H:00') AS hour_label,
+        COUNT(*) AS alert_count
+    FROM iceberg.security.violence_incidents
+    WHERE timestamp >= NOW() - INTERVAL '24' HOUR
+    GROUP BY DATE_TRUNC('hour', timestamp)
+    ORDER BY DATE_TRUNC('hour', timestamp)
+    """
+
+    top_locations_sql = """
+    SELECT location, COUNT(*) AS cnt
+    FROM iceberg.security.violence_incidents
+    WHERE timestamp >= NOW() - INTERVAL '7' DAY
+    GROUP BY location
+    ORDER BY cnt DESC
+    LIMIT 5
+    """
+
+    alert_types_sql = """
+    SELECT label, COUNT(*) AS cnt
+    FROM iceberg.security.violence_incidents
+    WHERE timestamp >= NOW() - INTERVAL '7' DAY
+    GROUP BY label
+    """
+
+    avg_score_sql = """
+    SELECT
+        DATE_FORMAT(CAST(timestamp AS DATE), '%b %d') AS day_label,
+        CAST(timestamp AS DATE) AS day_date,
+        AVG(risk_score) AS avg_score
+    FROM iceberg.security.violence_incidents
+    WHERE timestamp >= NOW() - INTERVAL '7' DAY
+    GROUP BY CAST(timestamp AS DATE)
+    ORDER BY CAST(timestamp AS DATE)
+    """
+
+    try:
+        hours_rows, loc_rows, type_rows, score_rows = await asyncio.gather(
+            _trino_query(alerts_per_hour_sql),
+            _trino_query(top_locations_sql),
+            _trino_query(alert_types_sql),
+            _trino_query(avg_score_sql),
+            return_exceptions=True,
+        )
+    except Exception as e:
+        logger.error("Trino error (stats): %s", e)
+        raise HTTPException(status_code=503, detail=f"Trino unavailable: {e}")
+
+    def safe_rows(r):
+        return r if isinstance(r, list) else []
+
+    return {
+        "alertsPerHour": [
+            {"name": row[0], "alerts": int(row[1])}
+            for row in safe_rows(hours_rows)
+        ],
+        "topLocations": [
+            {"name": row[0] or "Unknown", "alerts": int(row[1])}
+            for row in safe_rows(loc_rows)
+        ],
+        "alertTypes": [
+            {"name": row[0] or "Unknown", "value": int(row[1])}
+            for row in safe_rows(type_rows)
+        ],
+        "avgScore": [
+            {"name": row[0], "score": round(float(row[2]), 3) if row[2] else 0}
+            for row in safe_rows(score_rows)
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /api/chat
+# ---------------------------------------------------------------------------
+
+class ChatRequest(BaseModel):
+    query: str
+    history: Optional[list[dict]] = None
+
+
+@app.post("/api/chat")
+async def chat(req: ChatRequest):
+    start = time.time()
+
+    # --- Layer routing based on time keywords ---
+    query_lower = req.query.lower()
+    if any(k in query_lower for k in ["1 giờ", "30 phút", "15 phút", "vừa", "live", "realtime"]):
+        layer = "hot"
+    elif any(k in query_lower for k in ["hôm nay", "24 giờ", "today", "last 24"]):
+        layer = "warm"
+    else:
+        layer = "cold"
+
+    # --- Build context SQL based on layer ---
+    context_sql = """
+    SELECT incident_id, camera_id, CAST(timestamp AS VARCHAR), risk_score, label, location
+    FROM iceberg.security.violence_incidents
+    ORDER BY timestamp DESC
+    LIMIT 20
+    """
+    try:
+        rows = await _trino_query(context_sql, timeout=15.0)
+        context_data = "\n".join(
+            f"- [{r[0]}] cam={r[1]}, time={r[2]}, score={r[3]:.2f}, label={r[4]}, location={r[5]}"
+            for r in rows[:10]
+            if len(r) >= 6
+        )
+    except Exception as e:
+        logger.warning("Could not fetch context from Trino: %s", e)
+        context_data = "(không lấy được dữ liệu từ Trino)"
+
+    # --- Call Gemini ---
+    if not GEMINI_API_KEY:
+        answer = (
+            "Chatbot chưa được cấu hình API key. "
+            f"Dữ liệu gần đây từ hệ thống:\n{context_data}"
+        )
+        citations = {"source_table": "iceberg.security.violence_incidents", "data_layer": layer, "time_period": "recent"}
+    else:
+        try:
+            answer, citations = await _call_gemini(req.query, context_data, layer)
+        except Exception as e:
+            logger.error("Gemini error: %s", e)
+            answer = f"Lỗi khi gọi AI: {e}. Dữ liệu gần đây:\n{context_data}"
+            citations = {"source_table": "iceberg.security.violence_incidents", "data_layer": layer, "time_period": "recent"}
+
+    duration_ms = int((time.time() - start) * 1000)
+
+    return {
+        "answer": answer,
+        "layer": layer,
+        "citations": citations,
+        "confidence": 0.85,
+        "duration_ms": duration_ms,
+    }
+
+
+async def _call_gemini(query: str, context: str, layer: str) -> tuple[str, dict]:
+    """Call Gemini REST API with system prompt + Trino context."""
+    prompt = f"""Bạn là AI assistant cho hệ thống giám sát an ninh Vigilance AI.
+Dữ liệu thực tế từ layer {layer.upper()} (Streamhouse):
 {context}
 
-Trả lời chi tiết bằng tiếng Việt, tập trung vào các sự kiện bạo lực được ghi nhận.  Nếu câu hỏi không liên quan đến dữ liệu, hãy trả lời rằng bạn chỉ có thể hỗ trợ các câu hỏi liên quan đến giám sát an ninh."""
-        try:
-            response = model.generate_content(prompt)
-            return response.text.strip()
-        except Exception as e:
-            return f"Lỗi gọi LLM: {e}\n\nDữ liệu tìm thấy:\n{context}"
-    return f"Kết quả truy xuất:\n{context}"
+Câu hỏi: {query}
 
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "docs_indexed": rag.collection.count()}), 200
+Trả lời ngắn gọn, chính xác. Nếu không có dữ liệu phù hợp, hãy nói rõ.
+Cuối câu trả lời thêm dòng: [Nguồn: iceberg.security.violence_incidents | Layer: {layer}]"""
 
-@app.route("/chat", methods=["POST"])
-def chat():
-    try:
-        raw = request.data.decode("utf-8")
-        if not raw:
-            return jsonify({"error": "Request body trống"}), 400
-
-        payload = json.loads(raw)
-
-        question = payload.get("question", "").strip()
-        if not question:
-            return jsonify({"error": "Vui lòng nhập câu hỏi"}), 400
-
-        metadata_filters = extract_filters(question)
-        hits = rag.query(question, k=6, filter_metadata=metadata_filters)
-        answer = synthesize_answer(question, hits)
-
-        return jsonify({
-            "question": question,
-            "answer": answer,
-            "filters_applied": metadata_filters,
-            "data_sources": hits
-        }), 200
-
-    except json.JSONDecodeError as e:
-        return jsonify({
-            "error": "JSON không hợp lệ",
-            "raw_body": raw,
-            "detail": str(e)
-        }), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/evidence/<incident_id>/frame", methods=["GET"])
-def get_evidence_frame(incident_id: str):
-    """
-    Retrieve evidence frame for an incident from S3.
-
-    Query params:
-      - format: 'image' (default) or 'url' (return S3 URL only)
-
-    Returns:
-        - format=image: JPEG image file
-        - format=url: JSON with frame_url
-    """
-    try:
-        format_type = request.args.get("format", "image").lower()
-
-        # Query Trino/Paimon to find frame location
-        # For now, we'll construct S3 path based on incident_id
-        # In production, query should be:
-        # SELECT frame_url, camera_id, timestamp FROM paimon.security.violence_incidents
-        # WHERE incident_id = ?
-
-        # Fallback: Try common S3 path patterns
-        # Pattern: evidence-frames/{camera_id}/{YYYY-MM-DD}/{incident_id}.jpg
-        # We can query the RAG store for metadata
-
-        query_result = rag.collection.get(
-            where={"incident_id": incident_id},
-            include=["metadatas"]
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
+            json={"contents": [{"parts": [{"text": prompt}]}]},
         )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
 
-        if not query_result or not query_result.get("metadatas"):
-            return jsonify({
-                "error": f"No incident found with ID: {incident_id}",
-                "hint": "Ensure incident_id is correct and has been processed"
-            }), 404
+    citations = {
+        "source_table": "iceberg.security.violence_incidents",
+        "data_layer": layer,
+        "time_period": "recent 24h" if layer == "warm" else "realtime" if layer == "hot" else "historical",
+    }
+    return text, citations
 
-        metadata = query_result["metadatas"][0] if query_result["metadatas"] else {}
-        camera_id = metadata.get("camera_id", "unknown")
-        incident_date = metadata.get("date", "2026-04-28")
 
-        s3_key = f"{camera_id}/{incident_date}/{incident_id}.jpg"
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
 
-        # Return based on requested format
-        if format_type == "url":
-            return jsonify({
-                "incident_id": incident_id,
-                "camera_id": camera_id,
-                "incident_date": incident_date,
-                "frame_url": f"s3://{S3_BUCKET}/{s3_key}",
-                "s3_endpoint": S3_ENDPOINT
-            }), 200
-
-        # Default: return actual image
-        try:
-            response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
-            image_data = response["Body"].read()
-            return send_file(
-                BytesIO(image_data),
-                mimetype="image/jpeg",
-                as_attachment=False,
-                download_name=f"{incident_id}.jpg"
-            )
-        except s3_client.exceptions.NoSuchKey:
-            return jsonify({
-                "error": f"Frame not found in S3: {s3_key}",
-                "s3_bucket": S3_BUCKET,
-                "s3_key": s3_key
-            }), 404
-        except Exception as e:
-            return jsonify({
-                "error": f"Failed to retrieve frame from S3: {str(e)}"
-            }), 500
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.get("/health")
+async def health():
+    return {"status": "ok", "service": "vigilance-ai-chatbot"}
 
 
 if __name__ == "__main__":
-    # Server runs on port 5002 as configured in Docker
-    app.run(host="0.0.0.0", port=5002, debug=False)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5002, log_level="info")

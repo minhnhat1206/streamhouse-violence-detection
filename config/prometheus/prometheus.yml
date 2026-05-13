@@ -11,24 +11,17 @@ scrape_configs:
     static_configs:
       - targets: ['node-exporter:9100']
 
-  # JOB GIAO DIEN SPARK UI (Lay thong so HE THONG Spark)
-  - job_name: 'spark-master-ui'
+  - job_name: 'spark-master'
     metrics_path: /metrics/master/
     static_configs:
       - targets: ['spark-master:8080']
 
-  # JOB GIAO DIEN SPARK WORKER (Lay thong so WORKER)
-  - job_name: 'spark-worker-ui'
+  - job_name: 'spark-worker'
     metrics_path: /metrics/worker/
     static_configs:
       - targets: ['spark-worker:8081']
 
-  # JOB CHINH: JOB WARM LAYER (Lay metrics tu Python/prometheus_client)
-  - job_name: 'spark-warm'
+  - job_name: 'spark-driver'
+    metrics_path: /metrics
     static_configs:
-      - targets: ['spark-master:8005']
-
-  # JOB FLINK: Flink REST API metrics
-  - job_name: 'flink'
-    static_configs:
-      - targets: ['jobmanager:8081']
+      - targets: ['spark-master:8000']

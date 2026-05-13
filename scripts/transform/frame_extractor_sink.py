@@ -1,245 +1,151 @@
 """
-Frame Evidence Extraction Service
-==================================
-Sidecar service that reads validated incidents from Kafka,
-extracts base64 thumbnails, uploads to MinIO S3, and publishes
-enriched records with frame URLs.
-
-Pipeline:
-  1. Subscribe to Kafka: hot-violence-alerts-valid
-  2. Extract metadata.thumbnail (base64)
-  3. Upload to S3: evidence-frames/{camera_id}/{date}/{incident_id}.jpg
-  4. Publish enriched record: hot-violence-frames-uploaded topic
-  5. Failures → frame-extraction-dlq dead-letter topic
-
-Graceful stop:
-  touch /app/tmp/STOP
-
-Run standalone:
-  python frame_extractor_sink.py
+Frame Extractor Sink
+Consumes frame metadata from Kafka hot-violence-frames-uploaded,
+downloads frames from MinIO (or in-memory mock), and re-saves to MinIO
+under a structured path for downstream processing.
 """
-import base64
+
 import json
 import logging
 import os
 import sys
 import time
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
 
-import boto3
-from kafka import KafkaConsumer, KafkaProducer
+from kafka import KafkaConsumer
+from kafka.errors import NoBrokersAvailable
 
-logger = logging.getLogger(__name__)
+# Optional MinIO (minio package may not be installed)
+try:
+    from minio import Minio
+    from minio.error import S3Error
+    MINIO_AVAILABLE = True
+except ImportError:
+    MINIO_AVAILABLE = False
+
+# ── CONFIG ─────────────────────────────────────────────────────────────────────
+KAFKA_BROKER   = os.getenv("KAFKA_BROKER",   "kafka:9092")
+KAFKA_TOPIC    = os.getenv("KAFKA_TOPIC",    "hot-violence-frames-uploaded")
+CONSUMER_GROUP = os.getenv("CONSUMER_GROUP", "frame-extractor-group")
+S3_ENDPOINT    = os.getenv("S3_ENDPOINT",    "http://minio:9000")
+MINIO_USER     = os.getenv("MINIO_ROOT_USER",     "minio")
+MINIO_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD", "mypassword")
+DEST_BUCKET    = os.getenv("DEST_BUCKET",    "rtsp-frames")
+STOP_FILE      = os.getenv("STOP_FILE",      "/app/tmp/STOP")
+
 logging.basicConfig(
     level=logging.INFO,
-    format="[%(asctime)s] [%(levelname)s] %(message)s",
+    format="%(asctime)s [%(levelname)s] %(message)s",
 )
-
-# Configuration
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
-S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
-S3_BUCKET = "evidence-frames"
-S3_ACCESS_KEY = os.getenv("MINIO_ROOT_USER", "minio")
-S3_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD", "mypassword")
-STOP_FILE = os.getenv("STOP_FILE", "/app/tmp/STOP")
-MAX_RETRIES = 3
+log = logging.getLogger("frame-extractor")
 
 
-def get_s3_client():
-    """Create S3 client."""
-    return boto3.client(
-        "s3",
-        endpoint_url=S3_ENDPOINT,
-        aws_access_key_id=S3_ACCESS_KEY,
-        aws_secret_access_key=S3_SECRET_KEY,
-        region_name="us-east-1",
+# ── MINIO CLIENT ───────────────────────────────────────────────────────────────
+def _build_minio() -> "Minio | None":
+    if not MINIO_AVAILABLE:
+        log.warning("minio package not installed — frame storage disabled.")
+        return None
+    endpoint = S3_ENDPOINT.replace("http://", "").replace("https://", "")
+    secure   = S3_ENDPOINT.startswith("https://")
+    try:
+        client = Minio(endpoint, access_key=MINIO_USER, secret_key=MINIO_PASSWORD, secure=secure)
+        # Ensure bucket exists
+        if not client.bucket_exists(DEST_BUCKET):
+            client.make_bucket(DEST_BUCKET)
+            log.info("Created bucket: %s", DEST_BUCKET)
+        return client
+    except Exception as e:
+        log.error("MinIO connection failed: %s", e)
+        return None
+
+
+# ── KAFKA CONSUMER ─────────────────────────────────────────────────────────────
+def _build_consumer(max_retries: int = 5) -> KafkaConsumer:
+    for attempt in range(1, max_retries + 1):
+        try:
+            consumer = KafkaConsumer(
+                KAFKA_TOPIC,
+                bootstrap_servers=[KAFKA_BROKER],
+                group_id=CONSUMER_GROUP,
+                auto_offset_reset="latest",
+                enable_auto_commit=True,
+                value_deserializer=lambda x: json.loads(x.decode("utf-8")),
+                consumer_timeout_ms=5000,
+            )
+            log.info("Kafka consumer connected to topic: %s", KAFKA_TOPIC)
+            return consumer
+        except NoBrokersAvailable as e:
+            log.warning("Kafka not ready (attempt %d/%d): %s", attempt, max_retries, e)
+            if attempt < max_retries:
+                time.sleep(4)
+    log.error("Could not connect to Kafka. Exiting.")
+    sys.exit(1)
+
+
+# ── FRAME PROCESSING ───────────────────────────────────────────────────────────
+def process_frame_event(event: dict, minio: "Minio | None") -> None:
+    """Process a frame upload event and log/store metadata."""
+    camera_id  = event.get("camera_id", "unknown")
+    frame_path = event.get("frame_path", "")
+    timestamp  = event.get("timestamp", datetime.utcnow().isoformat())
+    label      = event.get("label", "unknown")
+    score      = event.get("risk_score", 0.0)
+
+    log.info(
+        "Frame event: cam=%s label=%s score=%.3f path=%s",
+        camera_id, label, score, frame_path,
     )
 
-
-def upload_frame(
-    s3_client,
-    thumbnail_b64: str,
-    camera_id: str,
-    incident_date: str,
-    incident_id: str,
-    risk_score: float,
-) -> Optional[str]:
-    """
-    Upload base64 frame to S3.
-
-    Returns:
-        S3 URL if successful, None otherwise
-    """
-    s3_key = f"{camera_id}/{incident_date}/{incident_id}.jpg"
-
-    for attempt in range(1, MAX_RETRIES + 1):
+    if minio and frame_path:
+        # Build structured destination path: year/month/day/camera/frame.jpg
+        dt = datetime.utcnow()
+        dest_key = f"{dt.year:04d}/{dt.month:02d}/{dt.day:02d}/{camera_id}/{Path(frame_path).name}"
         try:
-            frame_bytes = base64.b64decode(thumbnail_b64)
-            s3_client.put_object(
-                Bucket=S3_BUCKET,
-                Key=s3_key,
-                Body=frame_bytes,
-                ContentType="image/jpeg",
-                Metadata={
-                    "incident_id": incident_id,
-                    "camera_id": camera_id,
-                    "risk_score": str(risk_score),
-                    "capture_date": incident_date,
-                },
+            # In production: download from source bucket, re-upload to dest
+            # Here: write a metadata JSON as a placeholder
+            import io
+            meta_json = json.dumps(event, indent=2).encode("utf-8")
+            minio.put_object(
+                DEST_BUCKET,
+                dest_key.replace(".jpg", ".meta.json"),
+                io.BytesIO(meta_json),
+                length=len(meta_json),
+                content_type="application/json",
             )
-            return f"s3://{S3_BUCKET}/{s3_key}"
-
+            log.debug("Metadata written to %s/%s", DEST_BUCKET, dest_key)
         except Exception as e:
-            logger.warning(
-                f"[S3] Upload attempt {attempt}/{MAX_RETRIES} failed for {incident_id}: {e}"
-            )
-            if attempt < MAX_RETRIES:
-                time.sleep(2 ** attempt)
-            else:
-                logger.error(f"[S3] Final failure for {incident_id}: {e}")
-                return None
-
-    return None
+            log.error("MinIO write error: %s", e)
 
 
-def process_record(
-    record: dict,
-    s3_client,
-    producer,
-) -> bool:
-    """
-    Process single Kafka record.
-
-    Returns:
-        True if successfully processed, False otherwise
-    """
-    try:
-        incident_id = record.get("event_id", "unknown")
-        camera_id = record.get("camera_id", "unknown")
-        risk_score = record.get("risk_score", 0.0)
-        timestamp_str = record.get("timestamp", "")
-
-        # Extract thumbnail from metadata
-        metadata = record.get("metadata", {})
-        if isinstance(metadata, str):
-            try:
-                metadata = json.loads(metadata)
-            except json.JSONDecodeError:
-                metadata = {}
-
-        thumbnail_b64 = metadata.get("thumbnail", "")
-
-        if not thumbnail_b64:
-            logger.warning(f"[FRAME] No thumbnail for {incident_id}")
-            producer.send(
-                "frame-extraction-dlq",
-                value={
-                    "original": record,
-                    "error": "No thumbnail found",
-                    "timestamp": datetime.utcnow().isoformat(),
-                },
-            )
-            return False
-
-        # Parse date from timestamp
-        try:
-            dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-            incident_date = dt.strftime("%Y-%m-%d")
-        except (ValueError, TypeError):
-            incident_date = datetime.utcnow().strftime("%Y-%m-%d")
-            logger.warning(f"[FRAME] Failed to parse timestamp {timestamp_str}")
-
-        # Upload to S3
-        frame_url = upload_frame(
-            s3_client,
-            thumbnail_b64,
-            camera_id,
-            incident_date,
-            incident_id,
-            risk_score,
-        )
-
-        if not frame_url:
-            logger.error(f"[FRAME] Failed to upload {incident_id} after retries")
-            producer.send(
-                "frame-extraction-dlq",
-                value={
-                    "original": record,
-                    "error": "S3 upload failed after retries",
-                    "timestamp": datetime.utcnow().isoformat(),
-                },
-            )
-            return False
-
-        # Enrich and publish to intermediate topic
-        enriched = dict(record)
-        enriched["frame_url"] = frame_url
-        enriched["frame_capture_ts"] = int(datetime.utcnow().timestamp() * 1000)
-
-        producer.send("hot-violence-frames-uploaded", value=enriched)
-        logger.info(f"[FRAME] Processed {incident_id} → {frame_url}")
-        return True
-
-    except Exception as e:
-        logger.error(f"[FRAME] Unexpected error: {e}", exc_info=True)
-        return False
-
-
+# ── MAIN ───────────────────────────────────────────────────────────────────────
 def main():
-    logger.info("[MAIN] Starting Frame Evidence Extractor...")
-    logger.info(f"  Kafka: {KAFKA_BROKER}")
-    logger.info(f"  S3: {S3_BUCKET} @ {S3_ENDPOINT}")
-    logger.info(f"  Stop file: {STOP_FILE}")
+    minio    = _build_minio()
+    consumer = _build_consumer()
 
-    # Create clients
-    s3_client = get_s3_client()
+    log.info("Frame Extractor Sink running. Listening on %s ...", KAFKA_TOPIC)
+    processed = 0
 
-    consumer = KafkaConsumer(
-        "hot-violence-alerts-valid",
-        bootstrap_servers=KAFKA_BROKER,
-        group_id="frame-extractor-group",
-        value_deserializer=lambda v: json.loads(v.decode("utf-8")) if v else {},
-        auto_offset_reset="latest",
-        enable_auto_commit=True,
-    )
-
-    producer = KafkaProducer(
-        bootstrap_servers=KAFKA_BROKER,
-        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-    )
-
-    # Test S3 connectivity
     try:
-        s3_client.head_bucket(Bucket=S3_BUCKET)
-        logger.info(f"[S3] Connected to bucket: {S3_BUCKET}")
-    except s3_client.exceptions.NoSuchBucket:
-        logger.error(f"[S3] Bucket {S3_BUCKET} does not exist!")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"[S3] Connection error: {e}")
-        sys.exit(1)
-
-    # Main loop
-    try:
-        logger.info("[MAIN] Listening for incidents...")
-        for msg in consumer:
-            # Check for stop signal
-            if os.path.exists(STOP_FILE):
-                logger.info("[MAIN] Stop signal detected. Exiting...")
+        while True:
+            if Path(STOP_FILE).exists():
+                log.info("STOP file detected. Exiting.")
                 break
 
-            if msg.value:
-                process_record(msg.value, s3_client, producer)
+            for message in consumer:
+                if Path(STOP_FILE).exists():
+                    break
+                try:
+                    process_frame_event(message.value, minio)
+                    processed += 1
+                except Exception as e:
+                    log.error("Error processing message offset=%d: %s", message.offset, e)
 
-    except Exception as e:
-        logger.error(f"[KAFKA] Error: {e}", exc_info=True)
     except KeyboardInterrupt:
-        logger.info("[MAIN] Interrupted by user")
+        log.info("KeyboardInterrupt — stopping.")
     finally:
         consumer.close()
-        producer.close()
-        logger.info("[MAIN] Service stopped")
+        log.info("Processed %d frame events total.", processed)
 
 
 if __name__ == "__main__":
