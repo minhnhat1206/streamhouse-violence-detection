@@ -1,21 +1,25 @@
-logLevel: warn
+logLevel: info
 
+# RTSP server (publisher sẽ push tới đây)
 rtsp: yes
 rtspAddress: :8554
 
 rtmp: no
 
+# HLS global (dùng để serve .m3u8)
 hls: yes
 hlsAddress: :8888
 hlsAlwaysRemux: yes
 hlsSegmentDuration: 1s
-hlsSegmentCount: 7
+hlsSegmentCount: 10
 
+# Cấu hình WebRTC (WHEP/WHIP)
 webrtc: yes
 webrtcAddress: :8889
-webrtcAllowOrigin: '*'
 
-# Accept any publisher (rtsp_pusher pushes cam_XX streams here)
+webrtcAllowOrigin: '*'
+# -----------------------
+
 paths:
   all:
     source: publisher

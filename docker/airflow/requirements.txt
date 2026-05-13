@@ -1,0 +1,3 @@
+# Additional Python packages for Airflow DAGs
+trino==0.328.0
+requests==2.31.0
