@@ -32,10 +32,10 @@ with DAG(
         task_id="archive_paimon_to_iceberg",
         bash_command="""
         echo "=== [Step 1] Archiving Paimon WARM → Iceberg COLD ==="
-        docker exec flink-jobmanager \
+        docker exec jobmanager \
           /opt/flink/bin/flink run \
-          --python /opt/flink/usrlib/archive_to_iceberg.py \
-          --pyFiles /opt/flink/usrlib/ \
+          --python /opt/flink/scripts/archive_to_iceberg.py \
+          --pyFiles /opt/flink/scripts/ \
           -Dexecution.runtime-mode=BATCH \
           -Dpipeline.name=weekly_archive_paimon_to_iceberg
         echo "=== Archive completed ==="

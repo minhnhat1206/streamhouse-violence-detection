@@ -22,7 +22,11 @@ GATEWAY = "http://localhost:8083"
 SQL_CREATE_PAIMON_CATALOG = """
 CREATE CATALOG paimon_cat WITH (
   'type' = 'paimon',
-  'warehouse' = 's3://warehouse'
+  'warehouse' = 's3://warehouse/paimon',
+  's3.endpoint' = 'http://minio:9000',
+  's3.access-key' = 'minio',
+  's3.secret-key' = 'mypassword',
+  's3.path.style.access' = 'true'
 )
 """
 
@@ -171,7 +175,7 @@ def run_sql(sid: str, sql: str, wait: bool = True, timeout: int = 60) -> Optiona
         result = wait_for_statement(sid, op, timeout)
         rows = result.get("results", {}).get("data", [])
         if rows:
-            print(f"    → {rows[:3]}")
+            print("    -> %s" % rows[:3])
         return result
     return {"operationHandle": op}
 
@@ -184,7 +188,7 @@ def submit_pipeline(dry_run: bool = False):
         ("Create Paimon database", SQL_CREATE_PAIMON_DB, True, 30),
         ("Create Paimon table violence_incidents", SQL_CREATE_PAIMON_TABLE, True, 60),
         ("Create Kafka source table", SQL_CREATE_KAFKA_SOURCE, True, 30),
-        ("Submit INSERT → Paimon (streaming job)", SQL_INSERT_PAIMON, False, 0),
+        ("Submit INSERT -> Paimon (streaming job)", SQL_INSERT_PAIMON, False, 0),
     ]
 
     if dry_run:
