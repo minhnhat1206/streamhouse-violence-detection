@@ -12,7 +12,39 @@ echo "Kafka is ready. Creating topics..."
 
 BOOTSTRAP_SERVER="localhost:9092"
 
-# Tạo topic ingest.media.events
+# Raw inference input (RTSP pipeline → data contract validator reads from here)
+/opt/kafka/bin/kafka-topics.sh --create \
+    --topic urban-safety-alerts \
+    --bootstrap-server $BOOTSTRAP_SERVER \
+    --partitions 3 \
+    --replication-factor 1 \
+    --if-not-exists
+
+# Data contract validator output: valid events (Flink streaming jobs read from here)
+/opt/kafka/bin/kafka-topics.sh --create \
+    --topic hot-violence-alerts-valid \
+    --bootstrap-server $BOOTSTRAP_SERVER \
+    --partitions 3 \
+    --replication-factor 1 \
+    --if-not-exists
+
+# Data contract validator output: rejected events (quarantine)
+/opt/kafka/bin/kafka-topics.sh --create \
+    --topic urban-safety-quarantine \
+    --bootstrap-server $BOOTSTRAP_SERVER \
+    --partitions 3 \
+    --replication-factor 1 \
+    --if-not-exists
+
+# Frame evidence events
+/opt/kafka/bin/kafka-topics.sh --create \
+    --topic hot-violence-frames-uploaded \
+    --bootstrap-server $BOOTSTRAP_SERVER \
+    --partitions 3 \
+    --replication-factor 1 \
+    --if-not-exists
+
+# Legacy topics (kept for backwards compatibility)
 /opt/kafka/bin/kafka-topics.sh --create \
     --topic ingest.media.events \
     --bootstrap-server $BOOTSTRAP_SERVER \
@@ -20,7 +52,6 @@ BOOTSTRAP_SERVER="localhost:9092"
     --replication-factor 1 \
     --if-not-exists
 
-# Tạo topic model.inference.results
 /opt/kafka/bin/kafka-topics.sh --create \
     --topic model.inference.results \
     --bootstrap-server $BOOTSTRAP_SERVER \

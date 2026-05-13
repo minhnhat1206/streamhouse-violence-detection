@@ -44,6 +44,84 @@ Xây dựng và tối ưu hóa hệ thống phát hiện bạo lực thời gian
 ## 🤝 Handover Protocol (MUST READ)
 *Mỗi khi chuyển đổi Agent (Gemini <-> Claude), Agent hiện tại PHẢI cập nhật phần "Last State" bên dưới.*
 
+### 📍 Last State (Updated: 2026-05-13 — Phiên 24) ✅ STREAMHOUSE MERGE + PIPELINE BOOTSTRAP
+
+- **Agent vừa làm:** Claude (Session 24 — Streamhouse Architecture Merge & Pipeline Readiness)
+- **Trạng thái:** ✅ HOÀN THÀNH: Merge hoàn chỉnh kiến trúc Streamhouse từ Claude worktree vào branch `devNhat`, xóa toàn bộ file Spark-era, fix 3 blockers pipeline.
+
+---
+
+**🎯 Mục tiêu phiên 24:**
+1. Điều tra nguyên nhân codebase bị rối loạn (worktree vs main branch divergence)
+2. Merge kiến trúc Streamhouse đầy đủ từ `.claude/worktrees/loving-lederberg-714daa` vào `devNhat`
+3. Xóa toàn bộ file Spark-era thừa
+4. Kiểm tra pipeline readiness và fix các blockers
+
+---
+
+**✅ Việc đã làm:**
+
+**1 — Điều tra & Phân tích:**
+- Xác định worktree `claude/loving-lederberg-714daa` chứa kiến trúc Streamhouse hoàn chỉnh (Fluss/Paimon/Iceberg + Flink 1.18.1), trong khi `devNhat` vẫn còn file Spark cũ
+- Nhận diện các file config sai (Prometheus target Spark, Hive Metastore S3 bucket sai, Trino credentials hardcoded)
+
+**2 — Merge & Cleanup:**
+- Merge branch `claude/loving-lederberg-714daa` vào `devNhat`, resolve all conflicts (kept worktree's Streamhouse configs)
+- Xóa toàn bộ Spark-era files: `Dockerfile.spark`, `Dockerfile.kafka`, `Dockerfile.minio`, `Dockerfile.trino-api`, `config/spark/`, `backend/` (Node.js API), `scripts/streaming/kafka_iceberg_sink.py`, `scripts/streaming/inference_worker.py`, `scripts/streaming/rtsp_frame_publisher.py`
+- Fix `config/prometheus/prometheus.yml` → target Flink/Fluss thay vì Spark
+- Restore `config/hive_metastore/hive-site.xml` → đúng S3 bucket (`s3a://warehouse/iceberg_warehouse/`)
+- Restore `config/trino/coordinator/etc/catalog/iceberg.properties` → dùng env vars (`${ENV:MINIO_ROOT_USER}`) thay vì hardcode
+- Thêm `Violence-Urban-Safety-UI` làm proper git submodule (thay vì embedded repo)
+- Cập nhật `.gitignore` cho submodule paths và `.claude/worktrees/`
+
+**3 — Fix 3 Pipeline Blockers:**
+
+| # | Blocker | Fix | File |
+|---|---------|-----|------|
+| 1 | `create-topics.sh` thiếu topics Streamhouse | Thêm `hot-violence-alerts-valid` + `hot-violence-frames-uploaded` (3 partitions mỗi topic) | `scripts/setup/create-topics.sh` |
+| 2 | `docker network create violence-detection-net` undocumented prereq | Tự động hóa trong bootstrap script | `scripts/setup/start-pipeline.sh` (mới) |
+| 3 | Không có cơ chế tự động init tables + submit Flink jobs | Script 8-bước tự động hoá toàn bộ startup sequence | `scripts/setup/start-pipeline.sh` (mới) |
+
+**4 — Bootstrap Script mới** (`scripts/setup/start-pipeline.sh`):
+```
+Step 1: docker network create violence-detection-net
+Step 2: docker compose up -d
+Step 3: Wait for Kafka healthy (60s timeout)
+Step 4: Create Kafka topics (create-topics.sh)
+Step 5: Wait for Flink JobManager (90s timeout)
+Step 6: Wait for Hive Metastore healthy (120s timeout)
+Step 7: Init Paimon + Fluss + Iceberg tables
+Step 8: Submit 3 Flink streaming jobs (sink_to_fluss, sink_to_paimon, aggregate_paimon)
+```
+
+---
+
+**📊 Trạng thái pipeline sau phiên 24:**
+
+```
+Architecture:   ✅ Streamhouse hoàn chỉnh — Fluss/Paimon/Iceberg/Flink 1.18.1
+Kafka topics:   ✅ hot-violence-alerts-valid + hot-violence-frames-uploaded (trong create-topics.sh)
+Docker:         ✅ docker-compose.yml — KRaft Kafka, Fluss 0.9.0, Flink 1.18.1, Trino, Hive, chatbot
+Config:         ✅ Prometheus (Flink+Fluss targets), Hive Metastore (đúng S3 bucket), Trino (env vars)
+Git:            ✅ Violence-Urban-Safety-UI là submodule hợp lệ
+Bootstrap:      ✅ scripts/setup/start-pipeline.sh — 1 lệnh bật toàn bộ pipeline
+```
+
+**⚠️ Lưu ý khi khởi động:**
+- Phải chạy `bash scripts/setup/start-pipeline.sh` thay vì `docker compose up -d` trực tiếp (lần đầu)
+- Network `violence-detection-net` phải tồn tại trước khi compose up
+- Flink jobs mất sau container restart → script tự re-submit
+
+---
+
+**🔜 Việc cần làm tiếp (ưu tiên cao nhất):**
+1. **[P0] Chạy thực tế** `bash scripts/setup/start-pipeline.sh` để verify toàn bộ sequence hoạt động
+2. **[P1] Test chatbot** với data mới sau khi Flink jobs running
+3. **[P2] Airflow DAGs** — verify `flink_jobs_monitor.py` detect và restart Flink jobs đúng cách sau merge
+4. **[P3] Frontend** — Violence-Urban-Safety-UI (submodule) kết nối chatbot API port 5002
+
+---
+
 ### 📍 Last State (Updated: 2026-05-07 — Phiên 23) ✅ AIRFLOW + IMAGE RETRIEVAL VERIFIED
 
 - **Agent vừa làm:** Claude (Session 23 — Airflow Orchestration + Chatbot Image Retrieval)
