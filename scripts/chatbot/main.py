@@ -14,24 +14,24 @@ import os
 import traceback
 import time as time_module
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import List, Optional
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from config import settings, validate_config
-from logger import setup_logger, log_request, log_response
-from agent import (
+from .config import settings, validate_config
+from .logger import setup_logger, log_request, log_response
+from .agent import (
     create_agent_graph, AgentState, set_components, LayerChoice, IntentSchema,
     QueryResult
 )
-from components.chromadb_wrapper import ChromaDBWrapper, get_default_schemas
-from components.trino_client import TrinoClient
-from components.sql_generator import SQLGenerator
-from components.evidence_service import EvidenceService
-from components.data_ingest import DataIngestor
+from .components.chromadb_wrapper import ChromaDBWrapper, get_default_schemas
+from .components.trino_client import TrinoClient
+from .components.sql_generator import SQLGenerator
+from .components.evidence_service import EvidenceService
+from .components.data_ingest import DataIngestor
 
 # Initialize logger
 logger = setup_logger(__name__)
@@ -84,6 +84,7 @@ class ChatResponse(BaseModel):
     duration_ms: int = Field(..., description="Total execution time in milliseconds")
     frame_base64: Optional[str] = Field(None, description="Base64-encoded JPEG frame (if single incident)")
     frame_url: Optional[str] = Field(None, description="S3 path to evidence frame")
+    frame_urls: Optional[List[str]] = Field(None, description="Public HTTP URLs for evidence frames (evidence queries)")
     incident_id: Optional[str] = Field(None, description="Incident ID for frame reference")
 
     class Config:
@@ -352,6 +353,7 @@ async def chat(request: ChatRequest):
             incident_date=None,
             frame_url=None,
             frame_base64=None,
+            frame_urls=None,
             # Metadata
             start_time=start_time,
             duration_ms=None,
@@ -380,6 +382,7 @@ async def chat(request: ChatRequest):
             duration_ms=duration_ms,
             frame_base64=result.get("frame_base64"),
             frame_url=result.get("frame_url"),
+            frame_urls=result.get("frame_urls"),
             incident_id=result.get("incident_id"),
         )
 
@@ -524,6 +527,65 @@ async def _trino_query(sql: str, timeout: float = 20.0) -> list:
             if state in ("FAILED", "CANCELED"):
                 raise RuntimeError(body.get("error", {}).get("message", "Trino query failed"))
     return rows
+
+
+@app.get("/api/evidence/frames")
+async def get_evidence_frames(
+    camera_id: Optional[str] = None,
+    date: Optional[str] = None,
+    limit: int = 20,
+):
+    """
+    Return public MinIO HTTP URLs for evidence frames.
+
+    Query params:
+    - camera_id: filter by camera (e.g. cam_01)
+    - date: filter by date YYYY-MM-DD (defaults to today)
+    - limit: max number of frames (default 20)
+
+    Each frame is accessible at:
+      http://<minio-host>:9000/evidence-frames/{camera_id}/{date}/{uuid}.jpg
+    """
+    import datetime as _dt
+    minio_host = os.getenv("MINIO_ENDPOINT", "minio:9000")
+    bucket = os.getenv("S3_BUCKET", "evidence-frames")
+    public_base = os.getenv("MINIO_PUBLIC_URL", f"http://{minio_host}")
+
+    evidence_svc = app_state.get("evidence_service")
+    if not evidence_svc or not evidence_svc.client:
+        raise HTTPException(status_code=503, detail="Evidence service unavailable")
+
+    target_date = date or _dt.datetime.utcnow().strftime("%Y-%m-%d")
+    prefix = f"{camera_id}/{target_date}/" if camera_id else f""
+
+    try:
+        objects = evidence_svc.client.list_objects(
+            bucket_name=bucket,
+            prefix=prefix,
+            recursive=True,
+        )
+        frames = []
+        for obj in objects:
+            if not obj.object_name.endswith(".jpg"):
+                continue
+            frames.append({
+                "url": f"{public_base}/{bucket}/{obj.object_name}",
+                "object_key": obj.object_name,
+                "size": obj.size,
+                "last_modified": obj.last_modified.isoformat() if obj.last_modified else None,
+            })
+            if len(frames) >= limit:
+                break
+
+        return {
+            "total": len(frames),
+            "camera_id": camera_id,
+            "date": target_date,
+            "frames": frames,
+        }
+    except Exception as e:
+        logger.error(f"Evidence frames listing failed: {e}")
+        raise HTTPException(status_code=500, detail=f"MinIO error: {e}")
 
 
 @app.get("/api/recent-incidents")
