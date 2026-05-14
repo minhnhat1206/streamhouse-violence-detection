@@ -34,11 +34,12 @@ try:
 except ImportError:
     genai = None
 
-from logger import setup_logger, log_agent_node
-from components.chromadb_wrapper import ChromaDBWrapper
-from components.trino_client import TrinoClient, DataLayer
-from components.sql_generator import SQLGenerator
-from components.evidence_service import EvidenceService
+from .logger import setup_logger, log_agent_node
+from .components.chromadb_wrapper import ChromaDBWrapper
+from .components.trino_client import TrinoClient, DataLayer
+from .components.sql_generator import SQLGenerator
+from .components.evidence_service import EvidenceService
+from .components.schema_registry import get_schema_for_prompt, get_full_table_ref
 
 logger = setup_logger(__name__)
 
@@ -246,7 +247,30 @@ def _parse_intent_keywords(query: str) -> IntentSchema:
     q = query.lower()
 
     # Time period detection (order matters: most specific first)
-    if any(w in q for w in ["tháng trước", "thang truoc", "tháng qua", "thang qua",
+    # Step 1: Numeric patterns — "N phút/giờ/ngày qua" (handles sub-hour HOT routing)
+    _num_match = re.search(
+        r'(\d+)\s*(phút|phut|minute|min|giờ|gio|hour|ngày|ngay|day|tuần|tuan|week|tháng|thang|month)',
+        q
+    )
+    if _num_match:
+        _n = int(_num_match.group(1))
+        _unit = _num_match.group(2).lower()
+        if _unit in ("phút", "phut", "minute", "min"):
+            time_period = f"{_n} phút qua"   # <1hr → FLUSS (handled by select_data_layer regex)
+        elif _unit in ("giờ", "gio", "hour"):
+            time_period = f"{_n} giờ qua"    # hour-based → PAIMON/FLUSS per routing
+        elif _unit in ("ngày", "ngay", "day"):
+            time_period = f"{_n} ngày qua"
+        elif _unit in ("tuần", "tuan", "week"):
+            time_period = f"{_n} tuần qua"
+        elif _unit in ("tháng", "thang", "month"):
+            time_period = f"{_n} tháng qua"
+        else:
+            time_period = "hôm nay"
+    # Historical year-based query → COLD (Iceberg)
+    elif re.search(r'\b(năm|nam|year)\s*(20\d{2}|19\d{2})\b|\b(20\d{2}|19\d{2})\b', q):
+        time_period = "năm trước"   # select_data_layer: no numeric match, keyword "năm" → ICEBERG
+    elif any(w in q for w in ["tháng trước", "thang truoc", "tháng qua", "thang qua",
                               "30 ngày", "30 ngay", "tháng này", "thang nay", "month"]):
         time_period = "tháng trước"
     elif any(w in q for w in ["tuần trước", "tuan truoc", "tuần qua", "tuan qua",
@@ -257,8 +281,10 @@ def _parse_intent_keywords(query: str) -> IntentSchema:
     elif any(w in q for w in ["hôm nay", "hom nay", "today", "ngay hom nay", "trong ngày"]):
         time_period = "hôm nay"
     elif any(w in q for w in ["giờ trước", "gio truoc", "1 giờ", "gần đây", "real-time",
-                               "trực tiếp", "hot", "mới nhất"]):
-        time_period = "1 giờ qua"
+                               "trực tiếp", "hot", "mới nhất", "hien tai", "hiện tại",
+                               "ngay bay gio", "ngay bây giờ", "vua roi", "vừa rồi",
+                               "bay gio", "bây giờ", "now", "real time"]):
+        time_period = "mới nhất"  # HOT keyword → select_data_layer routes to FLUSS
     else:
         # Default to "today" if no keyword matched
         time_period = "hôm nay"
@@ -313,16 +339,18 @@ async def select_data_layer(state: AgentState) -> AgentState:
         # Strategy: numeric regex FIRST (most reliable), then keyword patterns.
         selected_layer = LayerChoice.PAIMON  # default
 
-        # Step 1: Try numeric regex for "N hours/days/weeks/months" (EN + VI)
-        # Vietnamese: giờ=hour, ngày=day, tuần=week, tháng=month
+        # Step 1: Try numeric regex for "N minutes/hours/days/weeks/months" (EN + VI)
+        # Vietnamese: phút/phut=minute, giờ=hour, ngày=day, tuần=week, tháng=month
         match = re.search(
-            r'(\d+)\s*(hour|giờ|gio|day|ngày|ngay|week|tuần|tuan|month|tháng|thang)s?',
+            r'(\d+)\s*(minute|phút|phut|min|hour|giờ|gio|day|ngày|ngay|week|tuần|tuan|month|tháng|thang)s?',
             time_period_str
         )
         if match:
             num = int(match.group(1))
             unit = match.group(2).lower()
-            if unit in ("hour", "giờ", "gio"):
+            if unit in ("minute", "phút", "phut", "min"):
+                days = num / 24 / 60  # convert minutes to days
+            elif unit in ("hour", "giờ", "gio"):
                 days = num / 24
             elif unit in ("day", "ngày", "ngay"):
                 days = num
@@ -332,9 +360,9 @@ async def select_data_layer(state: AgentState) -> AgentState:
                 days = num * 30
             else:
                 days = 1  # fallback to warm
-            if days < 1:
-                # Paimon has data from last few hours; Fluss only if sink job is live
-                # Route sub-hour queries to Paimon (warm) unless explicitly "right now"
+            if days < 1 / 24:  # < 1 hour → HOT (Fluss)
+                selected_layer = LayerChoice.FLUSS
+            elif days < 1:  # 1hr–1day → WARM (Paimon)
                 selected_layer = LayerChoice.PAIMON
             elif days <= 7:
                 selected_layer = LayerChoice.PAIMON
@@ -362,6 +390,12 @@ async def select_data_layer(state: AgentState) -> AgentState:
             selected_layer = LayerChoice.FLUSS  # HOT - real-time
 
         # Default: stay PAIMON (warm)
+
+        # EXPLICIT routing log (visible without JSONFormatter extension)
+        logger.info(
+            f"[ROUTING] time_period='{time_period_str}' → layer={selected_layer.value}",
+            extra={"request_id": state["request_id"], "action": "routing_decision"}
+        )
 
         # Set catalog and table based on selected layer
         if selected_layer == LayerChoice.FLUSS:
@@ -401,105 +435,130 @@ async def select_data_layer(state: AgentState) -> AgentState:
         return state
 
 
+def _clean_sql(raw: str) -> str:
+    """Strip markdown fences and leading/trailing whitespace from Gemini output."""
+    sql = raw.strip()
+    if sql.startswith("```"):
+        parts = sql.split("```")
+        # parts[1] is the content inside the fences
+        sql = parts[1].lstrip("sql").strip() if len(parts) > 1 else sql
+    # Remove trailing semicolons (Trino/Flink don't need them via API)
+    sql = sql.rstrip(";").strip()
+    return sql
+
+
 async def generate_sql(state: AgentState) -> AgentState:
     """
-    Node 3: Generate Trino SQL from intent + schema context.
+    Node 3: True Text-to-SQL — Gemini generates SQL from real schema + user question.
 
-    Uses:
-    - Intent extracted in Node 1
-    - Schema metadata from ChromaDB
-    - Trino-compatible SQL generation
+    Uses schema_registry (ground truth) instead of ChromaDB templates to eliminate
+    hallucinated column names.  Falls back to a safe template if Gemini unavailable.
     """
     log_agent_node(logger, state["request_id"], "generate_sql", "started")
 
     try:
-        intent = state["intent"]
         catalog = state["trino_catalog"]
         schema = state["trino_schema"]
         table = state["table_name"]
+        layer = state["selected_layer"]
+        full_ref = get_full_table_ref(table, schema)
+        schema_str = get_schema_for_prompt(table)
 
-        # Get schema context from ChromaDB
-        schema_context = []
-        if _chromadb:
+        today_str = datetime.utcnow().strftime("%Y-%m-%d")
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+        # ── True Text-to-SQL via Gemini ──────────────────────────────────────
+        if genai:
             try:
-                schema_context = _chromadb.search_schema(state["user_query"], top_k=3)
-            except Exception as e:
-                logger.warning(f"Failed to get schema context: {e}")
+                model = genai.GenerativeModel("gemini-2.5-flash")
 
-        # Generate SQL using SQL generator component
-        if _sql_generator:
-            try:
-                generated_sql = _sql_generator.generate_from_intent(
-                    intent=intent,
-                    schema_context=schema_context,
-                    table_name=table
-                )
-
-                # Add catalog prefix if not present
-                if catalog not in generated_sql:
-                    generated_sql = generated_sql.replace(
-                        f"FROM {table}",
-                        f"FROM {catalog}.{schema}.{table}"
+                # Layer-specific SQL dialect hints
+                if layer and "FLUSS" in str(layer).upper():
+                    dialect_hint = (
+                        "Syntax: Flink SQL (backtick `timestamp`, no TIMESTAMP WITH TIME ZONE).\n"
+                        "Use: `timestamp` >= TIMESTAMP '...' for time filters."
                     )
-                    if "FROM violence_incidents" in generated_sql:
-                        generated_sql = generated_sql.replace(
-                            "FROM violence_incidents",
-                            f"FROM {catalog}.{schema}.violence_incidents"
-                        )
-                    if "FROM daily_incident_stats" in generated_sql:
-                        generated_sql = generated_sql.replace(
-                            "FROM daily_incident_stats",
-                            f"FROM {catalog}.{schema}.daily_incident_stats"
-                        )
-                    if "FROM camera_stats" in generated_sql:
-                        generated_sql = generated_sql.replace(
-                            "FROM camera_stats",
-                            f"FROM {catalog}.{schema}.camera_stats"
-                        )
+                elif layer and "ICEBERG" in str(layer).upper():
+                    dialect_hint = (
+                        "Syntax: Trino SQL (double-quote reserved words like \"timestamp\").\n"
+                        "Use: timestamp >= TIMESTAMP '...' for time filters.\n"
+                        "Iceberg timestamp is TIMESTAMP(6) WITH TIME ZONE — cast with AT TIME ZONE if needed."
+                    )
+                else:
+                    dialect_hint = (
+                        "Syntax: Flink SQL (backtick `timestamp`, no TIMESTAMP WITH TIME ZONE).\n"
+                        "Use: `timestamp` >= TIMESTAMP '...' for time filters."
+                    )
 
-                state["generated_sql"] = generated_sql
+                prompt = f"""Bạn là chuyên gia SQL cho hệ thống giám sát bạo lực đô thị.
+Viết MỘT câu truy vấn SQL CHÍNH XÁC cho câu hỏi tiếng Việt dưới đây.
+
+## Câu hỏi người dùng
+"{state['user_query']}"
+
+## Schema của bảng `{full_ref}`
+{schema_str}
+
+## Thông tin thời gian hiện tại
+- Hôm nay: {today_str}
+- Bây giờ (UTC): {now_str}
+
+## Dialect & quy tắc SQL
+{dialect_hint}
+
+## Quy tắc BẮT BUỘC
+1. Chỉ truy vấn bảng `{full_ref}` — KHÔNG dùng bảng khác
+2. Chỉ dùng các cột có trong schema ở trên — KHÔNG tự thêm cột không có
+3. Thêm `is_violent = TRUE` trừ khi câu hỏi hỏi "tất cả sự kiện" hoặc "bình thường"
+4. Thêm bộ lọc thời gian phù hợp với câu hỏi (dùng TIMESTAMP literal)
+5. Giới hạn: LIMIT 50 cho SELECT *, không cần LIMIT cho COUNT/SUM/AVG
+6. Kết quả: trả về CHỈ SQL, không có giải thích, không có markdown fence
+
+## SQL:""".strip()
+
+                response = model.generate_content(prompt)
+                generated_sql = _clean_sql(response.text)
+                logger.info(f"[True Text-to-SQL] Generated: {generated_sql[:120]}...")
 
             except Exception as e:
-                logger.error(f"SQL generation error: {e}")
-                # Fallback to template SQL
-                state["generated_sql"] = f"""
-SELECT * FROM {catalog}.{schema}.{table}
-WHERE is_violent = TRUE
-LIMIT 100
-                """.strip()
+                logger.error(f"Gemini SQL generation failed: {e}")
+                generated_sql = None
         else:
-            # No SQL generator - use fallback
-            state["generated_sql"] = f"""
-SELECT * FROM {catalog}.{schema}.{table}
-LIMIT 100
-            """.strip()
+            generated_sql = None
 
-        # Validate SQL syntax
+        # ── Template fallback (Gemini unavailable or failed) ─────────────────
+        if not generated_sql:
+            logger.warning("Using template SQL fallback")
+            generated_sql = (
+                f"SELECT COUNT(*) AS incident_count\n"
+                f"FROM {full_ref}\n"
+                f"WHERE is_violent = TRUE\n"
+                f"  AND `timestamp` >= TIMESTAMP '{today_str} 00:00:00'"
+            )
+
+        state["generated_sql"] = generated_sql
+
+        # Basic validation
         if _sql_generator:
-            is_valid = _sql_generator.validate_sql(state["generated_sql"])
-            if not is_valid:
-                logger.warning(f"Generated SQL failed validation: {state['generated_sql'][:100]}")
+            if not _sql_generator.validate_sql(generated_sql):
+                logger.warning(f"SQL failed basic validation: {generated_sql[:100]}")
 
         log_agent_node(
             logger,
             state["request_id"],
             "generate_sql",
             "completed",
-            {
-                "sql_length": len(state["generated_sql"]),
-                "catalog": catalog,
-                "table": table
-            }
+            {"sql_length": len(generated_sql), "catalog": catalog, "table": table},
         )
-
         return state
 
     except Exception as e:
-        logger.error(f"SQL generation failed: {e}")
-        # Return safe fallback
-        state["generated_sql"] = f"""
-SELECT COUNT(*) as incident_count FROM {state["trino_catalog"]}.{state["trino_schema"]}.{state["table_name"]}
-        """.strip()
+        logger.error(f"generate_sql node failed: {e}")
+        schema = state.get("trino_schema", "security")
+        state["generated_sql"] = (
+            f"SELECT COUNT(*) AS incident_count "
+            f"FROM {state['trino_catalog']}.{schema}.{state['table_name']}"
+        )
         return state
 
 

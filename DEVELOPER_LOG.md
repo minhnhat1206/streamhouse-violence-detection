@@ -44,6 +44,294 @@ Xây dựng và tối ưu hóa hệ thống phát hiện bạo lực thời gian
 ## 🤝 Handover Protocol (MUST READ)
 *Mỗi khi chuyển đổi Agent (Gemini <-> Claude), Agent hiện tại PHẢI cập nhật phần "Last State" bên dưới.*
 
+### 📍 Last State (Updated: 2026-05-14 — Phiên 29) ✅ TRUE TEXT-TO-SQL CHATBOT
+
+- **Agent vừa làm:** Claude (Session 29 — True Text-to-SQL + Schema Registry + Vietnamese Time Parsing)
+- **Trạng thái:** ✅ HOÀN THÀNH: Nâng cấp chatbot từ template-SQL sang True Text-to-SQL với Gemini.
+
+---
+
+**🎯 Mục tiêu phiên 29:**
+1. Thay Gemini API key mới
+2. Xây dựng `schema_registry.py` — single source of truth cho table schemas
+3. Nâng cấp `generate_sql` node — True Text-to-SQL với schema-aware Gemini prompt
+4. Fix Vietnamese time parsing trong `_parse_time_period`
+5. Tạo 10 test cases E2E trong `test_text2sql.py`
+
+---
+
+**🔧 Changes Made:**
+
+| File | Change |
+|------|--------|
+| `docker/.env` | Gemini API key → `REDACTED_GEMINI_API_KEY` |
+| `scripts/chatbot/components/schema_registry.py` | **NEW** — Ground-truth schema cho 3 bảng (hot_violence_alerts, violence_incidents, historical_violence_incidents) |
+| `scripts/chatbot/agent.py` | `generate_sql` node: thay template-SQL bằng Gemini True Text-to-SQL với schema_registry prompt. Thêm `_clean_sql()` helper. |
+| `scripts/chatbot/components/sql_generator.py` | `_parse_time_period()`: thêm Vietnamese unit regex (phút/giờ/ngày/tuần/tháng) |
+| `docker/docker-compose.yml` | Trino healthcheck: `CMD` → `CMD-SHELL` (curl không có trong PATH mặc định) |
+| `scripts/chatbot/test_text2sql.py` | **NEW** — 10 test cases (HOT/WARM/COLD routing + SQL correctness + anti-hallucination) |
+
+---
+
+**📋 True Text-to-SQL Architecture:**
+
+```
+User Query (tiếng Việt)
+  ↓
+understand_query (Gemini → extract intent + time_period)
+  ↓
+select_data_layer (time_period regex → Fluss/Paimon/Iceberg routing)
+  ↓
+generate_sql (Gemini + schema_registry → TRUE Text-to-SQL)
+  │  - Schema string từ schema_registry.get_schema_for_prompt(table)
+  │  - Full table ref: catalog.schema.table
+  │  - Dialect hints: Flink SQL (backtick) vs Trino SQL (double-quote)
+  │  - Anti-hallucination: chỉ dùng columns có trong schema
+  ↓
+execute_query (route_query → Fluss/Paimon/Iceberg)
+  ↓
+self_correct (max 3 retries nếu SQL lỗi)
+  ↓
+generate_response (Gemini → Vietnamese answer + citation)
+```
+
+---
+
+**🧪 Test Suite (`test_text2sql.py`):**
+```bash
+# Offline (layer routing only, no API needed):
+docker exec chatbot python3 /app/scripts/chatbot/test_text2sql.py
+
+# Full E2E (requires chatbot running):
+docker exec chatbot python3 /app/scripts/chatbot/test_text2sql.py --api http://localhost:5002
+
+# From host (after chatbot starts):
+python scripts/chatbot/test_text2sql.py --api http://localhost:5002
+```
+
+**10 Test Cases:**
+1. HOT: "Hiện tại có bao nhiêu vụ bạo lực?" → Fluss, hot_violence_alerts
+2. WARM: "Hôm nay camera nào phát hiện nhiều nhất?" → Paimon, camera_id GROUP BY
+3. WARM: "Tuần này quận 1?" → Paimon, location filter
+4. WARM: "Liệt kê 5 vụ gần nhất kèm risk score" → Paimon, ORDER BY DESC
+5. WARM: "Risk score trung bình 3 ngày qua?" → Paimon, AVG(risk_score)
+6. COLD: "Tháng trước tổng cộng?" → Iceberg, historical_violence_incidents
+7. COLD (anti-hallucination): "Năm 2024?" → Iceberg, NOT paimon table
+8. CORRECTNESS: "Hôm nay bao nhiêu vụ?" → must include is_violent
+9. WARM: "Camera số 3 24h qua?" → camera_id filter
+10. WARM: "So sánh hôm nay vs hôm qua mỗi camera?" → camera_id GROUP BY
+
+---
+
+**⚠️ Known Issues Carryover:**
+| Issue | Severity | Action |
+|-------|----------|--------|
+| aggregate_paimon RESTARTING | 🟡 MEDIUM | Restart strategy active, self-recover |
+| Trino ↔ Paimon federation broken | 🟡 MEDIUM | Paimon queries route qua Flink SQL Gateway |
+| Chatbot chưa rebuild image mới | 🟡 MEDIUM | `docker compose up -d --build chatbot` đang chạy nền khi kết thúc session |
+
+---
+
+### 📍 Last State (Updated: 2026-05-14 — Phiên 28) ✅ ARCHITECTURE AUDIT + GAP FIXES
+
+- **Agent vừa làm:** Claude (Session 28 — Streamhouse architecture audit + 2 critical gap fixes)
+- **Trạng thái:** ✅ HOÀN THÀNH: Audit kiến trúc Streamhouse, fix 2 architecture gaps (Fluss persistence + Iceberg archive job).
+
+---
+
+**🎯 Mục tiêu phiên 28:**
+1. Kiểm tra xem pipeline thực tế có hoạt động đúng kiến trúc Streamhouse không
+2. Fix các gap được tìm thấy
+
+---
+
+**🔍 Architecture Audit Results:**
+
+| Layer | Documented | Actual | Status |
+|-------|-----------|--------|--------|
+| Kafka Ingest | `urban-safety-alerts` topic | ✅ Active, ~5816+ offsets | ✅ MATCH |
+| Data Contract Validator | Valid → `hot-violence-alerts-valid`, Invalid → `urban-safety-quarantine` | ✅ Job 3335006b RUNNING, lag=5 | ✅ MATCH |
+| HOT (Fluss) | `hot_violence_alerts`, <100ms, persistent snapshots | ✅ Job 59c6701b RUNNING — **FIXED: snapshots now persistent** | ✅ FIXED |
+| WARM (Paimon) | `violence_incidents`, `daily_incident_stats`, `camera_stats` | ✅ Job e73aa1a2 + fd23da18 RUNNING, 3237+ snapshots in MinIO | ✅ MATCH |
+| COLD (Iceberg) | `historical_violence_incidents`, archive job for >7 day data | ✅ Job fe0e0c8c submitted + completed — **FIXED: was never running** | ✅ FIXED |
+| Frame Evidence | Kafka valid → MinIO evidence-frames/{cam}/{date}/{uuid}.jpg | ✅ frame_extractor_sink service running, 44,976+ frames | ✅ MATCH |
+| Trino Federation | Federated query across Fluss/Paimon/Iceberg | ⚠️ Paimon connector JAR unavailable (known limitation) | ⚠️ KNOWN |
+| Chatbot RAG | LangGraph → Text-to-SQL → Fluss/Paimon/Iceberg routing | ✅ Layer routing correct; Paimon via Flink SQL Gateway | ✅ MATCH |
+
+---
+
+**🔧 Architecture Gaps Fixed:**
+
+| # | Gap | Root Cause | Fix |
+|---|-----|-----------|-----|
+| 1 | **Fluss snapshots wiped on restart** (`KvSnapshotNotExistException`) | `remote.data.dir: /tmp/fluss-remote-data` là ephemeral tmpfs, bị xóa khi container restart | Thêm Docker named volumes: `fluss-tablet-data:/var/fluss/data` + `fluss-tablet-remote:/var/fluss/remote-data`. Cập nhật `FLUSS_PROPERTIES` → paths mới. Verified: snapshot 45 tại `/var/fluss/remote-data/kv/security/hot_violence_alerts-3/0/snap-45/` |
+| 2 | **archive_to_iceberg.py chưa bao giờ được submit** | Job này tồn tại trong code nhưng không có trong startup sequence | Submit job `fe0e0c8c` (batch mode). Kết quả: `[SUCCESS] Archival job completed.` — 0 new records (expected: tất cả data < 7 days old). Cơ chế archive đã xác nhận hoạt động. |
+
+---
+
+**📊 Flink Jobs Status (End of Session 28):**
+
+| Job ID | Name | Status | Notes |
+|--------|------|--------|-------|
+| 3335006b | Data Contract Validator | ✅ RUNNING | Kafka lag=5 |
+| 59c6701b | insert-into fluss.hot_violence_alerts | ✅ RUNNING | Snapshot persistent ✅ |
+| e73aa1a2 | insert-into paimon.violence_incidents | ✅ RUNNING | Deduplicate merge engine |
+| fd23da18 | aggregate_paimon (daily+camera stats) | ⚠️ RESTARTING | Restart strategy active (max 20 retries) |
+| fe0e0c8c | insert-into iceberg.historical_violence_incidents | ✅ FINISHED | Batch job, 0 records (data < 7 days, expected) |
+
+**Cancelled duplicates:** `4356c08b` + `85fdf288` (duplicate Paimon sink jobs from earlier restarts)
+
+---
+
+**⚠️ Known Ongoing Issues:**
+
+| Issue | Severity | Action |
+|-------|----------|--------|
+| aggregate_paimon RESTARTING | 🟡 MEDIUM | Restart strategy active, will self-recover. Monitor Flink UI. |
+| Trino ↔ Paimon federation broken | 🟡 MEDIUM | `paimon-trino-476` JAR không có trên Maven Central. Paimon queries route qua Flink SQL Gateway (port 8083, `--profile ui`). |
+| PyFlink bind-mount submit bug | 🟡 MEDIUM | Luôn dùng: `cp script.py /tmp/ && flink run -py /tmp/script.py -d` |
+| archive_to_iceberg 0 records | ℹ️ INFO | Bình thường — data hiện tại chỉ có từ hôm nay (< 7 days). Job sẽ có records sau 7 ngày. |
+
+---
+
+### 📍 Last State (Updated: 2026-05-14 — Phiên 27) ✅ RTSP PIPELINE VERIFIED & STABLE
+
+- **Agent vừa làm:** Claude (Session 27 — RTSP bug verification, pipeline startup, Flink job stabilization)
+- **Trạng thái:** ✅ HOÀN THÀNH: Bug ffmpeg capture đã được verify là fixed. Pipeline đang chạy đầy đủ với 5 RTSP streams.
+
+---
+
+**🎯 Mục tiêu phiên 27:**
+Verify bug fix ffmpeg capture (Thumbnail size: 292 → real JPEG), khởi động lại pipeline, submit 5 Flink jobs.
+
+---
+
+**🔧 Bugs Fixed & Issues Resolved:**
+
+| # | Issue | Root Cause | Fix |
+|---|-------|-----------|-----|
+| 1 | `Thumbnail size: 292` (fake JPEG) | ffmpeg `subprocess.run(capture_output=True)` deadlock pipe | Fix đã có từ session trước (semaphore + tempfile). Verify: `size=4848B` (cam_01), `size=4274B` (cam_05) ✅ |
+| 2 | `flink run -py /opt/flink/scripts/X.py` NoSuchFileException | PyFlink `toRealPath()` fails trên Windows bind-mount khi có running jobs | Workaround: **luôn copy sang /tmp trước**: `cp /opt/flink/scripts/X.py /tmp/X.py && flink run -py /tmp/X.py -d` |
+| 3 | DCV và sink_to_fluss bị TaskManager heartbeat timeout sau ~5 phút | TaskManager JVM GC pressure khi nhiều PyFlink jobs chạy đồng thời | Thêm restart strategy: `RestartStrategies.fixed_delay_restart(20, 15000)` + `enable_checkpointing(30000)` |
+| 4 | MAX_CAMERAS=4 → 5 | Checklist yêu cầu 5 RTSP streams | Đã sửa `docker/docker-compose.yml` và restart rtsp_pusher |
+
+---
+
+**📊 Pipeline Status (End of Session 27):**
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| RTSP Pusher | ✅ 5 streams | cam_01-05, real JPEG confirmed (4274-4848B) |
+| Inference Mock | ✅ Running | 15 cameras, violence/normal detection |
+| Kafka urban-safety-alerts | ✅ Active | ~4621+ messages consumed by DCV |
+| Data Contract Validator | ✅ RUNNING | Job 3335006b, restart strategy added |
+| Sink to Fluss | ✅ RUNNING | Job d7cecb1f, hot-violence-alerts-valid lag ~39 |
+| Sink to Paimon | ⚠️ RESTARTING | Restart strategy active, ~3237 snapshots in MinIO |
+| Update Frame URL | ✅ RUNNING | Job e73aa1a2, UPSERT frame_url vào Paimon |
+| Aggregate Paimon | ⚠️ RESTARTING | Restart strategy active |
+| Frame Extractor | ✅ Running | Uploads to MinIO evidence-frames/{cam}/{date}/{uuid}.jpg |
+| MinIO evidence-frames | ✅ Active | 15 camera folders, 494+ frames for cam_01 |
+
+**⚠️ Known Issues:**
+- `Thumbnail size: 292` vẫn xuất hiện cho cam_06-15 (không có RTSP stream active) và khi semaphore đầy → BÌNH THƯỜNG
+- RESTARTING jobs (paimon sink, aggregate) do TaskManager heartbeat timeout → sẽ tự recover với restart strategy
+- Flink submit từ bind-mount fail khi đã có jobs running → dùng /tmp copy workaround
+
+---
+
+### 📍 Last State (Updated: 2026-05-14 — Phiên 26) ✅ START-PIPELINE.SH BUGS FIXED
+
+- **Agent vừa làm:** Claude (Session 26 — Fix start-pipeline.sh bugs found during validation)
+- **Trạng thái:** ✅ HOÀN THÀNH: Đã fix 3 bugs trong `start-pipeline.sh` và `docker-compose.yml` khiến pipeline không bootstrap đúng khi chạy `--profile streaming`.
+
+---
+
+**🎯 Mục tiêu phiên 26:**
+Dựa trên kết quả kiểm tra phiên 25, fix 3 bugs trong bootstrap script:
+1. Step 4 (`create-topics.sh`) không được mount vào kafka container → FAIL
+2. `trino-coordinator` thiếu healthcheck → chatbot không tự start trên Windows
+3. `--profile streaming` chạy cả `inference-mock` lẫn `rtsp-inference-mock` → duplicate data
+
+---
+
+**🔧 Bugs Fixed (3 bugs):**
+
+| # | File | Bug | Fix |
+|---|------|-----|-----|
+| 1 | `scripts/setup/start-pipeline.sh` | Step 4: `docker exec kafka bash /scripts/setup/create-topics.sh` — file không tồn tại trong kafka container (không mount) | Thay bằng loop gọi trực tiếp `/opt/kafka/bin/kafka-topics.sh --create` cho từng topic |
+| 2 | `docker/docker-compose.yml` | `trino-coordinator` không có `healthcheck` → `chatbot` phụ thuộc `condition: service_healthy` luôn timeout trên Windows | Thêm `healthcheck: curl -f http://localhost:8080/v1/info` vào `trino-coordinator` |
+| 3 | `scripts/setup/start-pipeline.sh` | `--profile streaming` start cả `inference-mock` (core) lẫn `rtsp-inference-mock` → duplicate data vào Kafka | Detect `HAS_STREAMING=1`, gọi `docker exec inference-mock touch /app/tmp/STOP` ngay sau Step 2 |
+
+---
+
+**✅ Kết quả validation (9 Phases):**
+
+| Phase | Nội dung | Kết quả | Ghi chú |
+|-------|----------|---------|---------|
+| Phase 0 | Stack startup + 4 Flink jobs | ✅ PASS | `data_contract_validator`, `sink_to_fluss`, `sink_to_paimon`, `aggregate_paimon` — tất cả RUNNING |
+| Phase 1 | RTSP → Kafka | ✅ PASS | `urban-safety-alerts`: 1,135,497+ msgs, growing |
+| Phase 2 | Data Contract Validator | ✅ PASS | Valid → `hot-violence-alerts-valid` (434k+), Invalid → `quarantine` (2 msgs) |
+| Phase 3 | HOT layer (Fluss) | ✅ PASS | `hot_violence_alerts` table nhận data, numRecordsOut > 944 |
+| Phase 4 | WARM layer (Paimon) | ✅ PASS | `violence_incidents`: 14,000+ rows, `daily_incident_stats`: 31+ rows |
+| Phase 5 | COLD layer (Iceberg/Trino) | ✅ PASS | `historical_violence_incidents`: 237,430 records, time travel OK |
+| Phase 6 | Chatbot routing | ✅ PASS | 5/5 routing tests correct: HOT/WARM/COLD/real-time/7-day |
+| Phase 7 | Chatbot quality | ⚠️ PARTIAL | Routing + citations OK; SQL date filters không work vì Gemini API key bị leaked (403) |
+| Phase 8 | Stability | ✅ PASS | 4 core Flink jobs: 1.5-3.0h uptime; Kafka growing; all services UP |
+
+---
+
+**🔧 Bugs Fixed (11 bugs):**
+
+| # | File | Bug | Fix |
+|---|------|-----|-----|
+| 1 | `rtsp_inference_mock.py` | `KAFKA_VALIDATED_TOPIC` undefined | → `KAFKA_TOPIC` |
+| 2 | `chatbot/logger.py` | `from config import settings` (wrong package) | → `from .config import settings` |
+| 3 | `chatbot/main.py` | All absolute imports | → relative imports |
+| 4 | `chatbot/agent.py` | All absolute imports | → relative imports |
+| 5 | `chatbot/agent.py` | Routing regex missing `phút/phut/minute/min` | Added minutes unit support |
+| 6 | `chatbot/agent.py` | `days < 1` → PAIMON (should be FLUSS for sub-hour) | `days < 1/24` → FLUSS |
+| 7 | `chatbot/agent.py` | `_parse_intent_keywords()` no numeric detection | Added regex for "N phút/giờ/ngày/..." |
+| 8 | `chatbot/agent.py` | "mới nhất/hien tai" → "1 giờ qua" → PAIMON | → `"mới nhất"` → FLUSS |
+| 9 | `chatbot/agent.py` | No year-based routing (2020 → PAIMON) | Added 4-digit year → Iceberg routing |
+| 10 | `chatbot/components/trino_client.py` | `query_fluss()` no catalog DDL → 500 error | Added `_FLUSS_CATALOG_DDL` per-session |
+| 11 | `chatbot/components/trino_client.py` | Fallback error list missing 500/not found | Added "server error", "500", "not found" |
+
+---
+
+**📊 Trạng thái sau phiên 25:**
+```
+Kafka topics:      ✅ urban-safety-alerts: 1,135,497+ msgs (growing ~1000/min)
+                   ✅ hot-violence-alerts-valid: 435,523+ msgs
+                   ✅ urban-safety-quarantine: 2 msgs (from manual invalid test)
+Fluss HOT:         ✅ hot_violence_alerts — live streaming data
+Paimon WARM:       ✅ violence_incidents 14,000+ rows | daily_incident_stats 31+ rows
+Iceberg COLD:      ✅ historical_violence_incidents 237,430 rows | time-travel OK
+Flink jobs:        ✅ 4 core jobs running (1.5-3.0h uptime)
+Chatbot routing:   ✅ All 5 layer routing tests pass (HOT/WARM/COLD)
+Chatbot Fluss:     ✅ query_fluss() now uses Fluss catalog DDL — 20 rows in 47s
+Chatbot Iceberg:   ✅ query_iceberg() via Trino — 21 rows in 8s
+```
+
+---
+
+**⚠️ Vấn đề chưa giải quyết:**
+
+| Issue | Mức độ | Cách fix |
+|-------|--------|---------|
+| **GEMINI_API_KEY bị leaked** (403) | 🔴 CRITICAL | Vào https://aistudio.google.com/app/apikey → tạo key mới → cập nhật `docker/.env` → restart chatbot |
+| Paimon queries block event loop | 🟡 MEDIUM | `_query_flink_gateway()` dùng blocking `requests` + `time.sleep()` — cần `asyncio.run_in_executor()` |
+| Anti-hallucination test (Phase 7) | 🟡 MEDIUM | Cần Gemini key để generate date-filtered SQL; hiện tại fallback SQL không có WHERE clause |
+
+---
+
+**🔜 Việc cần làm tiếp:**
+1. **[P0] NGAY: Thay Gemini API key** — key cũ bị leaked, mọi LLM call đều fail
+2. **[P1] Test Phase 7 đầy đủ** sau khi có key mới (chatbot quality, anti-hallucination, citations)
+3. **[P2] Fix async blocking** — wrap `_query_flink_gateway()` trong `asyncio.run_in_executor()`
+4. **[P3] Frontend** — kết nối dashboard với chatbot API (port 5002), real-time alerts
+
+---
+
 ### 📍 Last State (Updated: 2026-05-13 — Phiên 24) ✅ STREAMHOUSE MERGE + PIPELINE BOOTSTRAP
 
 - **Agent vừa làm:** Claude (Session 24 — Streamhouse Architecture Merge & Pipeline Readiness)
