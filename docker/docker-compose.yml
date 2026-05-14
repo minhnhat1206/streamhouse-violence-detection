@@ -732,6 +732,8 @@ services:
       - S3_BUCKET=evidence-frames
       - MINIO_ROOT_USER=${MINIO_ROOT_USER}
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      # Public URL for evidence frames (host-accessible, port 9000)
+      - MINIO_PUBLIC_URL=${MINIO_PUBLIC_URL:-http://localhost:9000}
 
       # Data Ingest Configuration
       - ICEBERG_BUCKET=${ICEBERG_BUCKET}

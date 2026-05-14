@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, TypedDict, Annotated, Union
 from enum import Enum
 from datetime import datetime, timedelta
 import json
+import os
 import re
 import time
 
@@ -84,6 +85,7 @@ class IntentSchema(BaseModel):
     intent_type: str = Field(..., description="Intent type (aggregate, trend, comparison, etc.)")
     filter_camera: Optional[str] = Field(None, description="Specific camera ID if mentioned")
     query_confidence: float = Field(ge=0.0, le=1.0, description="Confidence score of intent extraction")
+    wants_evidence: bool = Field(default=False, description="User wants to see frame evidence images")
 
 
 class QueryResult(BaseModel):
@@ -129,12 +131,15 @@ class AgentState(TypedDict):
     time_period: Optional[str]
     row_count: Optional[int]
 
-    # Frame evidence (for single-result queries)
+    # Frame evidence (single-result)
     incident_id: Optional[str]
     camera_id: Optional[str]
     incident_date: Optional[str]
     frame_url: Optional[str]
     frame_base64: Optional[str]
+
+    # Frame evidence (multi-result — evidence image queries)
+    frame_urls: Optional[List[str]]
 
     # Metadata
     start_time: float
@@ -145,6 +150,21 @@ class AgentState(TypedDict):
 # Node Functions (Stubs - To Be Implemented)
 # ============================================================================
 
+# Vietnamese keywords that signal the user wants to see evidence images
+_EVIDENCE_KEYWORDS = (
+    "ảnh", "anh", "hình", "hinh", "ảnh bằng chứng", "bang chung",
+    "bằng chứng", "xem ảnh", "xem hinh", "ảnh chụp", "screenshot",
+    "frame", "clip", "video", "chứng cứ", "chung cu", "hình ảnh",
+    "cho xem", "xem được không", "có ảnh không", "có hình không",
+)
+
+
+def _detect_evidence_intent(query: str) -> bool:
+    """Return True if the user is asking to see evidence/frame images."""
+    q = query.lower()
+    return any(kw in q for kw in _EVIDENCE_KEYWORDS)
+
+
 async def understand_query(state: AgentState) -> AgentState:
     """
     Node 1: Extract intent from Vietnamese natural language query.
@@ -154,21 +174,19 @@ async def understand_query(state: AgentState) -> AgentState:
     - location: "quận 1", "phường X", "đường Y"
     - metric: "count", "average", "sum"
     - intent_type: "aggregate_count", "time_series", "comparison"
+    - wants_evidence: True if user asks for frame images
     """
     log_agent_node(logger, state["request_id"], "understand_query", "started")
 
     try:
         user_query = state["user_query"]
+        wants_evidence = _detect_evidence_intent(user_query)
 
         if not genai:
             logger.warning("Gemini not available - using fallback intent parsing")
-            state["intent"] = IntentSchema(
-                time_period="today",
-                location=None,
-                metric="count",
-                intent_type="statistics",
-                query_confidence=0.5,
-            )
+            intent = _parse_intent_keywords(user_query)
+            intent.wants_evidence = wants_evidence
+            state["intent"] = intent
             return state
 
         # Use Gemini to parse Vietnamese intent
@@ -184,7 +202,7 @@ Hướng dẫn:
 - time_period: "hôm nay", "hôm qua", "tuần trước", "tháng trước", "7 ngày", hoặc kiểu thời gian khác
 - location: Tên quận/huyện hoặc null nếu toàn thành phố
 - metric: "count", "average", "max", "min", "list"
-- intent_type: "statistics", "query_recent", "trend", "comparison"
+- intent_type: "statistics", "query_recent", "trend", "comparison", "evidence_lookup"
 - query_confidence: [0.0-1.0] độ tin cậy trong việc hiểu ý định
 
 Ví dụ JSON:
@@ -206,17 +224,13 @@ Trả về CHỈ JSON, không có giải thích.
                 metric=intent_dict.get("metric", "count"),
                 intent_type=intent_dict.get("intent_type", "statistics"),
                 query_confidence=float(intent_dict.get("query_confidence", 0.8)),
+                wants_evidence=wants_evidence,
             )
         else:
-            # Fallback if JSON parsing fails
             logger.warning(f"Failed to parse Gemini response: {response_text[:100]}")
-            state["intent"] = IntentSchema(
-                time_period="today",
-                location=None,
-                metric="count",
-                intent_type="statistics",
-                query_confidence=0.5,
-            )
+            intent = _parse_intent_keywords(user_query)
+            intent.wants_evidence = wants_evidence
+            state["intent"] = intent
 
         log_agent_node(
             logger,
@@ -226,7 +240,7 @@ Trả về CHỈ JSON, không có giải thích.
             {
                 "intent_type": state["intent"].intent_type,
                 "confidence": state["intent"].query_confidence,
-                "location": state["intent"].location
+                "wants_evidence": state["intent"].wants_evidence,
             }
         )
 
@@ -234,8 +248,9 @@ Trả về CHỈ JSON, không có giải thích.
 
     except Exception as e:
         logger.error(f"Intent extraction failed: {e}")
-        # Keyword-based Vietnamese fallback parser (works without Gemini)
-        state["intent"] = _parse_intent_keywords(state["user_query"])
+        intent = _parse_intent_keywords(state["user_query"])
+        intent.wants_evidence = _detect_evidence_intent(state["user_query"])
+        state["intent"] = intent
         return state
 
 
@@ -316,6 +331,7 @@ def _parse_intent_keywords(query: str) -> IntentSchema:
         metric=metric,
         intent_type="statistics",
         query_confidence=0.6,
+        wants_evidence=False,  # caller sets this after _detect_evidence_intent()
     )
 
 
@@ -466,28 +482,35 @@ async def generate_sql(state: AgentState) -> AgentState:
 
         today_str = datetime.utcnow().strftime("%Y-%m-%d")
         now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        wants_evidence = state.get("intent") and state["intent"].wants_evidence
 
         # ── True Text-to-SQL via Gemini ──────────────────────────────────────
         if genai:
             try:
                 model = genai.GenerativeModel("gemini-2.5-flash")
 
-                # Layer-specific SQL dialect hints
-                if layer and "FLUSS" in str(layer).upper():
+                # Always generate Trino SQL dialect (double-quote for reserved words).
+                # _adapt_sql_for_flink() in trino_client.py converts "timestamp" → `timestamp`
+                # automatically when the query is routed through Flink SQL Gateway.
+                if layer and "ICEBERG" in str(layer).upper():
                     dialect_hint = (
-                        "Syntax: Flink SQL (backtick `timestamp`, no TIMESTAMP WITH TIME ZONE).\n"
-                        "Use: `timestamp` >= TIMESTAMP '...' for time filters."
-                    )
-                elif layer and "ICEBERG" in str(layer).upper():
-                    dialect_hint = (
-                        "Syntax: Trino SQL (double-quote reserved words like \"timestamp\").\n"
-                        "Use: timestamp >= TIMESTAMP '...' for time filters.\n"
-                        "Iceberg timestamp is TIMESTAMP(6) WITH TIME ZONE — cast with AT TIME ZONE if needed."
+                        'Syntax: Trino SQL. Use double-quote for reserved keyword: "timestamp".\n'
+                        "Iceberg timestamp column is TIMESTAMP(6) WITH TIME ZONE.\n"
+                        "Time filter example: \"timestamp\" >= TIMESTAMP '2026-05-14 00:00:00'"
                     )
                 else:
                     dialect_hint = (
-                        "Syntax: Flink SQL (backtick `timestamp`, no TIMESTAMP WITH TIME ZONE).\n"
-                        "Use: `timestamp` >= TIMESTAMP '...' for time filters."
+                        'Syntax: Trino SQL. Use double-quote for reserved keyword: "timestamp".\n'
+                        'Time filter example: "timestamp" >= TIMESTAMP \'2026-05-14 00:00:00\'\n'
+                        "Do NOT use backtick — use double-quote only."
+                    )
+
+                evidence_note = ""
+                if wants_evidence and "frame_url" in schema_str:
+                    evidence_note = (
+                        "\n7. BẮTBUỘC: Luôn SELECT cột `frame_url` — người dùng muốn xem ảnh bằng chứng\n"
+                        "8. Ưu tiên ORDER BY \"timestamp\" DESC LIMIT 10 để lấy ảnh mới nhất\n"
+                        "9. Chỉ lấy các dòng có frame_url IS NOT NULL"
                     )
 
                 prompt = f"""Bạn là chuyên gia SQL cho hệ thống giám sát bạo lực đô thị.
@@ -512,7 +535,7 @@ Viết MỘT câu truy vấn SQL CHÍNH XÁC cho câu hỏi tiếng Việt dư�
 3. Thêm `is_violent = TRUE` trừ khi câu hỏi hỏi "tất cả sự kiện" hoặc "bình thường"
 4. Thêm bộ lọc thời gian phù hợp với câu hỏi (dùng TIMESTAMP literal)
 5. Giới hạn: LIMIT 50 cho SELECT *, không cần LIMIT cho COUNT/SUM/AVG
-6. Kết quả: trả về CHỈ SQL, không có giải thích, không có markdown fence
+6. Kết quả: trả về CHỈ SQL, không có giải thích, không có markdown fence{evidence_note}
 
 ## SQL:""".strip()
 
@@ -601,14 +624,33 @@ async def execute_query(state: AgentState) -> AgentState:
                 error=None,
             )
 
-            # Extract frame metadata if single result
+            # Extract frame metadata for single result (existing behaviour)
             if row_count == 1 and results:
                 first_row = results[0]
                 state["incident_id"] = first_row.get("incident_id")
                 state["camera_id"] = first_row.get("camera_id")
                 state["incident_date"] = first_row.get("timestamp") or first_row.get("incident_date")
                 state["frame_url"] = first_row.get("frame_url")
-                logger.info(f"Frame metadata extracted: incident_id={state['incident_id']}, camera_id={state['camera_id']}")
+
+            # Collect frame_urls from ALL results when evidence was requested
+            # Prefer stored frame_url column; fall back to building URL from metadata
+            wants_evidence = (
+                state.get("intent") and state["intent"].wants_evidence
+            )
+            if results and (wants_evidence or any(r.get("frame_url") for r in results)):
+                minio_base = os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000")
+                bucket = os.getenv("S3_BUCKET", "evidence-frames")
+                collected: List[str] = []
+                for row in results:
+                    url = row.get("frame_url") or ""
+                    if url and not url.startswith("http"):
+                        # Build public HTTP URL from stored path/key
+                        url = f"{minio_base}/{bucket}/{url.lstrip('/')}"
+                    if url:
+                        collected.append(url)
+                state["frame_urls"] = collected or None
+                if collected:
+                    logger.info(f"Collected {len(collected)} frame URLs from results")
 
             logger.info(f"Query executed successfully: {row_count} rows")
 
@@ -766,6 +808,16 @@ async def generate_response(state: AgentState) -> AgentState:
                 # Format data as Vietnamese text
                 formatted_data = _safe_json_dumps(results[:5])
 
+                frame_urls = state.get("frame_urls") or []
+                evidence_note_for_gemini = ""
+                if frame_urls:
+                    evidence_note_for_gemini = (
+                        f"\n6. Người dùng đã yêu cầu xem ảnh bằng chứng. "
+                        f"Đã tìm thấy {len(frame_urls)} ảnh. "
+                        f"Thông báo: 'Đã tìm thấy {len(frame_urls)} ảnh bằng chứng, "
+                        f"xem ở phần frame_urls trong kết quả.'"
+                    )
+
                 if genai:
                     try:
                         model = genai.GenerativeModel("gemini-2.5-flash")
@@ -790,7 +842,7 @@ Hãy tổng hợp kết quả truy vấn dưới đây thành một câu trả l
 2. Nêu các con số cụ thể từ kết quả
 3. Cuối cùng, thêm dòng citation: "Nguồn: {src} ({dlayer}), {row_count} hàng"
 4. Không bịa dữ liệu, chỉ sử dụng những gì có trong kết quả
-5. Trả về CHỈ câu trả lời, không có giải thích thêm
+5. Trả về CHỈ câu trả lời, không có giải thích thêm{evidence_note_for_gemini}
 
 **Câu trả lời:**
                         """.strip()
@@ -801,13 +853,11 @@ Hãy tổng hợp kết quả truy vấn dưới đây thành một câu trả l
 
                     except Exception as e:
                         logger.error(f"Gemini synthesis failed: {e}")
-                        # Fallback: format data manually
                         state["final_answer"] = _format_response_fallback(
                             results, state, row_count
                         )
                         state["response_confidence"] = 0.7
                 else:
-                    # No Gemini: format manually
                     state["final_answer"] = _format_response_fallback(
                         results, state, row_count
                     )
