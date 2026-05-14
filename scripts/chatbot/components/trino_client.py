@@ -51,6 +51,12 @@ _PAIMON_CATALOG_DDL = """CREATE CATALOG paimon_warm WITH (
   's3.path.style.access' = 'true'
 )"""
 
+# ── Fluss catalog DDL used per-session in Flink SQL Gateway ───────────────────
+_FLUSS_CATALOG_DDL = """CREATE CATALOG fluss_hot WITH (
+  'type' = 'fluss',
+  'bootstrap.servers' = 'fluss-coordinator:9123'
+)"""
+
 
 class TrinoClient:
     """Trino client with connection pooling and layer routing."""
@@ -377,9 +383,32 @@ class TrinoClient:
     # ── Public layer query methods ─────────────────────────────────────────────
 
     def query_fluss(self, sql: str, timeout: int = 30) -> List[Dict[str, Any]]:
-        """Query HOT layer (Fluss) via Flink SQL Gateway."""
+        """Query HOT layer (Fluss) via Flink SQL Gateway.
+
+        Sets up the fluss_hot catalog per-session before executing the query.
+        Table reference: fluss_hot.security.hot_violence_alerts
+        """
         logger.info(f"Querying Fluss (HOT): {sql[:100]}...")
-        return self._query_flink_gateway(sql, timeout=timeout)
+
+        # Strip any catalog/schema prefix — the gateway session runs USE CATALOG + USE
+        import re as _re
+        flink_sql = sql
+        for prefix in ("fluss.security.", "fluss.",
+                       "paimon.security.", "paimon.",
+                       "iceberg.security.", "iceberg."):
+            flink_sql = flink_sql.replace(prefix, "")
+        # Normalise table name: violence_incidents → hot_violence_alerts for Fluss
+        flink_sql = _re.sub(r'\bviolence_incidents\b', 'hot_violence_alerts', flink_sql)
+        # Quote reserved keyword `timestamp` if used bare
+        flink_sql = _re.sub(r'(?<![`"\w])timestamp(?![`"\w(])', '`timestamp`', flink_sql, flags=_re.IGNORECASE)
+
+        init = [
+            _FLUSS_CATALOG_DDL,
+            "USE CATALOG fluss_hot",
+            "USE `security`",
+        ]
+
+        return self._query_flink_gateway(flink_sql, init_statements=init, timeout=timeout)
 
     def query_paimon(self, sql: str, timeout: int = 30) -> List[Dict[str, Any]]:
         """Query WARM layer (Paimon) via Flink SQL Gateway with per-session catalog.
@@ -439,6 +468,7 @@ class TrinoClient:
             "connection timeout", "timeout", "unable to connect",
             "refused", "connect timed out", "table_not_found",
             "does not exist", "no such table",
+            "server error", "500", "internal server error", "not found",
         )
 
         if "FLUSS" in layer_str or layer == DataLayer.FLUSS:

@@ -1,11 +1,14 @@
 import os
 from pyflink.table import EnvironmentSettings, TableEnvironment, StreamTableEnvironment
 from pyflink.datastream import StreamExecutionEnvironment
+from pyflink.common.restart_strategy import RestartStrategies
 
 def main():
     # Setup Stream Table Environment
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)
+    env.set_restart_strategy(RestartStrategies.fixed_delay_restart(20, 15000))
+    env.enable_checkpointing(30000)
     t_env = StreamTableEnvironment.create(env)
     
     # JARs (Kafka + Fluss connectors) are pre-loaded in /opt/flink/lib/ (system classpath)

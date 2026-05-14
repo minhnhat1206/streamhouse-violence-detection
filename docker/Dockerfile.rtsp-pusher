@@ -1,18 +1,12 @@
-# Sử dụng image Python cơ bản
 FROM python:3.10-slim
 
-# Cài đặt FFmpeg (rất quan trọng)
-# Cập nhật và cài đặt các gói cần thiết, bao gồm ffmpeg
 RUN apt-get update && \
-    apt-get install -y ffmpeg netcat-openbsd && \
+    apt-get install -y --no-install-recommends ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
-# Thiết lập thư mục làm việc
 WORKDIR /app
 
-COPY scripts/streaming/simulateRTSP.py /app/simulateRTSP.py
-RUN pip install --no-cache-dir natsort requests
+COPY scripts/streaming/rtsp_pusher.py /app/rtsp_pusher.py
 
-
-# Lệnh mặc định sẽ chạy script start
-CMD ["python", "simulateRTSP.py", "start"]
+# No extra Python deps — only stdlib + ffmpeg binary
+CMD ["python", "/app/rtsp_pusher.py"]
