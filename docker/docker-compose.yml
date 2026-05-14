@@ -118,30 +118,35 @@ services:
       - violence-detection-net
 
   # --- RTSP Pusher (optional — real camera streaming) ---
+  # Pushes RWF-2000 .avi clips to MediaMTX via ffmpeg.
+  # rtsp-inference-mock then captures frames from these streams.
   rtsp_pusher:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.rtsp-pusher
+    image: docker-rtsp_pusher:latest   # use pre-built image (has ffmpeg+python)
+    command: python /app/rtsp_pusher.py
     container_name: rtsp_pusher
     profiles: [streaming]
     environment:
-      RTSP_BASE: rtsp://mediamtx:8554
+      METADATA_FILE: /app/data/metadata/camera_registry.csv
+      FIGHT_DIR: /app/data/raw/RWF-2000/train/Fight
+      NON_FIGHT_DIR: /app/data/raw/RWF-2000/train/NonFight
+      FIGHT_MANIFEST: /app/data/metadata/fight_clips_manifest.txt
+      NONFIGHT_MANIFEST: /app/data/metadata/nonfight_clips_manifest.txt
+      MEDIAMTX_HOST: mediamtx
+      MAX_CAMERAS: "5"       # limit ffmpeg processes to avoid CPU overload
+      CLIPS_PER_CAM: "6"
+      STOP_FILE: /app/tmp/STOP
     volumes:
-      - ../data/processed/clips_for_streaming:/app/data/processed/clips_for_streaming:ro
+      - ../scripts/streaming/rtsp_pusher.py:/app/rtsp_pusher.py:ro  # mount new script
+      - ../data/raw/RWF-2000:/app/data/raw/RWF-2000:ro
       - ../data/metadata:/app/data/metadata:ro
-      - ../tmp/rtsp-pusher:/app/tmp
-      - ../logs/rtsp-pusher:/app/logs
-      - ../pids:/app/pids
-      - ../data/raw/RWF-2000:/app/data/raw/RWF-2000
-      - ../data/playlist:/app/data/playlist
-      - ../scripts/streaming/:/app/
+      - rtsp-pusher-tmp:/app/tmp
     depends_on:
       mediamtx:
         condition: service_started
     deploy:
       resources:
         limits:
-          memory: 512m
+          memory: 768m
           cpus: "1.00"
     networks:
       - violence-detection-net
@@ -205,8 +210,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 384m
-          cpus: "0.50"
+          memory: 512m
+          cpus: "1.00"   # increased: ffmpeg frame capture needs CPU headroom
     networks:
       - violence-detection-net
     restart: on-failure
@@ -275,6 +280,8 @@ services:
     environment:
       KAFKA_BROKER: kafka:9092
       S3_ENDPOINT: http://minio:9000
+      # Public HTTP URL used in stored frame_url (browser-accessible via host port 9000)
+      S3_PUBLIC_URL: http://localhost:9000
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-mypassword}
       STOP_FILE: /app/tmp/STOP
@@ -426,8 +433,13 @@ services:
         advertised.listeners: INTERNAL://fluss-tablet:9093,CLIENT://fluss-tablet:9094
         internal.listener.name: INTERNAL
         client.listener.name: CLIENT
+        data.dir: /var/fluss/data
+        remote.data.dir: /var/fluss/remote-data
     ports:
       - "9094:9094"
+    volumes:
+      - fluss-tablet-data:/var/fluss/data
+      - fluss-tablet-remote:/var/fluss/remote-data
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/9094' || exit 1"]
       interval: 10s
@@ -635,6 +647,13 @@ services:
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-mypassword}
     depends_on:
       - hive-metastore
+    healthcheck:
+      # CMD-SHELL ensures shell PATH lookup finds curl (trinodb/trino image ships curl in /usr/bin)
+      test: ["CMD-SHELL", "curl -f -s http://localhost:8080/v1/info || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
     deploy:
       resources:
         limits:
@@ -774,4 +793,7 @@ volumes:
   producer-tmp:
   inference-tmp:
   rtsp-inference-tmp:
+  rtsp-pusher-tmp:
   frame-extractor-tmp:
+  fluss-tablet-data:
+  fluss-tablet-remote:

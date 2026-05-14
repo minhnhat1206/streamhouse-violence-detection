@@ -96,20 +96,42 @@ class SQLGenerator:
             where_clause = f"WHERE {TS} >= {ts_fmt(start)}"
 
         else:
-            # Try to parse as "N days" or "N weeks" etc.
-            match = re.search(r'(\d+)\s*(day|week|month|hour)s?', time_period_str)
+            # Try to parse "N <unit>" patterns — includes Vietnamese units
+            _UNIT_MAP = {
+                # minutes
+                "minute": "minute", "minutes": "minute", "min": "minute",
+                "phút": "minute", "phut": "minute",
+                # hours
+                "hour": "hour", "hours": "hour",
+                "giờ": "hour", "gio": "hour",
+                # days
+                "day": "day", "days": "day",
+                "ngày": "day", "ngay": "day",
+                # weeks
+                "week": "week", "weeks": "week",
+                "tuần": "week", "tuan": "week",
+                # months
+                "month": "month", "months": "month",
+                "tháng": "month", "thang": "month",
+            }
+            match = re.search(
+                r'(\d+)\s*(phút|phut|minute|min|giờ|gio|hour|ngày|ngay|day|tuần|tuan|week|tháng|thang|month)s?',
+                time_period_str
+            )
             if match:
                 num = int(match.group(1))
-                unit = match.group(2)
+                unit = _UNIT_MAP.get(match.group(2).lower(), "day")
 
-                if unit == "hour":
+                if unit == "minute":
+                    delta = timedelta(minutes=num)
+                elif unit == "hour":
                     delta = timedelta(hours=num)
                 elif unit == "day":
                     delta = timedelta(days=num)
                 elif unit == "week":
                     delta = timedelta(weeks=num)
                 elif unit == "month":
-                    delta = timedelta(days=num*30)
+                    delta = timedelta(days=num * 30)
                 else:
                     delta = timedelta(days=7)
 
