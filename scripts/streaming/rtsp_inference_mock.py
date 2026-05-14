@@ -31,6 +31,13 @@ from datetime import datetime, timezone
 
 from kafka import KafkaProducer
 
+# ================= GLOBAL CONCURRENCY LIMIT =================
+# Limit concurrent ffmpeg capture processes to avoid CPU starvation.
+# With 15 camera threads and 0.5 CPU, unconstrained ffmpeg spawning causes
+# every process to starve and timeout. 3 concurrent captures saturates ~1 CPU.
+MAX_CONCURRENT_CAPTURES = int(os.getenv("MAX_CONCURRENT_CAPTURES", "3"))
+_capture_semaphore = threading.Semaphore(MAX_CONCURRENT_CAPTURES)
+
 # ================= CONFIGURATION =================
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "urban-safety-alerts")
@@ -89,33 +96,53 @@ def capture_jpeg(rtsp_url: str, timeout_s: int = RTSP_TIMEOUT_S) -> tuple[bool, 
     fake_jpeg_bytes = bytes.fromhex(fake_jpeg_hex)
     fake_jpeg_b64 = base64.b64encode(fake_jpeg_bytes).decode("utf-8")
 
+    import tempfile, os as _os
+
+    # Use semaphore to limit concurrent ffmpeg processes (CPU starvation protection)
+    if not _capture_semaphore.acquire(blocking=False):
+        # All slots busy — return fake immediately rather than queuing
+        return True, fake_jpeg_b64
+
+    tmpfile = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+    tmppath = tmpfile.name
+    tmpfile.close()
+
+    proc = None
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [
-                "ffmpeg",
-                "-loglevel", "error",
+                "ffmpeg", "-y", "-nostdin",
+                "-loglevel",       "error",
                 "-rtsp_transport", "tcp",
-                "-i", rtsp_url,
-                "-vframes", "1",
-                "-vf", "scale=160:90",
-                "-f", "image2pipe",   # pipe output — no file path needed
-                "-vcodec", "mjpeg",
-                "pipe:1",
+                # Note: -stimeout removed in ffmpeg 5+; we rely on proc.wait(timeout=)
+                "-i",              rtsp_url,
+                "-vframes",        "1",
+                "-vf",             "scale=160:90",
+                tmppath,
             ],
-            capture_output=True,
-            timeout=timeout_s + 2,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        if result.returncode == 0 and result.stdout:
-            return True, base64.b64encode(result.stdout).decode("utf-8")
-        # ffmpeg failed — use fallback
+        proc.wait(timeout=timeout_s + 2)
+        if proc.returncode == 0 and _os.path.getsize(tmppath) > 0:
+            with open(tmppath, "rb") as fh:
+                return True, base64.b64encode(fh.read()).decode("utf-8")
         return True, fake_jpeg_b64
 
     except subprocess.TimeoutExpired:
-        # Timeout — use fallback
+        if proc:
+            proc.kill()
+            proc.wait()
         return True, fake_jpeg_b64
     except Exception:
-        # Any error — use fallback
         return True, fake_jpeg_b64
+    finally:
+        _capture_semaphore.release()
+        try:
+            _os.unlink(tmppath)
+        except Exception:
+            pass
 
 
 # ================= MOCK INFERENCE =================
@@ -217,7 +244,7 @@ class CameraWorker(threading.Thread):
         # DEBUG: Log payload structure
         if payload.get("is_violent"):
             thumb_len = len(payload.get("metadata", {}).get("thumbnail", "")) if isinstance(payload.get("metadata"), dict) else 0
-            print(f"    [PUBLISH] Thumbnail size: {thumb_len} | Topic: {KAFKA_VALIDATED_TOPIC}", flush=True)
+            print(f"    [PUBLISH] Thumbnail size: {thumb_len} | Topic: {KAFKA_TOPIC}", flush=True)
 
         status = "VIOLENCE" if result["is_violent"] else "Normal"
         print(f"[{self.cam_id}] {status} | score={result['risk_score']:.3f}")

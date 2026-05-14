@@ -42,6 +42,9 @@ S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
 S3_BUCKET = "evidence-frames"
 S3_ACCESS_KEY = os.getenv("MINIO_ROOT_USER", "minio")
 S3_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD", "mypassword")
+# Public-facing base URL for stored frame_url (browser-accessible)
+# Inside Docker: http://minio:9000   |   From host browser: http://localhost:9000
+S3_PUBLIC_URL = os.getenv("S3_PUBLIC_URL", "http://localhost:9000").rstrip("/")
 STOP_FILE = os.getenv("STOP_FILE", "/app/tmp/STOP")
 MAX_RETRIES = 3
 
@@ -88,7 +91,8 @@ def upload_frame(
                     "capture_date": incident_date,
                 },
             )
-            return f"s3://{S3_BUCKET}/{s3_key}"
+            # Return public HTTP URL (browser-accessible via MinIO API port 9000)
+            return f"{S3_PUBLIC_URL}/{S3_BUCKET}/{s3_key}"
 
         except Exception as e:
             logger.warning(
@@ -172,10 +176,12 @@ def process_record(
             )
             return False
 
-        # Enrich and publish to intermediate topic
+        # Enrich and publish to downstream topic
+        # Promote thumbnail_b64 to a top-level field so Flink job can map it directly
         enriched = dict(record)
         enriched["frame_url"] = frame_url
         enriched["frame_capture_ts"] = int(datetime.utcnow().timestamp() * 1000)
+        enriched["thumbnail_b64"] = thumbnail_b64  # promote from metadata
 
         producer.send("hot-violence-frames-uploaded", value=enriched)
         logger.info(f"[FRAME] Processed {incident_id} → {frame_url}")

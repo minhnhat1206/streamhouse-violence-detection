@@ -10,6 +10,7 @@ from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.common.serialization import SimpleStringSchema
 from pyflink.datastream.connectors.kafka import FlinkKafkaConsumer, FlinkKafkaProducer
 from pyflink.common.typeinfo import Types
+from pyflink.common.restart_strategy import RestartStrategies
 
 def validate_record(record_str):
     """
@@ -85,6 +86,8 @@ def strip_metadata_for_valid(record_str):
 def main():
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)
+    env.set_restart_strategy(RestartStrategies.fixed_delay_restart(20, 15000))
+    env.enable_checkpointing(30000)
 
     kafka_broker = os.getenv("KAFKA_BROKER", "kafka:9092")
     input_topic = "urban-safety-alerts"

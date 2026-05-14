@@ -7,9 +7,13 @@ set -e
 
 DOCKER_COMPOSE="docker compose -f docker/docker-compose.yml"
 EXTRA_PROFILES=""
+HAS_STREAMING=0
 
 for arg in "$@"; do
     EXTRA_PROFILES="$EXTRA_PROFILES $arg"
+    if [ "$arg" = "streaming" ]; then
+        HAS_STREAMING=1
+    fi
 done
 
 echo "=== Step 1: Create Docker network ==="
@@ -20,6 +24,16 @@ echo "=== Step 2: Start core services ==="
 $DOCKER_COMPOSE $EXTRA_PROFILES up -d
 
 echo ""
+echo "=== Step 2b: Stop inference-mock if --profile streaming is active ==="
+if [ "$HAS_STREAMING" = "1" ]; then
+    echo "streaming profile detected — stopping inference-mock to avoid duplicate data..."
+    docker exec inference-mock touch /app/tmp/STOP 2>/dev/null || true
+    echo "inference-mock stop signal sent (rtsp-inference-mock will be the data source instead)."
+else
+    echo "No streaming profile — inference-mock will run as the data source."
+fi
+
+echo ""
 echo "=== Step 3: Wait for Kafka to be healthy ==="
 echo "Waiting up to 60s for kafka..."
 timeout 60 bash -c 'until docker compose -f docker/docker-compose.yml ps kafka | grep -q "healthy"; do sleep 3; done'
@@ -27,7 +41,31 @@ echo "Kafka is healthy."
 
 echo ""
 echo "=== Step 4: Create Kafka topics ==="
-docker exec kafka bash /scripts/setup/create-topics.sh
+# NOTE: create-topics.sh is not mounted inside the kafka container, so we call
+# kafka-topics.sh directly via docker exec for each topic.
+BOOTSTRAP="localhost:9092"
+TOPICS=(
+  "urban-safety-alerts:3"
+  "hot-violence-alerts-valid:3"
+  "urban-safety-quarantine:3"
+  "hot-violence-frames-uploaded:3"
+  "ingest.media.events:3"
+  "model.inference.results:3"
+)
+for entry in "${TOPICS[@]}"; do
+  topic="${entry%%:*}"
+  parts="${entry##*:}"
+  docker exec kafka /opt/kafka/bin/kafka-topics.sh \
+    --create \
+    --topic "$topic" \
+    --bootstrap-server "$BOOTSTRAP" \
+    --partitions "$parts" \
+    --replication-factor 1 \
+    --if-not-exists \
+    && echo "  Topic '$topic': OK" \
+    || echo "  Topic '$topic': already exists or failed"
+done
+echo "Kafka topics done."
 
 echo ""
 echo "=== Step 5: Wait for Flink to be ready ==="
@@ -65,6 +103,9 @@ docker exec jobmanager flink run -py /opt/flink/scripts/sink_to_paimon.py -d && 
 
 echo "Submitting aggregate_paimon.py..."
 docker exec jobmanager flink run -py /opt/flink/scripts/aggregate_paimon.py -d && echo "Paimon aggregation: submitted"
+
+echo "Submitting update_frame_url.py (hot-violence-frames-uploaded → Paimon frame_url UPSERT)..."
+docker exec jobmanager flink run -py /opt/flink/scripts/update_frame_url.py -d && echo "Frame URL updater: submitted"
 
 echo ""
 echo "=== Pipeline bootstrap complete ==="

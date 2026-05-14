@@ -297,6 +297,66 @@ class EvidenceService:
         self.cache.clear()
         logger.info("Cleared evidence frame cache")
 
+    def get_recent_frame_urls(
+        self,
+        camera_id: Optional[str] = None,
+        date_str: Optional[str] = None,
+        limit: int = 20,
+        minio_public_url: str = "http://localhost:9000",
+        min_size_bytes: int = 1000,
+    ) -> List[str]:
+        """List most recent evidence frames from MinIO and return public HTTP URLs.
+
+        Fast path (< 1 second) — does not require SQL.  Used as fallback when
+        the SQL layer (Fluss/Iceberg) has no frame_url column.
+
+        Args:
+            camera_id: Optional camera filter (e.g. "cam_01")
+            date_str: Optional date filter in YYYY-MM-DD format
+            limit: Maximum number of URLs to return
+            minio_public_url: Public MinIO base URL
+            min_size_bytes: Skip stub/blank frames smaller than this (default 1 KB)
+
+        Returns:
+            List of public HTTP URLs, sorted most-recent first
+        """
+        if not self.client:
+            logger.warning("MinIO client not available for frame listing")
+            return []
+
+        try:
+            prefix = ""
+            if camera_id and date_str:
+                prefix = f"{camera_id}/{date_str}/"
+            elif camera_id:
+                prefix = f"{camera_id}/"
+
+            objects = list(self.client.list_objects(
+                self.bucket_name,
+                prefix=prefix,
+                recursive=True,
+            ))
+
+            # Filter out stub/blank frames (e.g. 218-byte placeholder JPEGs)
+            objects = [o for o in objects if (o.size or 0) >= min_size_bytes]
+
+            # Sort most-recent first
+            objects.sort(key=lambda o: o.last_modified, reverse=True)
+
+            urls = [
+                f"{minio_public_url}/{self.bucket_name}/{obj.object_name}"
+                for obj in objects[:limit]
+            ]
+            logger.info(
+                f"MinIO listing: {len(urls)} real frames (prefix='{prefix}', "
+                f"bucket='{self.bucket_name}', min_size={min_size_bytes}B)"
+            )
+            return urls
+
+        except Exception as e:
+            logger.error(f"Failed to list MinIO objects: {e}")
+            return []
+
     def health_check(self) -> bool:
         """Check if MinIO connection is healthy.
 

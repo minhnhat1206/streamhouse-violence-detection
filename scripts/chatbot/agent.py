@@ -407,6 +407,15 @@ async def select_data_layer(state: AgentState) -> AgentState:
 
         # Default: stay PAIMON (warm)
 
+        # Evidence queries MUST use PAIMON — only layer with frame_url column.
+        # Fluss (HOT) and Iceberg (COLD) have no frame_url; override if needed.
+        if state.get("intent") and state["intent"].wants_evidence:
+            if selected_layer != LayerChoice.PAIMON:
+                logger.info(
+                    f"[ROUTING] Evidence query: overriding {selected_layer.value} → PAIMON (frame_url)"
+                )
+                selected_layer = LayerChoice.PAIMON
+
         # EXPLICIT routing log (visible without JSONFormatter extension)
         logger.info(
             f"[ROUTING] time_period='{time_period_str}' → layer={selected_layer.value}",
@@ -644,13 +653,44 @@ async def execute_query(state: AgentState) -> AgentState:
                 for row in results:
                     url = row.get("frame_url") or ""
                     if url and not url.startswith("http"):
-                        # Build public HTTP URL from stored path/key
                         url = f"{minio_base}/{bucket}/{url.lstrip('/')}"
                     if url:
                         collected.append(url)
-                state["frame_urls"] = collected or None
+                # Preserve frame_urls across retries: only update if new URLs were found
                 if collected:
-                    logger.info(f"Collected {len(collected)} frame URLs from results")
+                    state["frame_urls"] = collected
+                    logger.info(f"Collected {len(collected)} frame URLs from SQL results")
+                # Don't clear existing frame_urls when collected is empty
+
+            # MinIO fallback: if evidence was requested but SQL returned no frame_urls,
+            # list recent frames directly from MinIO (fast, < 1s — no SQL needed).
+            if wants_evidence and not state.get("frame_urls") and _evidence_service:
+                minio_base = os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000")
+                # Try with camera_id + date filter from SQL results first
+                fallback_camera = results[0].get("camera_id") if results else None
+                fallback_date = None
+                if results:
+                    ts = results[0].get("timestamp") or results[0].get("incident_date")
+                    if ts:
+                        fallback_date = str(ts)[:10]  # YYYY-MM-DD
+                recent_urls = _evidence_service.get_recent_frame_urls(
+                    camera_id=fallback_camera,
+                    date_str=fallback_date,
+                    limit=20,
+                    minio_public_url=minio_base,
+                )
+                # If filtered listing returns nothing, try unfiltered (all cameras/dates)
+                if not recent_urls and (fallback_camera or fallback_date):
+                    logger.info("MinIO filtered listing empty, trying unfiltered")
+                    recent_urls = _evidence_service.get_recent_frame_urls(
+                        limit=20,
+                        minio_public_url=minio_base,
+                    )
+                if recent_urls:
+                    state["frame_urls"] = recent_urls
+                    logger.info(f"MinIO fallback: {len(recent_urls)} frame URLs collected")
+                else:
+                    logger.warning("MinIO fallback: bucket appears empty")
 
             logger.info(f"Query executed successfully: {row_count} rows")
 
@@ -667,6 +707,19 @@ async def execute_query(state: AgentState) -> AgentState:
                 success=False,
                 error=str(e),
             )
+
+        # Last-resort MinIO fallback: SQL failed but user wants evidence images.
+        # Listing MinIO directly is fast (<1s) and works even when SQL is down.
+        wants_evidence_check = state.get("intent") and state["intent"].wants_evidence
+        if wants_evidence_check and not state.get("frame_urls") and _evidence_service:
+            minio_base = os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000")
+            recent_urls = _evidence_service.get_recent_frame_urls(
+                limit=20,
+                minio_public_url=minio_base,
+            )
+            if recent_urls:
+                state["frame_urls"] = recent_urls
+                logger.info(f"MinIO last-resort fallback: {len(recent_urls)} frame URLs")
 
         log_agent_node(
             logger,
@@ -764,8 +817,8 @@ async def self_correct(state: AgentState) -> Optional[AgentState]:
             }
         )
 
-        # Re-execute with corrected SQL
-        return await execute_query(state)
+        # Return updated state — graph edge self_correct → execute_query handles re-execution
+        return state
 
     except Exception as e:
         logger.error(f"Self-correction failed: {e}")
@@ -895,8 +948,25 @@ Hãy tổng hợp kết quả truy vấn dưới đây thành một câu trả l
         else:
             # Query failed
             error_msg = state["query_result"].error if state["query_result"].error else "Lỗi không xác định"
-            state["final_answer"] = f"Lỗi: Không thể truy vấn dữ liệu. {error_msg}"
-            state["response_confidence"] = 0.0
+            frame_urls_fallback = state.get("frame_urls") or []
+            if frame_urls_fallback:
+                # SQL failed but we have MinIO images — show them with partial response
+                state["final_answer"] = (
+                    f"Không thể truy vấn metadata sự kiện, nhưng đã tìm thấy "
+                    f"{len(frame_urls_fallback)} ảnh bằng chứng gần đây từ MinIO."
+                )
+                display_urls = frame_urls_fallback[:20]
+                remaining = len(frame_urls_fallback) - len(display_urls)
+                gallery_lines = ["\n\n---\n### Ảnh bằng chứng (từ MinIO)"]
+                for i, url in enumerate(display_urls, 1):
+                    gallery_lines.append(f"![Ảnh {i}]({url})")
+                if remaining > 0:
+                    gallery_lines.append(f"\n*...và {remaining} ảnh khác*")
+                state["final_answer"] += "\n".join(gallery_lines)
+                state["response_confidence"] = 0.5
+            else:
+                state["final_answer"] = f"Lỗi: Không thể truy vấn dữ liệu. {error_msg}"
+                state["response_confidence"] = 0.0
             state["row_count"] = 0
 
         log_agent_node(

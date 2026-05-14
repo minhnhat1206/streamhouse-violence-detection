@@ -11,8 +11,9 @@
     {
       "name": "violence-ui",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "5174"],
-      "port": 5174,
+      "runtimeArgs": ["run", "dev", "--", "--port", "5299", "--strictPort"],
+      "port": 5299,
+      "autoPort": false,
       "cwd": "C:/Users/user/Desktop/Khoa_Luan/realtime-violence-detection/Violence-Urban-Safety-UI/frontend"
     }
   ]
