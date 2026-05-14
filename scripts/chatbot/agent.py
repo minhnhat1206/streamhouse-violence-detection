@@ -812,10 +812,9 @@ async def generate_response(state: AgentState) -> AgentState:
                 evidence_note_for_gemini = ""
                 if frame_urls:
                     evidence_note_for_gemini = (
-                        f"\n6. Người dùng đã yêu cầu xem ảnh bằng chứng. "
+                        f"\n6. Người dùng yêu cầu xem ảnh bằng chứng. "
                         f"Đã tìm thấy {len(frame_urls)} ảnh. "
-                        f"Thông báo: 'Đã tìm thấy {len(frame_urls)} ảnh bằng chứng, "
-                        f"xem ở phần frame_urls trong kết quả.'"
+                        f"Hãy thông báo ngắn gọn có {len(frame_urls)} ảnh và sẽ hiển thị bên dưới."
                     )
 
                 if genai:
@@ -862,6 +861,18 @@ Hãy tổng hợp kết quả truy vấn dưới đây thành một câu trả l
                         results, state, row_count
                     )
                     state["response_confidence"] = 0.7
+
+                # Append markdown image gallery for evidence queries
+                if frame_urls:
+                    display_urls = frame_urls[:20]
+                    remaining = len(frame_urls) - len(display_urls)
+                    gallery_lines = ["\n\n---\n### Ảnh bằng chứng"]
+                    for i, url in enumerate(display_urls, 1):
+                        cam = "evidence"
+                        gallery_lines.append(f"![Ảnh {i} — {cam}]({url})")
+                    if remaining > 0:
+                        gallery_lines.append(f"\n*...và {remaining} ảnh khác*")
+                    state["final_answer"] += "\n".join(gallery_lines)
 
                 # Fetch frame evidence for single-result queries
                 if row_count == 1 and state["incident_id"] and _evidence_service:
