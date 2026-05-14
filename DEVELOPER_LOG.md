@@ -44,10 +44,10 @@ Xây dựng và tối ưu hóa hệ thống phát hiện bạo lực thời gian
 ## 🤝 Handover Protocol (MUST READ)
 *Mỗi khi chuyển đổi Agent (Gemini <-> Claude), Agent hiện tại PHẢI cập nhật phần "Last State" bên dưới.*
 
-### 📍 Last State (Updated: 2026-05-14 — Phiên 29) ✅ TRUE TEXT-TO-SQL CHATBOT
+### 📍 Last State (Updated: 2026-05-14 — Phiên 29) ✅ TRUE TEXT-TO-SQL + EVIDENCE IMAGE QUERY
 
-- **Agent vừa làm:** Claude (Session 29 — True Text-to-SQL + Schema Registry + Vietnamese Time Parsing)
-- **Trạng thái:** ✅ HOÀN THÀNH: Nâng cấp chatbot từ template-SQL sang True Text-to-SQL với Gemini.
+- **Agent vừa làm:** Claude (Session 29 — True Text-to-SQL + Schema Registry + Evidence Image Retrieval)
+- **Trạng thái:** ✅ HOÀN THÀNH: Nâng cấp chatbot True Text-to-SQL + chatbot truy vấn ảnh bằng chứng.
 
 ---
 
@@ -64,36 +64,61 @@ Xây dựng và tối ưu hóa hệ thống phát hiện bạo lực thời gian
 
 | File | Change |
 |------|--------|
-| `docker/.env` | Gemini API key → `REDACTED_GEMINI_API_KEY` |
+| `docker/.env` | Gemini API key → `REDACTED_GEMINI_API_KEY`, thêm `MINIO_PUBLIC_URL` |
 | `scripts/chatbot/components/schema_registry.py` | **NEW** — Ground-truth schema cho 3 bảng (hot_violence_alerts, violence_incidents, historical_violence_incidents) |
-| `scripts/chatbot/agent.py` | `generate_sql` node: thay template-SQL bằng Gemini True Text-to-SQL với schema_registry prompt. Thêm `_clean_sql()` helper. |
+| `scripts/chatbot/agent.py` | `generate_sql` node: True Text-to-SQL với schema_registry. `execute_query`: collect `frame_urls` khi `wants_evidence=True`. `generate_response`: inject markdown image gallery vào answer. |
 | `scripts/chatbot/components/sql_generator.py` | `_parse_time_period()`: thêm Vietnamese unit regex (phút/giờ/ngày/tuần/tháng) |
-| `docker/docker-compose.yml` | Trino healthcheck: `CMD` → `CMD-SHELL` (curl không có trong PATH mặc định) |
+| `scripts/chatbot/main.py` | `ChatResponse` thêm `frame_urls` field. Endpoint `/api/evidence/frames` (MinIO direct listing). |
+| `docker/docker-compose.yml` | Trino healthcheck: `CMD` → `CMD-SHELL`. Chatbot env: `MINIO_PUBLIC_URL`. |
 | `scripts/chatbot/test_text2sql.py` | **NEW** — 10 test cases (HOT/WARM/COLD routing + SQL correctness + anti-hallucination) |
+| `Violence-Urban-Safety-UI/.../Chatbot.jsx` | Lưu `frame_urls` từ response vào botMessage |
 
 ---
 
-**📋 True Text-to-SQL Architecture:**
+**📋 True Text-to-SQL + Evidence Image Architecture:**
 
 ```
 User Query (tiếng Việt)
   ↓
-understand_query (Gemini → extract intent + time_period)
+understand_query (Gemini → extract intent + time_period + wants_evidence)
+  │  - "xem ảnh", "hình ảnh", "bằng chứng", "hình" → wants_evidence=True
   ↓
 select_data_layer (time_period regex → Fluss/Paimon/Iceberg routing)
   ↓
 generate_sql (Gemini + schema_registry → TRUE Text-to-SQL)
   │  - Schema string từ schema_registry.get_schema_for_prompt(table)
   │  - Full table ref: catalog.schema.table
-  │  - Dialect hints: Flink SQL (backtick) vs Trino SQL (double-quote)
-  │  - Anti-hallucination: chỉ dùng columns có trong schema
+  │  - Dialect: Trino SQL (double-quote "timestamp"), _adapt_sql_for_flink() converts
+  │  - Evidence note: "SELECT frame_url ... frame_url IS NOT NULL" injected khi wants_evidence
   ↓
 execute_query (route_query → Fluss/Paimon/Iceberg)
+  │  - Nếu wants_evidence hoặc rows có frame_url → collect frame_urls list
+  │  - frame_url format: "http://localhost:9000/evidence-frames/{cam}/{date}/{uuid}.jpg"
   ↓
 self_correct (max 3 retries nếu SQL lỗi)
   ↓
 generate_response (Gemini → Vietnamese answer + citation)
+  │  - Nếu frame_urls có items → append markdown image gallery vào answer
+  │  - Format: "### Ảnh bằng chứng\n![Ảnh 1 — evidence](url)\n..."
+  │  - Max 20 ảnh hiển thị, còn lại hiện "...và N ảnh khác"
+  ↓
+ChatResponse: { answer (with embedded images), layer, citations, frame_urls[] }
+  ↓
+Frontend (Chatbot.jsx): renderMarkdown → img custom renderer → lightbox modal
 ```
+
+**📸 Evidence Query Flow (Verified E2E):**
+- Query: "Cho tôi xem ảnh bằng chứng các vụ bạo lực hôm nay"
+- Layer: Paimon (WARM) — "hôm nay" = same day
+- Generated SQL: `SELECT * FROM paimon.security.violence_incidents WHERE is_violent = TRUE AND "timestamp" >= TIMESTAMP '2026-05-14 00:00:00'`
+- Result: **55 rows** với frame_url populated (từ `frame_extractor_sink.py` + `update_frame_url.py`)
+- frame_urls: 55 URLs, hiển thị 20 ảnh đầu trong markdown gallery
+- Total latency: ~6 phút (Flink SQL Gateway + Paimon batch)
+
+**📡 API Endpoints:**
+- `POST /chat` — Chat với agent (returns `frame_urls` nếu có evidence)
+- `GET /api/evidence/frames?camera_id=X&date=YYYY-MM-DD` — List MinIO frames trực tiếp
+- `GET /api/recent-incidents` — Recent incidents từ Iceberg (ngày trước, không phải hôm nay)
 
 ---
 
@@ -127,8 +152,9 @@ python scripts/chatbot/test_text2sql.py --api http://localhost:5002
 | Issue | Severity | Action |
 |-------|----------|--------|
 | aggregate_paimon RESTARTING | 🟡 MEDIUM | Restart strategy active, self-recover |
-| Trino ↔ Paimon federation broken | 🟡 MEDIUM | Paimon queries route qua Flink SQL Gateway |
-| Chatbot chưa rebuild image mới | 🟡 MEDIUM | `docker compose up -d --build chatbot` đang chạy nền khi kết thúc session |
+| Trino ↔ Paimon federation broken | 🟡 MEDIUM | Paimon queries route qua Flink SQL Gateway (port 8083, profile `ui`) |
+| Paimon query latency | 🟡 MEDIUM | 3-6 phút mỗi query qua Flink SQL Gateway (Flink batch job trên MinIO) |
+| google.generativeai deprecated | 🟢 LOW | FutureWarning — migrate sang `google.genai` package khi có thời gian |
 
 ---
 
