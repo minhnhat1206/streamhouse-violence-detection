@@ -11,12 +11,19 @@ scrape_configs:
     static_configs:
       - targets: ['node-exporter:9100']
 
-  # Flink JobManager REST API metrics
-  - job_name: 'flink'
-    static_configs:
-      - targets: ['jobmanager:8081']
+  # Flink JobManager — job overview via JSON (không có Prometheus reporter, dùng node rules)
+  # Flink mặc định không expose /metrics Prometheus format; skip để tránh scrape error
+  # - job_name: 'flink'
+  #   static_configs:
+  #     - targets: ['jobmanager:8081']
 
-  # Fluss Coordinator metrics
-  - job_name: 'fluss'
+  # Trino coordinator JMX metrics (nếu cần thêm sau)
+  # - job_name: 'trino'
+  #   static_configs:
+  #     - targets: ['trino-coordinator:8082']
+
+  # Chatbot API — query duration histogram by layer (HOT/WARM/COLD)
+  - job_name: 'chatbot'
     static_configs:
-      - targets: ['fluss-coordinator:9123']
+      - targets: ['chatbot:5002']
+    metrics_path: /metrics

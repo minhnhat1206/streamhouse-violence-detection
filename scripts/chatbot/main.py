@@ -17,6 +17,23 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 from uuid import uuid4
 
+try:
+    from prometheus_client import Histogram, Counter, generate_latest, CONTENT_TYPE_LATEST
+    _PROM_ENABLED = True
+    _query_duration = Histogram(
+        "chatbot_query_duration_seconds",
+        "Query duration by layer",
+        labelnames=["layer"],
+        buckets=[0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300],
+    )
+    _query_total = Counter(
+        "chatbot_queries_total",
+        "Total queries by layer",
+        labelnames=["layer"],
+    )
+except ImportError:
+    _PROM_ENABLED = False
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -364,6 +381,15 @@ async def chat(request: ChatRequest):
 
         # Calculate execution time
         duration_ms = int((time_module.time() - start_time) * 1000)
+
+        # Record Prometheus metrics
+        if _PROM_ENABLED:
+            used_layer = result.get("data_layer", result.get("selected_layer", "unknown")) or "unknown"
+            # Map technology name → architectural layer name for consistent dashboard labels
+            _layer_map = {"paimon": "warm", "iceberg": "cold", "fluss": "hot"}
+            metric_layer = _layer_map.get(str(used_layer).lower(), str(used_layer).lower())
+            _query_duration.labels(layer=metric_layer).observe(duration_ms / 1000)
+            _query_total.labels(layer=metric_layer).inc()
 
         logger.info(f"[{request_id}] Query processed successfully in {duration_ms}ms")
 
@@ -735,6 +761,42 @@ async def get_camera_status():
     loop = _asyncio.get_event_loop()
     status_map = await loop.run_in_executor(None, _read_kafka_sync)
     return {"cameras": status_map, "window_seconds": 300}
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint (chatbot_query_duration_seconds, chatbot_queries_total)."""
+    from fastapi.responses import Response
+    if not _PROM_ENABLED:
+        return Response(content="# prometheus_client not installed\n", media_type="text/plain")
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/api/union-read")
+async def union_read():
+    """Federated read: HOT (Fluss) + WARM (Paimon) + COLD (Iceberg), merged by time."""
+    import asyncio as _asyncio
+    start = time_module.time()
+
+    trino_client = app_state.get("trino_client")
+    if not trino_client:
+        raise HTTPException(status_code=503, detail="Trino client not initialized")
+
+    def _sync_union():
+        return trino_client.query_union_all_layers()
+
+    loop = _asyncio.get_event_loop()
+    try:
+        rows = await loop.run_in_executor(None, _sync_union)
+    except Exception as e:
+        logger.error(f"union-read failed: {e}")
+        rows = []
+
+    return {
+        "rows": rows,
+        "total": len(rows),
+        "duration_ms": int((time_module.time() - start) * 1000),
+    }
 
 
 @app.exception_handler(HTTPException)

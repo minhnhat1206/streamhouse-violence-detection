@@ -591,16 +591,16 @@ services:
     networks:
       - violence-detection-net
 
-  # ---- Flink SQL Gateway (Warm+Hot query endpoint — Paimon + Fluss via Flink SQL) -----
-  # Profile: ui — optional
+  # ---- Flink SQL Gateway (HOT query endpoint — Fluss via Flink SQL) -----
+  # Profile: gateway — start with: docker compose --profile gateway up -d flink-sql-gateway
   # API: http://localhost:8083/v1/
-  # Used by chatbot to query Paimon (warm layer) — paimon-trino connector not available for Trino 476
+  # Used by chatbot to query Fluss (hot layer). Paimon (warm) now uses Trino native.
   flink-sql-gateway:
     build:
       context: .
       dockerfile: Dockerfile.flink
     container_name: flink-sql-gateway
-    profiles: [ui]
+    profiles: [gateway]
     command: bash -c "/opt/flink/bin/sql-gateway.sh start-foreground"
     ports:
       - "8083:8083"
@@ -723,7 +723,7 @@ services:
       - TRINO_CATALOG=iceberg
       - TRINO_SCHEMA=security
 
-      # Flink SQL Gateway (Paimon warm queries — start with --profile ui)
+      # Flink SQL Gateway (HOT/Fluss queries — start with --profile gateway)
       - FLINK_GATEWAY_HOST=flink-sql-gateway
       - FLINK_GATEWAY_PORT=8083
 

@@ -4,9 +4,10 @@ Provides REST endpoints for the vigilance-ai dashboard:
   GET  /api/recent-incidents  — query Iceberg via Trino (includes frame_url from MinIO)
   GET  /api/evidence          — retrieve evidence images from MinIO by camera+date
   GET  /api/stats             — aggregated analytics from Iceberg via Trino
+  GET  /api/union-read        — federated read across HOT+WARM+COLD layers
   POST /api/chat              — Agentic RAG: Text-to-SQL (Gemini) + 3-layer routing
                                   HOT  → Fluss via Flink SQL Gateway
-                                  WARM → Paimon via Flink SQL Gateway
+                                  WARM → Paimon via Trino native (paimon-trino-440)
                                   COLD → Iceberg via Trino
 """
 
@@ -18,6 +19,23 @@ import logging
 import time
 import xml.etree.ElementTree as ET
 from typing import Optional
+
+try:
+    from prometheus_client import Histogram, Counter, generate_latest, CONTENT_TYPE_LATEST
+    _PROM_ENABLED = True
+    _query_duration = Histogram(
+        "chatbot_query_duration_seconds",
+        "Query duration by layer",
+        labelnames=["layer"],
+        buckets=[0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 360],
+    )
+    _query_total = Counter(
+        "chatbot_queries_total",
+        "Total queries by layer and status",
+        labelnames=["layer", "status"],
+    )
+except ImportError:
+    _PROM_ENABLED = False
 
 import httpx
 from fastapi import FastAPI, Query, HTTPException
@@ -62,7 +80,7 @@ MINIO_S3_ENDPOINT = os.getenv("MINIO_S3_ENDPOINT", "http://minio:9000")
 
 LAYER_TIMEOUT: dict[str, float] = {
     "hot":  60.0,   # Fluss — near-realtime (60s includes catalog init ~12s + query)
-    "warm": 360.0,  # Paimon — Flink batch on MinIO ~3-5 min
+    "warm": 30.0,   # Paimon via Trino native (was 360s via Flink Gateway)
     "cold": 30.0,   # Iceberg via Trino — fast
 }
 
@@ -484,11 +502,15 @@ async def _get_frame_url(camera_id: str, incident_date: str, incident_id: str) -
 # Trino query client (COLD layer)
 # ---------------------------------------------------------------------------
 
-async def _trino_query(sql: str, timeout: float = 30.0) -> list[list]:
+async def _trino_query(
+    sql: str,
+    timeout: float = 30.0,
+    catalog: str = "iceberg",
+) -> list[list]:
     """Execute a Trino SQL statement and return all rows."""
     headers = {
         "X-Trino-User": TRINO_USER,
-        "X-Trino-Catalog": "iceberg",
+        "X-Trino-Catalog": catalog,
         "X-Trino-Schema": "security",
         "Content-Type": "text/plain",
     }
@@ -883,7 +905,7 @@ async def _generate_sql(
     layer_hint = {
         "hot":  "Use fluss.security.hot_violence_alerts (Flink SQL Gateway, last 1-2h)",
         "warm": "Prefer paimon.security.daily_incident_stats or camera_stats for aggregates; "
-                "paimon.security.violence_incidents for row-level details (Flink SQL Gateway)",
+                "paimon.security.violence_incidents for row-level details (Trino engine, standard SQL syntax)",
         "cold": "Use iceberg.security.historical_violence_incidents (Trino engine)",
     }.get(layer, "Use iceberg.security.historical_violence_incidents (Trino engine)")
 
@@ -1331,6 +1353,34 @@ async def chat(req: ChatRequest):
             "images": [inc["frame_url"] for inc in incidents if inc.get("frame_url")],
         }
 
+    # ── Fast path: union read across all layers ──
+    if _wants_union_read(req.query):
+        union_data = await union_read()
+        rows_text = "\n".join(
+            f"- [{r.get('layer')}] {r.get('camera_id')} | score={r.get('score')} | {r.get('event_time', '')[:19]}"
+            for r in union_data["rows"][:10]
+        )
+        answer_text = (
+            f"**Kết quả liên tầng (HOT + WARM + COLD)**\n\n"
+            f"{rows_text or '_Không có dữ liệu_'}\n\n"
+            f"_HOT: {union_data['counts']['hot']} rows | "
+            f"WARM: {union_data['counts']['warm']} rows | "
+            f"COLD: {union_data['counts']['cold']} rows_"
+        )
+        return {
+            "answer": answer_text,
+            "layer": "union",
+            "citations": {
+                "source_table": "fluss+paimon+iceberg",
+                "data_layer": "union",
+                "time_period": "realtime to historical",
+                "rows_returned": len(union_data["rows"]),
+                "query_engine": "Multi-layer federation",
+            },
+            "confidence": 0.9,
+            "duration_ms": union_data["duration_ms"],
+        }
+
     # ── Step 1: Extract time context (regex-based, not keyword hacks) ──
     time_ctx = _extract_time_context(req.query)
     layer = time_ctx["layer"]
@@ -1369,16 +1419,20 @@ async def chat(req: ChatRequest):
     # ── Step 4: Execute query on the correct layer ──
     rows: list[list] = []
     actual_layer = layer
-    query_engine = "Trino" if layer == "cold" else "Flink SQL Gateway"
+    query_engine = "Flink SQL Gateway" if layer == "hot" else "Trino"
     fallback_to_cold = False
 
     try:
-        if layer == "cold":
-            rows = await _trino_query(sql_to_run, timeout=LAYER_TIMEOUT["cold"])
-        else:
+        if layer == "hot":
             rows = await _flink_gateway_query(
-                sql_to_run, timeout=LAYER_TIMEOUT[layer], layer=layer
+                sql_to_run, timeout=LAYER_TIMEOUT["hot"], layer="hot"
             )
+        elif layer == "warm":
+            rows = await _trino_query(
+                sql_to_run, timeout=LAYER_TIMEOUT["warm"], catalog="paimon"
+            )
+        else:
+            rows = await _trino_query(sql_to_run, timeout=LAYER_TIMEOUT["cold"])
 
     except Exception as exc:
         logger.error(
@@ -1400,6 +1454,13 @@ async def chat(req: ChatRequest):
         except Exception as exc2:
             logger.error("Cold fallback also failed: %s", exc2)
             rows = []
+
+    # Record Prometheus metrics
+    if _PROM_ENABLED:
+        elapsed = time.time() - start
+        status = "fallback" if fallback_to_cold else "ok"
+        _query_duration.labels(layer=actual_layer).observe(elapsed)
+        _query_total.labels(layer=actual_layer, status=status).inc()
 
     # ── Step 5: Synthesize natural-language response ──
     answer, resp_conf = await _synthesize_response(
@@ -1435,6 +1496,119 @@ async def chat(req: ChatRequest):
             "query_engine":  query_engine,
         },
         "confidence":  confidence,
+        "duration_ms": int((time.time() - start) * 1000),
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /metrics  — Prometheus exposition format
+# ---------------------------------------------------------------------------
+
+@app.get("/metrics")
+async def metrics():
+    from fastapi.responses import Response
+    if not _PROM_ENABLED:
+        return Response(content="# prometheus_client not installed\n", media_type="text/plain")
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/union-read  — federated read across all 3 storage layers
+# ---------------------------------------------------------------------------
+
+_UNION_HOT_SQL = """
+    SELECT 'HOT' AS layer, camera_id,
+           CAST(risk_score AS VARCHAR) AS score,
+           CAST(`timestamp` AS VARCHAR) AS event_time
+    FROM hot_violence_alerts
+    WHERE `timestamp` > LOCALTIMESTAMP - INTERVAL '1' HOUR
+    ORDER BY `timestamp` DESC
+    LIMIT 10
+"""
+
+_UNION_WARM_SQL = """
+    SELECT 'WARM' AS layer, camera_id,
+           CAST(risk_score AS VARCHAR) AS score,
+           CAST(timestamp AS VARCHAR) AS event_time
+    FROM paimon.security.violence_incidents
+    WHERE timestamp BETWEEN NOW() - INTERVAL '7' DAY AND NOW() - INTERVAL '1' HOUR
+    ORDER BY timestamp DESC
+    LIMIT 10
+"""
+
+_UNION_COLD_SQL = """
+    SELECT 'COLD' AS layer, camera_id,
+           CAST(risk_score AS VARCHAR) AS score,
+           CAST(timestamp AS VARCHAR) AS event_time
+    FROM iceberg.security.historical_violence_incidents
+    WHERE timestamp < NOW() - INTERVAL '7' DAY
+    ORDER BY timestamp DESC
+    LIMIT 10
+"""
+
+_UNION_INTENT_KEYWORDS = [
+    "toàn bộ", "toan bo", "tất cả tầng", "tat ca tang",
+    "union", "all layers", "tất cả lớp",
+    "từ realtime đến lịch sử", "tu realtime den lich su",
+    "realtime đến lịch sử", "realtime den lich su",
+    "liên tầng", "lien tang",
+]
+
+
+def _wants_union_read(query: str) -> bool:
+    q = query.lower()
+    return any(k in q for k in _UNION_INTENT_KEYWORDS)
+
+
+@app.get("/api/union-read")
+async def union_read():
+    """Federated query: HOT (Fluss) + WARM (Paimon) + COLD (Iceberg), merged by time."""
+    start = time.time()
+    results: list[dict] = []
+
+    async def _fetch_hot():
+        try:
+            adapted = _adapt_sql_for_flink(_UNION_HOT_SQL, layer="hot")
+            rows = await _flink_gateway_query(adapted, timeout=60.0, layer="hot")
+            return [{"layer": "HOT", "camera_id": r[1] if len(r) > 1 else r.get("camera_id"),
+                     "score": r[2] if len(r) > 2 else r.get("score"),
+                     "event_time": r[3] if len(r) > 3 else r.get("event_time")}
+                    if isinstance(r, list) else r for r in rows]
+        except Exception as e:
+            logger.warning(f"union HOT failed: {e}")
+            return []
+
+    async def _fetch_warm():
+        try:
+            rows = await _trino_query(_UNION_WARM_SQL, timeout=30.0, catalog="paimon")
+            return [{"layer": "WARM", "camera_id": r[1] if len(r) > 1 else r.get("camera_id"),
+                     "score": r[2] if len(r) > 2 else r.get("score"),
+                     "event_time": r[3] if len(r) > 3 else r.get("event_time")}
+                    if isinstance(r, list) else r for r in rows]
+        except Exception as e:
+            logger.warning(f"union WARM failed: {e}")
+            return []
+
+    async def _fetch_cold():
+        try:
+            rows = await _trino_query(_UNION_COLD_SQL, timeout=30.0)
+            return [{"layer": "COLD", "camera_id": r[1] if len(r) > 1 else r.get("camera_id"),
+                     "score": r[2] if len(r) > 2 else r.get("score"),
+                     "event_time": r[3] if len(r) > 3 else r.get("event_time")}
+                    if isinstance(r, list) else r for r in rows]
+        except Exception as e:
+            logger.warning(f"union COLD failed: {e}")
+            return []
+
+    hot_rows, warm_rows, cold_rows = await asyncio.gather(
+        _fetch_hot(), _fetch_warm(), _fetch_cold()
+    )
+    results = hot_rows + warm_rows + cold_rows
+    results.sort(key=lambda r: str(r.get("event_time", "")), reverse=True)
+
+    return {
+        "rows": results[:20],
+        "counts": {"hot": len(hot_rows), "warm": len(warm_rows), "cold": len(cold_rows)},
         "duration_ms": int((time.time() - start) * 1000),
     }
 
