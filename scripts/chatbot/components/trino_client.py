@@ -5,13 +5,8 @@ Manages PyTrino connections and Flink SQL Gateway calls for layer-based routing.
 
 Layer routing:
   HOT   (Fluss)   → Flink SQL Gateway REST API (port 8083)
-  WARM  (Paimon)  → Flink SQL Gateway REST API with per-session Paimon catalog DDL
+  WARM  (Paimon)  → Trino native paimon catalog (paimon-trino-440 plugin)
   COLD  (Iceberg) → Trino via PyTrino (catalog: iceberg)
-
-Paimon-Trino connector note: paimon-trino-476 has no pre-built release JAR and
-cannot be compiled inside Docker due to network restrictions on repository.apache.org.
-Paimon warm queries are therefore routed through the Flink SQL Gateway, which already
-has paimon-flink-1.18-0.8.2.jar installed and can issue CREATE CATALOG DDL per session.
 """
 
 import logging
@@ -41,16 +36,6 @@ class DataLayer(str, Enum):
     ICEBERG = "ICEBERG"
 
 
-# ── Paimon catalog DDL used per-session in Flink SQL Gateway ──────────────────
-_PAIMON_CATALOG_DDL = """CREATE CATALOG paimon_warm WITH (
-  'type' = 'paimon',
-  'warehouse' = 's3://warehouse/paimon',
-  's3.endpoint' = 'http://minio:9000',
-  's3.access-key' = '{access_key}',
-  's3.secret-key' = '{secret_key}',
-  's3.path.style.access' = 'true'
-)"""
-
 # ── Fluss catalog DDL used per-session in Flink SQL Gateway ───────────────────
 _FLUSS_CATALOG_DDL = """CREATE CATALOG fluss_hot WITH (
   'type' = 'fluss',
@@ -74,10 +59,6 @@ class TrinoClient:
         self.flink_gateway_host = flink_gateway_host
         self.flink_gateway_port = flink_gateway_port
         self.pool_size = pool_size
-
-        # S3 credentials for Paimon catalog DDL (read from env, default to dev values)
-        self._s3_access_key = os.getenv("MINIO_ROOT_USER", "minio")
-        self._s3_secret_key = os.getenv("MINIO_ROOT_PASSWORD", "mypassword")
 
         logger.info(
             f"Initialized TrinoClient: "
@@ -109,14 +90,13 @@ class TrinoClient:
         #   Streaming aggregate (COUNT(*), SUM ...): emits UPDATE_AFTER pages indefinitely;
         #     we track the latest "snapshot" (last page of UPDATE_AFTER rows) and return
         #     it on timeout or when values stop changing.
-        # Paimon jobs take 30-150s to produce first result; total wall-clock budget = 240s.
-        HTTP_TIMEOUT = min(timeout, 30)  # per-request HTTP timeout (fast round-trips)
-        TOTAL_DEADLINE = time.time() + 240   # 4 minutes max per statement
+        HTTP_TIMEOUT = min(timeout, 30)
+        TOTAL_DEADLINE = time.time() + 240
         result_token = 0
         all_rows: List[Dict[str, Any]] = []
-        latest_agg_rows: List[Dict[str, Any]] = []  # for streaming aggregates
+        latest_agg_rows: List[Dict[str, Any]] = []
         columns: List[Dict] = []
-        stable_polls = 0  # consecutive polls with no new data → detect stable aggregate
+        stable_polls = 0
 
         while time.time() < TOTAL_DEADLINE:
             result_resp = requests.get(
@@ -144,21 +124,17 @@ class TrinoClient:
                         for i, col in enumerate(columns)
                         if i < len(fields)
                     }
-                    # For streaming aggregates: UPDATE_AFTER replaces the running total
                     if row_kind in ("UPDATE_AFTER", "INSERT"):
                         page_rows.append(row)
 
             if page_rows:
                 stable_polls = 0
-                # For bounded queries: accumulate rows
                 all_rows.extend(page_rows)
-                # For streaming aggregates: replace with latest snapshot
                 latest_agg_rows = page_rows
             else:
                 stable_polls += 1
 
             if result_type == "EOS":
-                # Bounded query finished normally
                 return all_rows if all_rows else latest_agg_rows
 
             next_uri = data.get("nextResultUri")
@@ -167,12 +143,11 @@ class TrinoClient:
                     result_token = int(next_uri.rstrip("/").split("/")[-1])
                 except (ValueError, IndexError):
                     break
-                continue  # fetch next page immediately
+                continue
 
             if not is_running:
                 break
 
-            # Stable aggregate: 3 consecutive empty polls → values have converged
             if stable_polls >= 3 and latest_agg_rows:
                 logger.info(f"Streaming aggregate stabilized after {stable_polls} empty polls")
                 return latest_agg_rows
@@ -182,7 +157,6 @@ class TrinoClient:
         elapsed = 240 - (TOTAL_DEADLINE - time.time())
         logger.info(f"Flink statement polling ended after {elapsed:.0f}s: "
                     f"{len(all_rows)} direct rows, {len(latest_agg_rows)} agg rows")
-        # Return whatever we have: bounded rows or last streaming aggregate snapshot
         return all_rows if all_rows else latest_agg_rows
 
     def _query_flink_gateway(
@@ -191,30 +165,19 @@ class TrinoClient:
         init_statements: Optional[List[str]] = None,
         timeout: int = 30
     ) -> List[Dict[str, Any]]:
-        """Execute SQL via Flink SQL Gateway REST API.
-
-        Args:
-            sql: Main query SQL
-            init_statements: Optional DDL/USE statements to run before the query
-            timeout: Per-request timeout in seconds
-        """
+        """Execute SQL via Flink SQL Gateway REST API."""
         gateway_url = f"http://{self.flink_gateway_host}:{self.flink_gateway_port}"
 
-        # Create session
         sess_resp = requests.post(f"{gateway_url}/v1/sessions", json={}, timeout=timeout)
         sess_resp.raise_for_status()
         session_id = sess_resp.json()["sessionHandle"]
         logger.info(f"Flink SQL Gateway session: {session_id}")
 
         try:
-            # Run optional init statements (catalog DDL, USE, etc.)
             for stmt in (init_statements or []):
                 self._exec_flink_statement(session_id, stmt, gateway_url, timeout)
-
-            # Run main query
             return self._exec_flink_statement(session_id, sql, gateway_url, timeout)
         finally:
-            # Best-effort session cleanup
             try:
                 requests.delete(f"{gateway_url}/v1/sessions/{session_id}", timeout=5)
             except Exception:
@@ -260,65 +223,42 @@ class TrinoClient:
     # ── SQL adaptation helpers ─────────────────────────────────────────────────
 
     @staticmethod
-    def _adapt_sql_for_flink(sql: str) -> str:
-        """Convert Trino-dialect SQL to Flink SQL for Paimon queries.
+    def _adapt_sql_for_flink_hot(sql: str) -> str:
+        """Convert SQL to Flink SQL for HOT (Fluss) queries.
 
-        Differences handled:
-        - Table references: strip 'paimon.security.' prefix (handled by USE CATALOG + USE)
-        - Reserved keyword quoting: "timestamp" (Trino) → `timestamp` (Flink)
-        - Timestamp type mismatch: NOW()/CURRENT_TIMESTAMP return TIMESTAMP_LTZ(3) but
-          Paimon stores TIMESTAMP(3) — wrap with CAST to avoid CodeGenException.
+        Strips fluss.security. prefix (handled by USE CATALOG + USE in session init),
+        fixes TIMESTAMP_LTZ vs TIMESTAMP(3) mismatch, and quotes reserved keywords.
         """
         import re
         result = sql
-        # Strip any catalog.schema prefix — the gateway session runs USE paimon_warm + security.
-        # Gemini may emit any catalog prefix (paimon/fluss/iceberg) regardless of routed layer.
-        for prefix in ("paimon.security.", "paimon.", "fluss.security.", "fluss.",
-                       "iceberg.security.", "iceberg."):
-            result = result.replace(prefix, "")
-        # Remap Fluss/Iceberg table aliases to Paimon warm table names
-        result = result.replace("hot_violence_alerts", "violence_incidents")
-        result = result.replace("historical_violence_incidents", "violence_incidents")
-        result = result.replace("historical_daily_stats", "daily_incident_stats")
-        result = result.replace("historical_camera_stats", "camera_stats")
-        # Trino uses double-quotes for reserved keywords; Flink uses backticks
+        result = result.replace("fluss.security.", "")
+        result = result.replace("fluss.", "")
+        result = result.replace("historical_violence_incidents", "hot_violence_alerts")
         result = result.replace('"timestamp"', '`timestamp`')
-        # TIMESTAMP_LTZ vs TIMESTAMP(3) fix: wrap NOW() and CURRENT_TIMESTAMP
-        result = re.sub(r'\bNOW\(\)', "CAST(NOW() AS TIMESTAMP(3))", result, flags=re.IGNORECASE)
-        result = re.sub(r'\bCURRENT_TIMESTAMP\b', "CAST(CURRENT_TIMESTAMP AS TIMESTAMP(3))", result, flags=re.IGNORECASE)
+        result = re.sub(r'\bNOW\(\)', "LOCALTIMESTAMP", result, flags=re.IGNORECASE)
+        result = re.sub(r'\bCURRENT_TIMESTAMP\b', "LOCALTIMESTAMP", result, flags=re.IGNORECASE)
+        result = re.sub(r"(?<!`)\btimestamp\b(?!`\s*\()", "`timestamp`", result, flags=re.IGNORECASE)
         return result
 
     @staticmethod
     def _adapt_sql_to_iceberg(sql: str) -> str:
-        """Rewrite SQL targeting Paimon/Fluss tables to use Iceberg equivalents.
-
-        Only iceberg.security.historical_violence_incidents actually exists.
-        Queries against aggregate tables (daily_incident_stats, camera_stats)
-        are rewritten to inline aggregations over historical_violence_incidents.
-        """
+        """Rewrite SQL targeting Paimon/Fluss tables to use Iceberg equivalents."""
         import re
 
         RAW = "iceberg.security.historical_violence_incidents"
         result = sql
 
-        # ── Step 1: Strip catalog/schema prefixes from aggregate table refs ──────
         for old, new in [
-            # daily_incident_stats → always rewrite to raw table
-            ("paimon.security.daily_incident_stats",  "daily_incident_stats"),
-            ("fluss.security.daily_incident_stats",   "daily_incident_stats"),
-            ("iceberg.security.daily_incident_stats", "daily_incident_stats"),
-            ("iceberg.security.historical_daily_stats", "daily_incident_stats"),
-            # camera_stats → always rewrite to raw table
-            ("paimon.security.camera_stats",          "camera_stats"),
-            ("fluss.security.camera_stats",           "camera_stats"),
-            ("iceberg.security.camera_stats",         "camera_stats"),
-            ("iceberg.security.historical_camera_stats", "camera_stats"),
-            # violence_incidents → map to the real Iceberg table
+            ("paimon.security.daily_incident_stats",  RAW),
+            ("fluss.security.daily_incident_stats",   RAW),
+            ("iceberg.security.daily_incident_stats", RAW),
+            ("paimon.security.camera_stats",          RAW),
+            ("fluss.security.camera_stats",           RAW),
+            ("iceberg.security.camera_stats",         RAW),
             ("paimon.security.violence_incidents",    RAW),
             ("fluss.security.hot_violence_alerts",    RAW),
             ("fluss.security.violence_incidents",     RAW),
             ("iceberg.security.violence_incidents",   RAW),
-            # Bare catalog prefixes (catch remaining paimon./fluss. refs)
             ("paimon.security.", "iceberg.security."),
             ("paimon.",          "iceberg."),
             ("fluss.security.",  "iceberg.security."),
@@ -326,21 +266,16 @@ class TrinoClient:
         ]:
             result = result.replace(old, new)
 
-        # ── Step 2: Unqualified standalone table names ───────────────────────────
         for pattern, replacement in [
             (r"(?<![.\w])violence_incidents\b",   RAW),
             (r"(?<![.\w])hot_violence_alerts\b",  RAW),
         ]:
             result = re.sub(pattern, replacement, result)
 
-        # ── Step 3: Rewrite queries against non-existent aggregate tables ──────────
-        # daily_incident_stats and camera_stats only exist in Paimon, not Iceberg.
-        # Replace the entire SQL with an equivalent query over the raw incidents table.
         for agg_table in ("daily_incident_stats", "camera_stats"):
             if not re.search(rf"\b{agg_table}\b", result, re.IGNORECASE):
                 continue
 
-            # Extract time filter interval if present (e.g. INTERVAL '24' HOUR, INTERVAL '7' DAY)
             interval_match = re.search(
                 r"INTERVAL\s+'?(\d+)'?\s+(HOUR|DAY|MINUTE|MONTH|YEAR)",
                 result, re.IGNORECASE
@@ -349,9 +284,8 @@ class TrinoClient:
                 qty, unit = interval_match.group(1), interval_match.group(2).upper()
                 time_filter = f"timestamp >= NOW() - INTERVAL '{qty}' {unit}"
             else:
-                time_filter = "1=1"  # no time restriction
+                time_filter = "1=1"
 
-            # Detect GROUP BY camera — use camera-level aggregation
             if agg_table == "camera_stats" or re.search(r"\bcamera_id\b", result, re.IGNORECASE):
                 result = (
                     f"SELECT camera_id, COUNT(*) AS total_incidents,\n"
@@ -364,7 +298,6 @@ class TrinoClient:
                     f"LIMIT 20"
                 )
             else:
-                # Generic daily aggregation
                 result = (
                     f"SELECT CAST(timestamp AS DATE) AS stat_date,\n"
                     f"       COUNT(*) AS total_incidents,\n"
@@ -376,7 +309,7 @@ class TrinoClient:
                     f"ORDER BY stat_date DESC\n"
                     f"LIMIT 30"
                 )
-            break  # only one rewrite needed
+            break
 
         return result
 
@@ -385,22 +318,13 @@ class TrinoClient:
     def query_fluss(self, sql: str, timeout: int = 30) -> List[Dict[str, Any]]:
         """Query HOT layer (Fluss) via Flink SQL Gateway.
 
-        Sets up the fluss_hot catalog per-session before executing the query.
-        Table reference: fluss_hot.security.hot_violence_alerts
+        Retries session setup once on catalog_not_found before falling back.
         """
         logger.info(f"Querying Fluss (HOT): {sql[:100]}...")
 
-        # Strip any catalog/schema prefix — the gateway session runs USE CATALOG + USE
+        flink_sql = self._adapt_sql_for_flink_hot(sql)
         import re as _re
-        flink_sql = sql
-        for prefix in ("fluss.security.", "fluss.",
-                       "paimon.security.", "paimon.",
-                       "iceberg.security.", "iceberg."):
-            flink_sql = flink_sql.replace(prefix, "")
-        # Normalise table name: violence_incidents → hot_violence_alerts for Fluss
         flink_sql = _re.sub(r'\bviolence_incidents\b', 'hot_violence_alerts', flink_sql)
-        # Quote reserved keyword `timestamp` if used bare
-        flink_sql = _re.sub(r'(?<![`"\w])timestamp(?![`"\w(])', '`timestamp`', flink_sql, flags=_re.IGNORECASE)
 
         init = [
             _FLUSS_CATALOG_DDL,
@@ -408,47 +332,40 @@ class TrinoClient:
             "USE `security`",
         ]
 
-        return self._query_flink_gateway(flink_sql, init_statements=init, timeout=timeout)
+        _catalog_errors = ("catalog_not_found", "catalog", "does not exist", "not found")
+
+        for attempt in range(2):
+            try:
+                return self._query_flink_gateway(flink_sql, init_statements=init, timeout=timeout)
+            except Exception as e:
+                err_lower = str(e).lower()
+                if attempt == 0 and any(x in err_lower for x in _catalog_errors):
+                    logger.warning(
+                        f"Fluss catalog init failed (attempt {attempt+1}), retrying: {e}"
+                    )
+                    time.sleep(2)
+                    continue
+                raise
 
     def query_paimon(self, sql: str, timeout: int = 30) -> List[Dict[str, Any]]:
-        """Query WARM layer (Paimon) via Flink SQL Gateway with per-session catalog.
+        """Query WARM layer (Paimon) via Trino native paimon catalog.
 
-        Falls back to Trino paimon catalog if the gateway is unavailable,
-        then raises so route_query can cascade to Iceberg.
+        Uses paimon-trino-440 connector. Table refs must be fully-qualified:
+        paimon.security.violence_incidents, paimon.security.daily_incident_stats, etc.
         """
-        logger.info(f"Querying Paimon (WARM): {sql[:100]}...")
-
-        flink_sql = self._adapt_sql_for_flink(sql)
-        catalog_ddl = _PAIMON_CATALOG_DDL.format(
-            access_key=self._s3_access_key,
-            secret_key=self._s3_secret_key,
-        )
-        init = [
-            catalog_ddl,
-            "USE CATALOG paimon_warm",
-            "USE `security`",
-        ]
-
-        try:
-            return self._query_flink_gateway(flink_sql, init_statements=init, timeout=timeout)
-        except Exception as gw_err:
-            logger.warning(
-                f"Flink SQL Gateway unavailable for Paimon ({gw_err.__class__.__name__}), "
-                "trying Trino paimon catalog..."
-            )
-
-        # Trino paimon catalog fallback (requires paimon-trino JAR — may not be installed)
-        adapted = sql
-        for prefix in ("fluss.security.", "fluss."):
-            adapted = adapted.replace(prefix, "paimon.security.")
-        return self._query_trino(adapted, catalog="paimon", schema="security", timeout=timeout)
+        import re as _re
+        # Trino uses ANSI double-quotes for identifiers; convert MySQL/Flink-style backticks
+        sql = _re.sub(r'`([^`]+)`', r'"\1"', sql)
+        logger.info(f"Querying Paimon (WARM) via Trino: {sql[:100]}...")
+        return self._query_trino(sql, catalog="paimon", schema="security", timeout=timeout)
 
     def query_iceberg(self, sql: str, timeout: int = 30) -> List[Dict[str, Any]]:
         """Query COLD layer (Iceberg) via Trino."""
+        import re as _re
         logger.info(f"Querying Iceberg (COLD): {sql[:100]}...")
-        # Always normalise table references — handles both direct Iceberg routing
-        # and Paimon/Fluss fallback paths
         sql = self._adapt_sql_to_iceberg(sql)
+        # Trino uses ANSI double-quotes; convert backtick identifiers
+        sql = _re.sub(r'`([^`]+)`', r'"\1"', sql)
         return self._query_trino(sql, catalog="iceberg", schema="security", timeout=timeout)
 
     def route_query(
@@ -457,11 +374,7 @@ class TrinoClient:
         layer: DataLayer,
         timeout: int = 30
     ) -> List[Dict[str, Any]]:
-        """Route query to the correct layer with Iceberg fallback.
-
-        Fallback triggers on: catalog not found, connection refused/timeout,
-        unable to connect — any infrastructure-level failure.
-        """
+        """Route query to the correct layer with Iceberg fallback."""
         layer_str = str(layer).upper() if layer else ""
         _infra_errors = (
             "catalog_not_found", "catalog", "connection refused",
@@ -495,6 +408,60 @@ class TrinoClient:
         else:
             raise ValueError(f"Invalid data layer: {layer}")
 
+    def query_union_all_layers(self) -> List[Dict[str, Any]]:
+        """Federated read across all 3 layers, merged and sorted by time.
+
+        HOT  → last 1h from Fluss via Flink SQL Gateway
+        WARM → 1h–7d from Paimon via Trino
+        COLD → 7d+ from Iceberg via Trino (last 20 rows)
+
+        Returns combined list sorted by timestamp descending, max 20 rows total.
+        """
+        HOT_SQL = """
+            SELECT 'HOT' AS layer, camera_id,
+                   CAST(risk_score AS VARCHAR) AS score,
+                   CAST(`timestamp` AS VARCHAR) AS event_time
+            FROM hot_violence_alerts
+            WHERE `timestamp` > LOCALTIMESTAMP - INTERVAL '1' HOUR
+            ORDER BY `timestamp` DESC
+            LIMIT 10
+        """
+        WARM_SQL = """
+            SELECT 'WARM' AS layer, camera_id,
+                   CAST(risk_score AS VARCHAR) AS score,
+                   CAST(timestamp AS VARCHAR) AS event_time
+            FROM paimon.security.violence_incidents
+            WHERE timestamp BETWEEN NOW() - INTERVAL '7' DAY AND NOW() - INTERVAL '1' HOUR
+            ORDER BY timestamp DESC
+            LIMIT 10
+        """
+        COLD_SQL = """
+            SELECT 'COLD' AS layer, camera_id,
+                   CAST(risk_score AS VARCHAR) AS score,
+                   CAST(timestamp AS VARCHAR) AS event_time
+            FROM iceberg.security.historical_violence_incidents
+            WHERE timestamp < NOW() - INTERVAL '7' DAY
+            ORDER BY timestamp DESC
+            LIMIT 10
+        """
+
+        results: List[Dict[str, Any]] = []
+
+        for label, query_fn, sql in [
+            ("HOT",  self.query_fluss,   HOT_SQL),
+            ("WARM", self.query_paimon,  WARM_SQL),
+            ("COLD", self.query_iceberg, COLD_SQL),
+        ]:
+            try:
+                rows = query_fn(sql, timeout=60)
+                results.extend(rows)
+                logger.info(f"Union {label}: {len(rows)} rows")
+            except Exception as e:
+                logger.warning(f"Union {label} layer failed (skipped): {e}")
+
+        results.sort(key=lambda r: str(r.get("event_time", "")), reverse=True)
+        return results[:20]
+
     def health_check(self) -> Dict[str, bool]:
         """Check health of all data layers."""
         health = {"fluss": False, "paimon": False, "iceberg": False}
@@ -506,18 +473,9 @@ class TrinoClient:
             logger.warning(f"Fluss health check failed: {e}")
 
         try:
-            catalog_ddl = _PAIMON_CATALOG_DDL.format(
-                access_key=self._s3_access_key,
-                secret_key=self._s3_secret_key,
-            )
-            self._query_flink_gateway(
-                "SELECT incident_id FROM violence_incidents LIMIT 1",
-                init_statements=[
-                    catalog_ddl,
-                    "USE CATALOG paimon_warm",
-                    "USE `security`",
-                ],
-                timeout=60,
+            self._query_trino(
+                "SELECT incident_id FROM paimon.security.violence_incidents LIMIT 1",
+                catalog="paimon", schema="security", timeout=15,
             )
             health["paimon"] = True
         except Exception as e:

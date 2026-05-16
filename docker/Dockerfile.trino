@@ -1,11 +1,330 @@
-FROM trinodb/trino:476
+# ── Stage 1: build paimon-trino-440 plugin from source ───────────────────────
+FROM maven:3.9-eclipse-temurin-21 AS paimon-builder
 
-# Iceberg plugin: Hadoop + AWS JARs cho MinIO/S3 support
-ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.6/hadoop-aws-3.3.6.jar /usr/lib/trino/plugin/iceberg/
-ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-common/3.3.6/hadoop-common-3.3.6.jar /usr/lib/trino/plugin/iceberg/
-ADD https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-auth/3.3.6/hadoop-auth-3.3.6.jar /usr/lib/trino/plugin/iceberg/
-ADD https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.11.1026/aws-java-sdk-bundle-1.11.1026.jar /usr/lib/trino/plugin/iceberg/
+# release-0.8: paimon-parent 0.8.0 is on Maven Central; paimon data format
+# written by Flink 1.18 in this project is compatible with this version.
+RUN git clone --depth 1 --branch release-0.8 https://github.com/apache/paimon-trino.git /paimon-trino
+WORKDIR /paimon-trino
 
-# NOTE: paimon-trino connector for Trino 476 has no pre-built release artifact.
-# Paimon warm queries are routed through Flink SQL Gateway (port 8083) instead.
-# See scripts/chatbot/components/trino_client.py — query_paimon() method.
+# Provide toolchains.xml so maven-toolchains-plugin can locate JDK 21
+RUN mkdir -p /root/.m2 && printf '<?xml version="1.0" encoding="UTF-8"?>\n<toolchains>\n  <toolchain>\n    <type>jdk</type>\n    <provides><version>21</version></provides>\n    <configuration><jdkHome>/opt/java/openjdk</jdkHome></configuration>\n  </toolchain>\n</toolchains>\n' > /root/.m2/toolchains.xml
+
+# ── Patch: remove HDFS dependency from release-0.8 source ────────────────────
+#
+# ROOT CAUSE (Trino 440+):
+#   trino-filesystem-manager's HdfsFileSystemLoader enforces that trino-hdfs-*.jar
+#   MUST NOT be on the plugin classloader's classpath.  The release-0.8 branch
+#   still installs HdfsModule in TrinoConnectorFactory, which (a) puts trino-hdfs
+#   on the classpath and (b) forces TrinoMetadataFactory to @Inject HdfsConfig.
+#   Both together trigger: "HDFS should not be on the plugin classpath".
+#
+# FIX (backported from paimon-trino main branch, merged Nov 2024 PR #87/#92):
+#   1. Remove HdfsModule + HdfsAuthenticationModule from the Guice module list
+#      in TrinoConnectorFactory.  FileSystemModule (already present) handles
+#      all filesystem access via Trino's native S3 driver.
+#   2. Rewrite TrinoMetadataFactory without HdfsConfig / HdfsConfigurationInitializer.
+#      Hadoop XML config files are rarely used; MinIO/S3 is fully configured
+#      through Trino's native S3 properties in paimon.properties.
+#   3. Remove trino-hdfs-440.jar from the assembled plugin so HdfsFileSystemLoader
+#      finds nothing on the classpath and stops complaining.
+
+# Step 1 — rewrite TrinoConnectorFactory without HdfsModule / HdfsAuthenticationModule
+#
+# sed is unreliable here because Docker layer caching can reuse old compiled artifacts.
+# A full file rewrite is deterministic: Maven always compiles the version below.
+#
+# Changes vs release-0.8 original:
+#   - Removed: import io.trino.hdfs.HdfsModule
+#   - Removed: import io.trino.hdfs.authentication.HdfsAuthenticationModule
+#   - Removed: new HdfsModule() from Bootstrap constructor call
+#   - Removed: new HdfsAuthenticationModule() from Bootstrap constructor call
+#   All S3/MinIO I/O is handled by newFileSystemModule() (Trino native S3 filesystem).
+RUN cat > paimon-trino-440/src/main/java/org/apache/paimon/trino/TrinoConnectorFactory.java \
+<< 'JAVA_EOF'
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.paimon.trino;
+
+import org.apache.paimon.utils.StringUtils;
+
+import com.google.inject.Binder;
+import com.google.inject.Injector;
+import com.google.inject.Module;
+import io.airlift.bootstrap.Bootstrap;
+import io.airlift.json.JsonModule;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.trace.Tracer;
+import io.trino.filesystem.manager.FileSystemModule;
+import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorMetadata;
+import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSinkProvider;
+import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSourceProvider;
+import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitManager;
+import io.trino.plugin.hive.NodeVersion;
+import io.trino.plugin.hive.orc.OrcReaderConfig;
+import io.trino.spi.classloader.ThreadContextClassLoader;
+import io.trino.spi.connector.Connector;
+import io.trino.spi.connector.ConnectorContext;
+import io.trino.spi.connector.ConnectorFactory;
+import io.trino.spi.type.TypeManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import javax.xml.parsers.DocumentBuilderFactory;
+
+import java.io.File;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.util.HashMap;
+import java.util.Map;
+
+/** Trino {@link ConnectorFactory}. */
+public class TrinoConnectorFactory implements ConnectorFactory {
+
+    private static final Logger LOG = LoggerFactory.getLogger(TrinoConnectorFactory.class);
+
+    private static final String HADOOP_CONF_FILES_KEY = "hive.config.resources";
+    private static final String HADOOP_CONF_PREFIX = "hadoop.";
+
+    @Override
+    public String getName() {
+        return "paimon";
+    }
+
+    @Override
+    public Connector create(
+            String catalogName, Map<String, String> config, ConnectorContext context) {
+        return create(catalogName, config, context, new EmptyModule());
+    }
+
+    public Connector create(
+            String catalogName,
+            Map<String, String> config,
+            ConnectorContext context,
+            Module module) {
+        config = new HashMap<>(config);
+        if (config.containsKey(HADOOP_CONF_FILES_KEY)) {
+            for (String hadoopXml : config.get(HADOOP_CONF_FILES_KEY).split(",")) {
+                try {
+                    readHadoopXml(hadoopXml, config);
+                } catch (Exception e) {
+                    LOG.warn(
+                            "Failed to read hadoop xml file " + hadoopXml + ", skipping.",
+                            e);
+                }
+            }
+        }
+
+        ClassLoader classLoader = TrinoConnectorFactory.class.getClassLoader();
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            Bootstrap app =
+                    new Bootstrap(
+                            new JsonModule(),
+                            new TrinoModule(config),
+                            newFileSystemModule(catalogName, context),
+                            binder -> {
+                                binder.bind(NodeVersion.class)
+                                        .toInstance(
+                                                new NodeVersion(
+                                                        context.getNodeManager()
+                                                                .getCurrentNode()
+                                                                .getVersion()));
+                                binder.bind(TypeManager.class).toInstance(context.getTypeManager());
+                                binder.bind(OpenTelemetry.class)
+                                        .toInstance(context.getOpenTelemetry());
+                                binder.bind(Tracer.class).toInstance(context.getTracer());
+                                binder.bind(OrcReaderConfig.class)
+                                        .toInstance(new OrcReaderConfig());
+                            },
+                            module);
+
+            Injector injector =
+                    app.doNotInitializeLogging()
+                            .setRequiredConfigurationProperties(Map.of())
+                            .setOptionalConfigurationProperties(config)
+                            .initialize();
+
+            TrinoMetadata trinoMetadata = injector.getInstance(TrinoMetadataFactory.class).create();
+            TrinoSplitManager trinoSplitManager = injector.getInstance(TrinoSplitManager.class);
+            TrinoPageSourceProvider trinoPageSourceProvider =
+                    injector.getInstance(TrinoPageSourceProvider.class);
+            TrinoPageSinkProvider trinoPageSinkProvider =
+                    injector.getInstance(TrinoPageSinkProvider.class);
+            TrinoNodePartitioningProvider trinoNodePartitioningProvider =
+                    injector.getInstance(TrinoNodePartitioningProvider.class);
+            TrinoSessionProperties trinoSessionProperties =
+                    injector.getInstance(TrinoSessionProperties.class);
+            TrinoTableOptions trinoTableOptions = injector.getInstance(TrinoTableOptions.class);
+
+            return new TrinoConnector(
+                    new ClassLoaderSafeConnectorMetadata(trinoMetadata, classLoader),
+                    new ClassLoaderSafeConnectorSplitManager(trinoSplitManager, classLoader),
+                    new ClassLoaderSafeConnectorPageSourceProvider(
+                            trinoPageSourceProvider, classLoader),
+                    new ClassLoaderSafeConnectorPageSinkProvider(
+                            trinoPageSinkProvider, classLoader),
+                    trinoNodePartitioningProvider,
+                    trinoTableOptions,
+                    trinoSessionProperties);
+        }
+    }
+
+    private static void readHadoopXml(String path, Map<String, String> config) throws Exception {
+        path = path.trim();
+        if (path.isEmpty()) {
+            return;
+        }
+
+        File xmlFile = new File(path);
+        NodeList propertyNodes =
+                DocumentBuilderFactory.newInstance()
+                        .newDocumentBuilder()
+                        .parse(xmlFile)
+                        .getElementsByTagName("property");
+        for (int i = 0; i < propertyNodes.getLength(); i++) {
+            Node propertyNode = propertyNodes.item(i);
+            if (propertyNode.getNodeType() == 1) {
+                Element propertyElement = (Element) propertyNode;
+                String key = propertyElement.getElementsByTagName("name").item(0).getTextContent();
+                String value =
+                        propertyElement.getElementsByTagName("value").item(0).getTextContent();
+                if (!StringUtils.isNullOrWhitespaceOnly(value)) {
+                    config.putIfAbsent(HADOOP_CONF_PREFIX + key, value);
+                }
+            }
+        }
+    }
+
+    /** Empty module for paimon connector factory. */
+    public static class EmptyModule implements Module {
+        @Override
+        public void configure(Binder binder) {}
+    }
+
+    private static FileSystemModule newFileSystemModule(
+            String catalogName, ConnectorContext context) {
+        Constructor<?> constructor = FileSystemModule.class.getConstructors()[0];
+        try {
+            if (constructor.getParameterCount() == 0) {
+                return (FileSystemModule) constructor.newInstance();
+            } else {
+                return (FileSystemModule)
+                        constructor.newInstance(
+                                catalogName, context.getNodeManager(), context.getOpenTelemetry());
+            }
+        } catch (InstantiationException | InvocationTargetException | IllegalAccessException e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+JAVA_EOF
+
+# Step 2 — replace TrinoMetadataFactory with HDFS-free version
+#   Original: @Inject(Options, HdfsConfigurationInitializer, HdfsConfig, TrinoFileSystemFactory)
+#   Patched:  @Inject(Options, TrinoFileSystemFactory)
+#   Hadoop Configuration is passed as null; paimon 0.8 TrinoCatalog accepts null
+#   and falls back to default Hadoop config when no XML files are configured.
+RUN cat > paimon-trino-440/src/main/java/org/apache/paimon/trino/TrinoMetadataFactory.java \
+<< 'JAVA_EOF'
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.paimon.trino;
+
+import org.apache.paimon.options.Options;
+import org.apache.paimon.trino.catalog.TrinoCatalog;
+
+import com.google.inject.Inject;
+import io.trino.filesystem.TrinoFileSystemFactory;
+
+/**
+ * A factory to create {@link TrinoMetadata}.
+ *
+ * <p>Patched for Trino 440+: HDFS must not be on the plugin classpath.
+ * Hadoop XML config file support (hive.config.resources) is intentionally
+ * removed; use Trino native S3 (fs.native-s3.enabled=true) in paimon.properties
+ * for MinIO / S3 access instead.
+ */
+public class TrinoMetadataFactory {
+
+    private final TrinoCatalog catalog;
+
+    @Inject
+    public TrinoMetadataFactory(Options options, TrinoFileSystemFactory fileSystemFactory) {
+        this.catalog = new TrinoCatalog(options, null, fileSystemFactory);
+    }
+
+    public TrinoMetadata create() {
+        return new TrinoMetadata(catalog);
+    }
+}
+JAVA_EOF
+
+# Build only the Trino-440-compatible module (-pl) and its upstream deps (-am)
+RUN mvn clean install -DskipTests -Drat.skip=true -Dspotless.skip=true -pl paimon-trino-440 -am -q
+
+# Extract plugin archive (maven image has gzip; trinodb/trino:440 minimal image does not)
+RUN mkdir -p /paimon-plugin && \
+    tar -zxf /paimon-trino/paimon-trino-440/target/*-plugin.tar.gz -C /paimon-plugin/
+
+# Remove trino-hdfs-440.jar from the plugin's main classloader directory.
+# After the HdfsModule patch our compiled code no longer references any io.trino.hdfs.*
+# classes, so it doesn't need to be on the plugin classloader.
+# The hdfs/ subdirectory (with jmxutils + all HDFS deps) is provided in Stage 2 by
+# copying from the base image's iceberg plugin, which already has the correct layout.
+RUN rm -f /paimon-plugin/paimon/trino-hdfs-440.jar
+
+# ── Stage 2: Trino 440 + patched Paimon plugin ───────────────────────────────
+FROM trinodb/trino:440
+
+# Run installation steps as root (base image uses USER trino; plugin dirs are root-owned)
+USER root
+
+# Copy patched paimon plugin (trino-hdfs-440.jar removed from main classloader dir)
+COPY --from=paimon-builder /paimon-plugin/ /usr/lib/trino/plugin/
+
+# Copy the hdfs/ support directory from the base image's iceberg plugin.
+#
+# Why: Trino 440's HdfsFileSystemLoader.load() unconditionally requires a 'hdfs/'
+# subdirectory inside the plugin dir.  That directory must contain trino-hdfs-440.jar
+# plus ~90 dependencies (jmxutils, guava, airlift-bootstrap, etc.) that are loaded
+# by a separate HdfsClassLoader.  The iceberg plugin already has this exact layout
+# (trinodb/trino:440 ships it), so we reuse it rather than duplicating the JARs.
+# paimon's patched code never calls new HdfsModule() so HDFS is registered but unused.
+RUN cp -r /usr/lib/trino/plugin/iceberg/hdfs /usr/lib/trino/plugin/paimon/hdfs
+
+# Restore trino user for runtime
+USER trino

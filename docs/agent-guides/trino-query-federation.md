@@ -1,8 +1,10 @@
 # Trino Query Federation — Streamhouse Architecture
 
-**Version**: 1.0
-**Date**: April 2026
-**Status**: Production-ready for thesis demo
+**Version**: 2.0
+**Date**: 2026-05-15
+**Status**: Production — Trino 440 + Paimon native connector
+
+> **Xem thêm**: Hướng dẫn chi tiết cấu hình Paimon connector tại [`trino-paimon-connector.md`](trino-paimon-connector.md)
 
 ---
 
@@ -623,21 +625,19 @@ def route_query(sql: str, layer: str) -> list[dict]:
 
 ### Issue 1: "Connector 'paimon' not found"
 
-**Cause**: Paimon JAR không được tải, hoặc JAR version không match Trino 476
+**Cause**: Paimon plugin chưa được build hoặc Trino image chưa được rebuild.
 
 **Fix**:
 ```bash
-# 1. Check JAR exists
-docker exec trino-coordinator ls -lh /usr/lib/trino/plugin/paimon/
+# Rebuild với --no-cache (quan trọng — tránh dùng bytecode cũ)
+docker compose -f docker/docker-compose.yml build --no-cache trino-coordinator
 
-# 2. Expected: paimon-trino-476-0.9.0-incubating.jar (or similar)
-
-# 3. If missing, rebuild Docker image
-docker compose -f docker/docker-compose.yml build trino-coordinator
-
-# 4. If still failing, try fallback JAR version
-# Edit docker/Dockerfile.trino, use paimon-trino-468 instead
+# Kiểm tra catalog load
+docker compose -f docker/docker-compose.yml logs trino-coordinator | grep "Added catalog"
+# Expected: -- Added catalog paimon using connector paimon --
 ```
+
+> Chi tiết về quá trình build và 4 lỗi cascading: xem [`trino-paimon-connector.md`](trino-paimon-connector.md)
 
 ### Issue 2: "OOM: Heap space" on worker
 
@@ -762,9 +762,10 @@ trino> SELECT * FROM iceberg.information_schema.table_statistics
 ## Summary of Changes
 
 ### 1. Paimon Catalog Integration
-- ✅ Added `paimon-trino-476-0.9.0-incubating.jar` to Dockerfile.trino
-- ✅ Created `paimon.properties` (coordinator + workers)
-- ✅ Configured S3/MinIO connector
+- ✅ Build `paimon-trino-440` từ source (branch `release-0.8`) trong Docker multi-stage
+- ✅ Patch `TrinoConnectorFactory.java` và `TrinoMetadataFactory.java` — xóa HdfsModule
+- ✅ Created `paimon.properties` (coordinator + worker1 + worker2)
+- ✅ Configured Trino native S3 filesystem (không dùng Hadoop S3A)
 
 ### 2. Iceberg Catalog Optimization
 - ✅ Enabled metadata caching (was disabled)
