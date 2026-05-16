@@ -329,6 +329,12 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
     networks:
       - violence-detection-net
     volumes:
@@ -339,6 +345,61 @@ services:
         limits:
           memory: 1g
           cpus: "0.50"
+
+  # =========================
+  # Pipeline Manager
+  # Tự động: startup jobs + watchdog + daily archival
+  # HOT (Fluss) + WARM (Paimon) luôn chạy
+  # COLD (Iceberg) archive mỗi ngày lúc 02:00
+  # =========================
+  pipeline-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.flink
+    container_name: pipeline-manager
+    command: python3 /opt/flink/scripts/pipeline_manager.py
+    environment:
+      - FLINK_API=http://jobmanager:8081
+      - FLINK_JM_ADDRESS=jobmanager
+      - FLINK_JM_RPC_PORT=6123
+      - SCRIPTS_DIR=/opt/flink/scripts
+      - CHECK_INTERVAL_SECONDS=300
+      - ARCHIVE_HOUR=2
+      - STARTUP_WAIT_SECS=180
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minio}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-mypassword}
+      - S3_ENDPOINT=http://minio:9000
+      - PAIMON_WAREHOUSE=s3://warehouse/paimon
+      - HIVE_METASTORE_URI=thrift://hive-metastore:9083
+      - ICEBERG_WAREHOUSE=s3a://warehouse/iceberg_warehouse
+      - KAFKA_BROKER=kafka:9092
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        jobmanager.rpc.port: 6123
+        rest.address: jobmanager
+        rest.port: 8081
+        s3.endpoint: http://minio:9000
+        s3.access-key: ${MINIO_ROOT_USER:-minio}
+        s3.secret-key: ${MINIO_ROOT_PASSWORD:-mypassword}
+        s3.path.style.access: true
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - violence-detection-net
+    volumes:
+      - ../scripts/transform:/opt/flink/scripts
+    restart: on-failure:5
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.25"
 
   # =========================
   # Flink TaskManager

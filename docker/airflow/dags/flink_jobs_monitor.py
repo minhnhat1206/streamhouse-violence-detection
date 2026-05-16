@@ -18,14 +18,17 @@ FLINK_API = "http://jobmanager:8081"
 # Jobs identified by substring match against Flink job names.
 # Flink names jobs after the sink table, e.g. "insert-into_fluss.security.hot_violence_alerts"
 REQUIRED_JOBS = [
-    "hot_violence_alerts",       # sink_to_fluss → insert-into_fluss.security.hot_violence_alerts
-    "violence_incidents",        # sink_to_paimon → insert-into_paimon.security.violence_incidents
+    "hot_violence_alerts",   # sink_to_fluss    → insert-into_fluss.security.hot_violence_alerts
+    "violence_incidents",    # sink_to_paimon   → insert-into_paimon.security.violence_incidents
+    "daily_incident_stats",  # aggregate_paimon → insert-into_paimon.security.daily_incident_stats
 ]
 
 # Map job key → PyFlink script path inside jobmanager container
+# scripts/transform/ is mounted at /opt/flink/scripts/ in the Flink containers
 JOB_SCRIPTS = {
-    "hot_violence_alerts": "/opt/flink/scripts/sink_to_fluss.py",
-    "violence_incidents":  "/opt/flink/scripts/sink_to_paimon.py",
+    "hot_violence_alerts":  "/opt/flink/scripts/sink_to_fluss.py",
+    "violence_incidents":   "/opt/flink/scripts/sink_to_paimon.py",
+    "daily_incident_stats": "/opt/flink/scripts/aggregate_paimon.py",
 }
 
 
