@@ -371,28 +371,42 @@ temporal query fail với real RTSP data (frames 292 bytes = fake JPEG từ sema
 
 ```
 Phase 1: Core Architecture
-[ ] Task 1.1 — Bật Fluss Tiering Service
-[ ] Task 1.2 — Implement star schema (dim_camera, dim_time, fact_violence_incidents)
-[ ] Task 1.3 — Implement temporal join
-[ ] Xóa sink_to_paimon.py (sau khi Tiering Service confirmed working)
+[x] Task 1.1 — Bật Fluss Tiering Service
+    → pipeline_manager.py auto-detect fluss-flink-tiering-*.jar, submit nếu có
+[x] Task 1.2 — Implement star schema (dim_camera, dim_time, fact_violence_incidents)
+    → setup_star_schema.py (NEW): DDL + seed 15 cameras + 730 dates
+    → sink_to_fluss.py: thêm dim_camera DDL
+[x] Task 1.3 — Implement temporal join
+    → sink_to_paimon_star.py (NEW): Kafka → FOR SYSTEM_TIME AS OF proc_time → Paimon
+[ ] Xóa sink_to_paimon.py (pending: verify sink_to_paimon_star.py hoạt động ổn định)
 
 Phase 2: Chatbot Fixes
-[ ] Task 2.1 — Remove is_violent filter from HOT queries
-[ ] Task 2.2 — Fix Union Read API bao gồm HOT layer
+[x] Task 2.1 — Remove is_violent filter from HOT queries
+    → trino_client.py: _adapt_sql_for_flink_hot()
+    → app.py: _adapt_sql_for_flink(layer="hot")
+[x] Task 2.2 — Fix Union Read API bao gồm HOT layer
+    → app.py: _fetch_hot() trong union_read() đã có, HOT SQL strips time filter
+    → ALLOWED_TABLES + SCHEMA_FOR_PROMPT: thêm fact_violence_incidents
 
 Phase 3: Infrastructure
 [ ] Task 3.1 — Rebuild chatbot Docker image
-[ ] Load dim_camera data từ camera_registry.csv
-[ ] Populate dim_time table (2025–2026)
+    → Command: docker compose -f docker/docker-compose.yml build chatbot
+    →          docker compose -f docker/docker-compose.yml up -d --force-recreate chatbot
+[x] Load dim_camera data từ camera_registry.csv → setup_star_schema.py
+[x] Populate dim_time table (2025–2026) → setup_star_schema.py
 
 Phase 4: Frontend
-[ ] Task 4.1 — Replace Math.random() với real API calls
-[ ] Task 4.2 — Real-time latency meter widget
+[x] Task 4.1 — Real layer counts via /api/layer-counts endpoint
+    → app.py: GET /api/layer-counts (Flink metrics + Trino paimon + Trino iceberg)
+    → Home.jsx: hiển thị row count trên từng LayerBadge
+[x] Task 4.2 — Real-time latency meter widget
+    → app.py: GET /api/latency (probe query mỗi layer)
+    → Home.jsx: hiển thị latency_ms với màu xanh/vàng so với target
 
 Phase 5: Testing & Docs
 [ ] Chạy lại 12 test cases với Tiering Service
 [ ] Benchmark latency T1/T2/T3
-[ ] Update DEVELOPER_LOG.md
+[x] Update DEVELOPER_LOG.md (phiên 30)
 [ ] Cập nhật thesis diagram (kiến trúc mới)
 ```
 

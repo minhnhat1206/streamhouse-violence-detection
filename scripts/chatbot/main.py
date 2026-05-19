@@ -808,6 +808,122 @@ async def union_read():
     }
 
 
+@app.get("/api/layer-counts")
+async def get_layer_counts():
+    """Approximate record counts from all 3 Streamhouse storage layers."""
+    import asyncio as _asyncio
+    import httpx
+
+    async def _count_hot() -> int | None:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get("http://jobmanager:8081/jobs/overview")
+                if r.status_code != 200:
+                    return None
+                for job in r.json().get("jobs", []):
+                    if "hot_violence_alerts" in job.get("name", "") and job.get("state") == "RUNNING":
+                        jid = job["jid"]
+                        r2 = await client.get(f"http://jobmanager:8081/jobs/{jid}")
+                        if r2.status_code != 200:
+                            break
+                        for v in r2.json().get("vertices", []):
+                            vname = v.get("name", "").lower()
+                            if "sink" in vname or "fluss" in vname:
+                                mr = await client.get(
+                                    f"http://jobmanager:8081/jobs/{jid}/vertices/{v['id']}/metrics",
+                                    params={"get": "0.numRecordsIn"},
+                                )
+                                if mr.status_code == 200:
+                                    for m in mr.json():
+                                        mid = m.get("id", "")
+                                        if mid in ("numRecordsIn", "0.numRecordsIn"):
+                                            val = int(m.get("value", 0))
+                                            if val > 0:
+                                                return val
+        except Exception as exc:
+            logger.debug("count_hot via Flink metrics failed: %s", exc)
+        return None
+
+    async def _count_warm() -> int | None:
+        try:
+            rows = await _trino_query(
+                "SELECT COUNT(*) FROM paimon.security.violence_incidents",
+                timeout=15.0,
+            )
+            return int(rows[0][0]) if rows and rows[0] else 0
+        except Exception:
+            return None
+
+    async def _count_cold() -> int | None:
+        try:
+            rows = await _trino_query(
+                "SELECT COUNT(*) FROM iceberg.security.historical_violence_incidents",
+                timeout=15.0,
+            )
+            return int(rows[0][0]) if rows and rows[0] else 0
+        except Exception:
+            return None
+
+    t0 = time_module.time()
+    hot, warm, cold = await _asyncio.gather(_count_hot(), _count_warm(), _count_cold())
+    return {
+        "hot":         hot,
+        "warm":        warm,
+        "cold":        cold,
+        "duration_ms": round((time_module.time() - t0) * 1000),
+    }
+
+
+@app.get("/api/latency")
+async def get_latency():
+    """Measure round-trip query latency for each Streamhouse storage layer."""
+    import asyncio as _asyncio
+
+    flink_gw_host = os.getenv("FLINK_GATEWAY_HOST", "flink-sql-gateway")
+    flink_gw_port = os.getenv("FLINK_GATEWAY_PORT", "8083")
+    flink_gw_base = f"http://{flink_gw_host}:{flink_gw_port}"
+
+    async def _probe_hot() -> dict:
+        import httpx
+        t0 = time_module.time()
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(f"{flink_gw_base}/v1/info")
+                ok = r.status_code == 200
+            return {"latency_ms": round((time_module.time() - t0) * 1000), "ok": ok, "error": None}
+        except Exception as exc:
+            return {"latency_ms": round((time_module.time() - t0) * 1000), "ok": False, "error": str(exc)[:120]}
+
+    async def _probe_warm() -> dict:
+        t0 = time_module.time()
+        try:
+            await _trino_query(
+                "SELECT incident_id FROM paimon.security.violence_incidents LIMIT 1",
+                timeout=15.0,
+            )
+            return {"latency_ms": round((time_module.time() - t0) * 1000), "ok": True, "error": None}
+        except Exception as exc:
+            return {"latency_ms": round((time_module.time() - t0) * 1000), "ok": False, "error": str(exc)[:120]}
+
+    async def _probe_cold() -> dict:
+        t0 = time_module.time()
+        try:
+            await _trino_query(
+                "SELECT incident_id FROM iceberg.security.historical_violence_incidents LIMIT 1",
+                timeout=15.0,
+            )
+            return {"latency_ms": round((time_module.time() - t0) * 1000), "ok": True, "error": None}
+        except Exception as exc:
+            return {"latency_ms": round((time_module.time() - t0) * 1000), "ok": False, "error": str(exc)[:120]}
+
+    hot, warm, cold = await _asyncio.gather(_probe_hot(), _probe_warm(), _probe_cold())
+    return {
+        "hot":  {**hot,  "target_ms": 100,   "layer_name": "Fluss"},
+        "warm": {**warm, "target_ms": 10000, "layer_name": "Paimon"},
+        "cold": {**cold, "target_ms": 30000, "layer_name": "Iceberg"},
+    }
+
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTP exceptions."""

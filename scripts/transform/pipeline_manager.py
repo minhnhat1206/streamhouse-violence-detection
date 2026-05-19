@@ -20,6 +20,7 @@ Environment variables:
   STARTUP_WAIT_SECS      - Max wait for Flink JM (default: 180)
 """
 
+import glob as _glob
 import json
 import logging
 import os
@@ -39,6 +40,20 @@ CHECK_INTERVAL     = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))   # 5 min
 ARCHIVE_HOUR       = int(os.getenv("ARCHIVE_HOUR",            "2"))    # 02:00
 STARTUP_WAIT_SECS  = int(os.getenv("STARTUP_WAIT_SECS",      "180"))   # 3 min
 
+# ── Fluss Tiering Service (Task 1.1) ────────────────────────────────────────────
+# Tự động tier data từ Fluss → Paimon khi JAR có sẵn.
+# JAR cần có: fluss-flink-tiering-*.jar trong /opt/fluss/lib/ hoặc /opt/flink/lib/
+_TIERING_JAR_PATTERNS = [
+    "/opt/fluss/lib/fluss-flink-tiering-*.jar",
+    "/opt/flink/lib/fluss-flink-tiering-*.jar",
+]
+_TIERING_JAR: Optional[str] = None
+for _pat in _TIERING_JAR_PATTERNS:
+    _matches = _glob.glob(_pat)
+    if _matches:
+        _TIERING_JAR = _matches[0]
+        break
+
 # ── Streaming jobs — MUST always be running ─────────────────────────────────────
 # key: substring phải tìm thấy trong tên Flink job (Flink đặt tên theo sink table)
 # THỨ TỰ QUAN TRỌNG: validator phải chạy TRƯỚC sink jobs vì sink jobs đọc từ
@@ -50,17 +65,45 @@ STREAMING_JOBS: dict[str, dict] = {
     },
     "hot_violence_alerts": {
         "script":      f"{SCRIPTS_DIR}/sink_to_fluss.py",
-        "description": "Kafka hot-violence-alerts-valid → Fluss (HOT layer)",
+        "description": "Kafka hot-violence-alerts-valid → Fluss (HOT layer) + dim_camera DDL",
     },
-    "violence_incidents": {
-        "script":      f"{SCRIPTS_DIR}/sink_to_paimon.py",
-        "description": "Kafka hot-violence-alerts-valid → Paimon (WARM layer)",
+    # Task 1.3: Star schema sink với temporal join (thay thế sink_to_paimon.py)
+    # Ghi vào cả fact_violence_incidents (mới) và violence_incidents (backward compat)
+    "fact_violence_incidents": {
+        "script":      f"{SCRIPTS_DIR}/sink_to_paimon_star.py",
+        "description": "Kafka → temporal join dim_camera → Paimon star schema (HOT→WARM)",
     },
     "daily_incident_stats": {
         "script":      f"{SCRIPTS_DIR}/aggregate_paimon.py",
         "description": "Paimon CDC → daily_stats + camera_stats (WARM gold)",
     },
 }
+
+# Task 1.1: Thêm Fluss Tiering Service nếu JAR có sẵn
+if _TIERING_JAR:
+    log.info("Found Fluss Tiering JAR: %s — adding to STREAMING_JOBS", _TIERING_JAR)
+    STREAMING_JOBS["Fluss Tiering Service"] = {
+        "script":      _TIERING_JAR,
+        "description": "Fluss → Paimon automatic tiering (HOT→WARM, no Lambda)",
+        "is_jar":      True,
+        "main_class":  "com.alibaba.fluss.flink.tiering.FlinkTieredStorageDriver",
+        "jar_args": [
+            "--fluss.bootstrap.servers", "fluss-coordinator:9123",
+            "--datalake.format", "paimon",
+            "--datalake.paimon.metastore", "filesystem",
+            "--datalake.paimon.warehouse",
+            os.getenv("PAIMON_WAREHOUSE", "s3://warehouse/paimon"),
+            "--datalake.paimon.s3.endpoint",
+            os.getenv("S3_ENDPOINT", "http://minio:9000"),
+            "--datalake.paimon.s3.access-key",
+            os.getenv("MINIO_ROOT_USER", "minio"),
+            "--datalake.paimon.s3.secret-key",
+            os.getenv("MINIO_ROOT_PASSWORD", "mypassword"),
+            "--datalake.paimon.s3.path.style.access", "true",
+        ],
+    }
+else:
+    log.info("Fluss Tiering JAR not found — using sink_to_paimon_star.py for HOT→WARM")
 
 # ── Batch archival job ──────────────────────────────────────────────────────────
 ARCHIVE_SCRIPT = f"{SCRIPTS_DIR}/archive_to_iceberg.py"
@@ -163,23 +206,78 @@ def _run_flink(args: list[str], timeout: int = 180) -> tuple[bool, str]:
         shutil.rmtree(unique_tmp, ignore_errors=True)
 
 
-def submit_streaming_job(job_key: str, script: str) -> bool:
-    """Submit một PyFlink streaming job (--detached, chạy mãi mãi)."""
+def submit_streaming_job(job_key: str, cfg: dict) -> bool:
+    """Submit một streaming job (Python script hoặc Java JAR)."""
+    if cfg.get("is_jar"):
+        return _submit_jar_job(job_key, cfg)
+    return _submit_python_job(job_key, cfg["script"])
+
+
+def _submit_python_job(job_key: str, script: str) -> bool:
+    """Submit PyFlink streaming job (--detached, chạy mãi mãi)."""
     log.info("Submitting streaming job: %s", job_key)
     log.info("  script: %s", script)
 
-    # Không dùng --pyFiles vì các scripts không import nhau.
-    # Tránh symlink conflict khi Flink tạo temp Python env cho nhiều submissions.
     ok, err = _run_flink([
         "run",
         "--detached",
         "--python", script,
     ])
-
     if ok:
         log.info("✓ Streaming job '%s' submitted successfully.", job_key)
     else:
         log.error("✗ Failed to submit '%s': %s", job_key, err)
+    return ok
+
+
+def _submit_jar_job(job_key: str, cfg: dict) -> bool:
+    """Submit Java JAR job — dùng cho Fluss Tiering Service."""
+    jar = cfg["script"]
+    main_class = cfg.get("main_class", "")
+    extra_args = cfg.get("jar_args", [])
+
+    log.info("Submitting JAR job: %s", job_key)
+    log.info("  jar: %s  class: %s", jar, main_class)
+
+    cmd = ["run", "--detached"]
+    if main_class:
+        cmd += ["-c", main_class]
+    cmd.append(jar)
+    cmd.extend(extra_args)
+
+    ok, err = _run_flink(cmd)
+    if ok:
+        log.info("✓ JAR job '%s' submitted.", job_key)
+    else:
+        log.error("✗ Failed to submit JAR '%s': %s", job_key, err)
+    return ok
+
+
+def _run_star_schema_setup() -> bool:
+    """
+    Chạy setup_star_schema.py một lần khi pipeline manager khởi động.
+    Tạo dim_camera (Fluss), dim_time (Paimon), fact_violence_incidents (Paimon).
+    Idempotent — an toàn khi chạy nhiều lần.
+    """
+    setup_script = f"{SCRIPTS_DIR}/setup_star_schema.py"
+    if not os.path.exists(setup_script):
+        log.warning("setup_star_schema.py not found at %s — skipping.", setup_script)
+        return True
+
+    log.info("Running star schema setup (Task 1.2): %s", setup_script)
+    ok, err = _run_flink(
+        args=[
+            "run",
+            "--python", setup_script,
+            "-Dexecution.runtime-mode=BATCH",
+            "-Dpipeline.name=setup_star_schema",
+        ],
+        timeout=600,
+    )
+    if ok:
+        log.info("✓ Star schema setup complete (dim_camera, dim_time, fact_violence_incidents).")
+    else:
+        log.warning("Star schema setup failed (non-fatal, streaming jobs will continue): %s", err)
     return ok
 
 
@@ -265,7 +363,7 @@ def watchdog_tick() -> bool:
             log.info("  ✓ %-30s — %s", key, cfg["description"])
         else:
             log.warning("  ✗ %-30s NOT running — submitting...", key)
-            submit_streaming_job(key, cfg["script"])
+            submit_streaming_job(key, cfg)
             all_ok = False
             # Đợi Flink dọn temp Python env trước khi submit job tiếp theo
             time.sleep(5)
@@ -335,6 +433,9 @@ def main() -> None:
 
     # 1. Đợi Flink JM + TaskManager sẵn sàng
     wait_for_flink(STARTUP_WAIT_SECS)
+
+    # 1.5 One-time star schema setup (Task 1.2: DDL + dim table seeding)
+    _run_star_schema_setup()
 
     # 2. Startup check — submit tất cả jobs còn thiếu
     log.info("--- Startup: initial job check ---")

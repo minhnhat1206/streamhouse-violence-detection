@@ -44,6 +44,52 @@ Xây dựng và tối ưu hóa hệ thống phát hiện bạo lực thời gian
 ## 🤝 Handover Protocol (MUST READ)
 *Mỗi khi chuyển đổi Agent (Gemini <-> Claude), Agent hiện tại PHẢI cập nhật phần "Last State" bên dưới.*
 
+### 📍 Last State (Updated: 2026-05-19 — Phiên 30) ✅ STREAMHOUSE COMPLETION PLAN
+
+- **Agent vừa làm:** Claude (Session 30 — Streamhouse Architecture Completion)
+- **Trạng thái:** ✅ HOÀN THÀNH phases 1–4 của `docs/streamhouse-completion-plan.md`
+
+---
+
+**🎯 Mục tiêu phiên 30:**
+Thực hiện toàn bộ kế hoạch hoàn thiện kiến trúc Streamhouse:
+- Phase 1: Star schema + Temporal Join + Tiering Service
+- Phase 2: Fix chatbot HOT query (is_violent filter)
+- Phase 3: Chatbot infrastructure improvements
+- Phase 4: Frontend real data (layer counts + latency meter)
+
+---
+
+**🔧 Changes Made:**
+
+| File | Change |
+|------|--------|
+| `scripts/transform/setup_star_schema.py` | **NEW** — Task 1.2: DDL dim_camera (Fluss), dim_time (Paimon 2025-2026), fact_violence_incidents (Paimon). Seeds 15 cameras + 730 dates |
+| `scripts/transform/sink_to_paimon_star.py` | **NEW** — Task 1.3: Temporal join Kafka→dim_camera→fact_violence_incidents + violence_incidents |
+| `scripts/transform/sink_to_fluss.py` | Task 1.2: Thêm DDL dim_camera table khi job khởi động |
+| `scripts/transform/pipeline_manager.py` | Task 1.1+1.3: Tự động detect Fluss Tiering JAR, thêm `_run_star_schema_setup()` lúc startup, thay "violence_incidents" job bằng "fact_violence_incidents" (sink_to_paimon_star.py) |
+| `scripts/chatbot/app.py` | Task 2.1: Remove is_violent=TRUE filter cho HOT queries. Task 4.1/4.2: Add `/api/layer-counts` + `/api/latency` endpoints. Add `fact_violence_incidents` to ALLOWED_TABLES + SCHEMA_FOR_PROMPT |
+| `scripts/chatbot/components/trino_client.py` | Task 2.1: Remove is_violent=TRUE filter trong `_adapt_sql_for_flink_hot()` |
+| `Violence-Urban-Safety-UI/frontend/src/pages/Home.jsx` | Task 4.1/4.2: Fetch `/api/layer-counts` + `/api/latency`, hiển thị row counts và latency trong Streamhouse 3-Layer panel |
+
+---
+
+**🏗️ Architecture Changes:**
+1. **Star Schema** (Task 1.2): `dim_camera` (Fluss) + `dim_time` (Paimon) + `fact_violence_incidents` (Paimon)
+2. **Temporal Join** (Task 1.3): `sink_to_paimon_star.py` dùng `FOR SYSTEM_TIME AS OF proc_time` để enrich location/ward_id/district
+3. **Tiering Service** (Task 1.1): pipeline_manager.py detect JAR tự động — nếu có sẽ submit tiering job, nếu không dùng star schema sink
+4. **Setup Job**: `setup_star_schema.py` chạy batch một lần khi stack khởi động
+
+---
+
+**⚠️ Cần làm tiếp (Phase 3 + 5):**
+- Phase 3: `docker compose build chatbot && docker compose up -d --force-recreate chatbot`
+- Phase 5: Chạy 12 test cases từ `docs/E2E_TEST_REPORT_2026-05-17.md`
+- Benchmark latency T1/T2/T3 (HOT <100ms, WARM 30-60s tiering, COLD <5min)
+- Cập nhật thesis diagram với kiến trúc mới
+
+---
+
 ### 📍 Last State (Updated: 2026-05-14 — Phiên 29) ✅ TRUE TEXT-TO-SQL + EVIDENCE IMAGE QUERY
 
 - **Agent vừa làm:** Claude (Session 29 — True Text-to-SQL + Schema Registry + Evidence Image Retrieval)

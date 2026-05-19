@@ -381,6 +381,12 @@ class TrinoClient:
         result = re.sub(r'(?<!\w)\bid\b(?!\w)', 'incident_id', result, flags=re.IGNORECASE)
         result = re.sub(r'\bNOW\(\)', "LOCALTIMESTAMP", result, flags=re.IGNORECASE)
         result = re.sub(r'\bCURRENT_TIMESTAMP\b', "LOCALTIMESTAMP", result, flags=re.IGNORECASE)
+        # Strip columns that don't exist in hot_violence_alerts
+        # Schema: incident_id, camera_id, timestamp, risk_score, confidence, is_violent, event_type
+        for _col in ("location", "frame_url", "frame_data", "ward_id", "district", "date_id"):
+            result = re.sub(rf',\s*\b{_col}\b', '', result, flags=re.IGNORECASE)
+            result = re.sub(rf'\b{_col}\b\s*,\s*', '', result, flags=re.IGNORECASE)
+            result = re.sub(rf'\bWHERE\s+{_col}\b', 'WHERE 1=1', result, flags=re.IGNORECASE)
 
         # Strip time-based WHERE clauses (backtick-quoted timestamp first, then plain)
         # Pattern: WHERE/AND `timestamp`/<timestamp> OP expr INTERVAL ... DAY/HOUR/MIN
@@ -426,6 +432,14 @@ class TrinoClient:
             r'\bWHERE\s+(?=GROUP\s+BY|ORDER\s+BY|LIMIT|HAVING|$)',
             '', result, flags=re.IGNORECASE
         )
+        result = result.strip()
+
+        # Remove is_violent = TRUE filter (HOT layer stores all detection events;
+        # only ~2% are violent on fresh data → this filter returns 0 rows).
+        result = re.sub(r'\bWHERE\s+is_violent\s*=\s*TRUE\s+AND\s+', 'WHERE ', result, flags=re.IGNORECASE)
+        result = re.sub(r'\bAND\s+is_violent\s*=\s*TRUE\b', '', result, flags=re.IGNORECASE)
+        result = re.sub(r'\bWHERE\s+is_violent\s*=\s*TRUE\b', 'WHERE 1=1', result, flags=re.IGNORECASE)
+        result = re.sub(r'\bWHERE\s+1=1\b\s*(?=GROUP\s+BY|ORDER\s+BY|LIMIT|HAVING|\s*$)', '', result, flags=re.IGNORECASE)
         result = result.strip()
 
         # Strip ORDER BY from streaming HOT queries.
