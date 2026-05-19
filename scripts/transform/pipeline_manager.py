@@ -69,13 +69,16 @@ STREAMING_JOBS: dict[str, dict] = {
     },
     # Task 1.3: Star schema sink với temporal join (thay thế sink_to_paimon.py)
     # Ghi vào cả fact_violence_incidents (mới) và violence_incidents (backward compat)
+    # submit_timeout=400 vì script cần >180s để khởi tạo catalogs + DDLs + compile plan
     "fact_violence_incidents": {
-        "script":      f"{SCRIPTS_DIR}/sink_to_paimon_star.py",
-        "description": "Kafka → temporal join dim_camera → Paimon star schema (HOT→WARM)",
+        "script":         f"{SCRIPTS_DIR}/sink_to_paimon_star.py",
+        "description":    "Kafka → temporal join dim_camera → Paimon star schema (HOT→WARM)",
+        "submit_timeout": 400,
     },
     "daily_incident_stats": {
-        "script":      f"{SCRIPTS_DIR}/aggregate_paimon.py",
-        "description": "Paimon CDC → daily_stats + camera_stats (WARM gold)",
+        "script":         f"{SCRIPTS_DIR}/aggregate_paimon.py",
+        "description":    "Paimon CDC → daily_stats + camera_stats (WARM gold)",
+        "submit_timeout": 400,
     },
 }
 
@@ -214,10 +217,10 @@ def submit_streaming_job(job_key: str, cfg: dict) -> bool:
     """Submit một streaming job (Python script hoặc Java JAR)."""
     if cfg.get("is_jar"):
         return _submit_jar_job(job_key, cfg)
-    return _submit_python_job(job_key, cfg["script"])
+    return _submit_python_job(job_key, cfg["script"], timeout=cfg.get("submit_timeout", 180))
 
 
-def _submit_python_job(job_key: str, script: str) -> bool:
+def _submit_python_job(job_key: str, script: str, timeout: int = 180) -> bool:
     """Submit PyFlink streaming job (--detached, chạy mãi mãi)."""
     log.info("Submitting streaming job: %s", job_key)
     log.info("  script: %s", script)
@@ -226,7 +229,7 @@ def _submit_python_job(job_key: str, script: str) -> bool:
         "run",
         "--detached",
         "--python", script,
-    ])
+    ], timeout=timeout)
     if ok:
         log.info("✓ Streaming job '%s' submitted successfully.", job_key)
     else:
@@ -445,7 +448,17 @@ def main() -> None:
     log.info("--- Startup: initial job check ---")
     watchdog_tick()
 
-    last_archive: Optional[datetime] = None
+    # Tránh chạy archival ngay khi restart ban ngày (e.g. 15:22 >= ARCHIVE_HOUR=2)
+    # Nếu đã qua giờ archive hôm nay → đánh dấu đã chạy hôm nay (bỏ qua cho đến ngày mai)
+    _now = datetime.now()
+    last_archive: Optional[datetime] = (
+        _now if _now.hour >= ARCHIVE_HOUR else None
+    )
+    if last_archive is not None:
+        log.info(
+            "Archive already past for today (%02d:00). Next archival: tomorrow %02d:00.",
+            ARCHIVE_HOUR, ARCHIVE_HOUR,
+        )
 
     # 3. Main loop
     while True:
