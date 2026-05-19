@@ -103,7 +103,7 @@ if _TIERING_JAR:
         ],
     }
 else:
-    log.info("Fluss Tiering JAR not found — using sink_to_paimon_star.py for HOT→WARM")
+    _TIERING_NOTE = "Fluss Tiering JAR not found — using sink_to_paimon_star.py for HOT→WARM"
 
 # ── Batch archival job ──────────────────────────────────────────────────────────
 ARCHIVE_SCRIPT = f"{SCRIPTS_DIR}/archive_to_iceberg.py"
@@ -115,6 +115,10 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("pipeline-manager")
+if _TIERING_JAR:
+    log.info("Fluss Tiering JAR found: %s", _TIERING_JAR)
+else:
+    log.info(_TIERING_NOTE)
 
 # ── Flink REST helpers ──────────────────────────────────────────────────────────
 
