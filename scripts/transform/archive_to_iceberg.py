@@ -59,9 +59,31 @@ def main():
         )
     """)
 
-    # 3. Archive aged data: Paimon → Iceberg (deduplicated via NOT EXISTS)
-    print("[INFO] Starting archival: Paimon → Iceberg (data older than 7 days)...")
-    result = t_env.execute_sql("""
+    # 3. Ensure Iceberg target table exists (idempotent after hard reset)
+    print("[INFO] Ensuring Iceberg target table exists...")
+    t_env.execute_sql("CREATE DATABASE IF NOT EXISTS `iceberg`.`security`")
+    t_env.execute_sql("""
+        CREATE TABLE IF NOT EXISTS `iceberg`.`security`.`historical_violence_incidents` (
+            incident_id  STRING,
+            camera_id    STRING,
+            `timestamp`  TIMESTAMP(6),
+            risk_score   DOUBLE,
+            confidence   DOUBLE,
+            is_violent   BOOLEAN,
+            event_type   STRING,
+            location     STRING,
+            incident_date DATE
+        ) PARTITIONED BY (incident_date)
+        WITH (
+            'format-version' = '2'
+        )
+    """)
+
+    # 4. Archive aged data: Paimon → Iceberg (deduplicated via NOT EXISTS)
+    # NOTE: Production filter is '7' DAY. For fresh-reset testing, archive all data.
+    archive_interval = os.getenv("ARCHIVE_INTERVAL_DAYS", "7")
+    print(f"[INFO] Starting archival: Paimon → Iceberg (data older than {archive_interval} days)...")
+    result = t_env.execute_sql(f"""
         INSERT INTO iceberg.security.historical_violence_incidents
         SELECT
             p.incident_id,
@@ -74,7 +96,7 @@ def main():
             p.location,
             CAST(p.`timestamp` AS DATE) AS incident_date
         FROM paimon.security.violence_incidents p
-        WHERE p.`timestamp` < LOCALTIMESTAMP - INTERVAL '7' DAY
+        WHERE p.`timestamp` < LOCALTIMESTAMP - INTERVAL '{archive_interval}' DAY
           AND p.is_deleted = false
           AND NOT EXISTS (
               SELECT 1 FROM iceberg.security.historical_violence_incidents i

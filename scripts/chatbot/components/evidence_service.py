@@ -261,7 +261,9 @@ class EvidenceService:
         Returns:
             S3 URL or path
         """
-        return f"s3://{self.bucket_name}/{camera_id}/{incident_date}/{incident_id}.jpg"
+        import os
+        minio_external = os.getenv("MINIO_EXTERNAL_URL", "http://localhost:9000")
+        return f"{minio_external}/{self.bucket_name}/{camera_id}/{incident_date}/{incident_id}.jpg"
 
     def cache_hit_ratio(self) -> float:
         """Get cache hit ratio.

@@ -41,14 +41,20 @@ STARTUP_WAIT_SECS  = int(os.getenv("STARTUP_WAIT_SECS",      "180"))   # 3 min
 
 # ── Streaming jobs — MUST always be running ─────────────────────────────────────
 # key: substring phải tìm thấy trong tên Flink job (Flink đặt tên theo sink table)
+# THỨ TỰ QUAN TRỌNG: validator phải chạy TRƯỚC sink jobs vì sink jobs đọc từ
+# hot-violence-alerts-valid (output của validator). Pipeline-manager submit tuần tự.
 STREAMING_JOBS: dict[str, dict] = {
+    "Contract Validator": {
+        "script":      f"{SCRIPTS_DIR}/data_contract_validator.py",
+        "description": "Kafka urban-safety-alerts → hot-violence-alerts-valid (DATA CONTRACT)",
+    },
     "hot_violence_alerts": {
         "script":      f"{SCRIPTS_DIR}/sink_to_fluss.py",
-        "description": "Kafka → Fluss  (HOT layer)",
+        "description": "Kafka hot-violence-alerts-valid → Fluss (HOT layer)",
     },
     "violence_incidents": {
         "script":      f"{SCRIPTS_DIR}/sink_to_paimon.py",
-        "description": "Kafka → Paimon (WARM layer)",
+        "description": "Kafka hot-violence-alerts-valid → Paimon (WARM layer)",
     },
     "daily_incident_stats": {
         "script":      f"{SCRIPTS_DIR}/aggregate_paimon.py",

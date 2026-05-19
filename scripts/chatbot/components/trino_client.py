@@ -60,6 +60,13 @@ class TrinoClient:
         self.flink_gateway_port = flink_gateway_port
         self.pool_size = pool_size
 
+        # Cached Flink SQL Gateway session for HOT (Fluss) queries.
+        # Reusing the session avoids 3 DDL roundtrips (CREATE CATALOG + USE + USE)
+        # that add ~5-10s latency on every HOT query.
+        self._fluss_session_id: Optional[str] = None
+        self._fluss_session_ts: float = 0.0
+        self._FLUSS_SESSION_TTL = 1800  # 30 min — Flink SQL Gateway sessions expire ~1h
+
         logger.info(
             f"Initialized TrinoClient: "
             f"Trino {trino_host}:{trino_port}, "
@@ -67,6 +74,87 @@ class TrinoClient:
         )
 
     # ── Low-level: Flink SQL Gateway ──────────────────────────────────────────
+
+    def _ensure_fluss_session(self, init_timeout: int = 60) -> str:
+        """Get or create a pre-warmed Flink SQL Gateway session for Fluss.
+
+        Caches the session across HOT queries. First call initializes the session
+        with catalog DDLs (adds ~5s); subsequent calls reuse it instantly.
+        Session is recreated if it's older than _FLUSS_SESSION_TTL or dead.
+        """
+        gateway_url = f"http://{self.flink_gateway_host}:{self.flink_gateway_port}"
+        now = time.time()
+
+        # Try to reuse existing session
+        if self._fluss_session_id and (now - self._fluss_session_ts) < self._FLUSS_SESSION_TTL:
+            try:
+                resp = requests.get(
+                    f"{gateway_url}/v1/sessions/{self._fluss_session_id}",
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    logger.debug(f"Reusing Fluss session: {self._fluss_session_id}")
+                    return self._fluss_session_id
+            except Exception:
+                pass
+            logger.info("Fluss session dead, recreating...")
+            self._fluss_session_id = None
+
+        # Create new session
+        logger.info("Creating new Fluss SQL Gateway session...")
+        sess_resp = requests.post(f"{gateway_url}/v1/sessions", json={}, timeout=init_timeout)
+        sess_resp.raise_for_status()
+        session_id = sess_resp.json()["sessionHandle"]
+
+        # Initialize with Fluss catalog DDLs (each DDL is fast, ~1-5s)
+        for stmt in [_FLUSS_CATALOG_DDL, "USE CATALOG fluss_hot", "USE `security`"]:
+            self._exec_flink_statement(session_id, stmt, gateway_url, init_timeout)
+
+        self._fluss_session_id = session_id
+        self._fluss_session_ts = time.time()
+        logger.info(f"Fluss session ready: {session_id}")
+        return session_id
+
+    def _cancel_operation(self, session_id: str, op_handle: str, gateway_url: str) -> None:
+        """Cancel a Flink SQL Gateway operation.
+
+        Called after collecting results. Also triggers cleanup of zombie collect jobs
+        via the Flink REST API (SQL Gateway cancel alone doesn't stop the Flink job).
+        """
+        # Cancel the SQL Gateway operation
+        try:
+            requests.delete(
+                f"{gateway_url}/v1/sessions/{session_id}/operations/{op_handle}",
+                timeout=5
+            )
+            logger.debug(f"Cancelled operation {op_handle[:8]}...")
+        except Exception as e:
+            logger.debug(f"Could not cancel operation {op_handle[:8]}: {e}")
+        # Cancel zombie Flink 'collect' jobs via REST (streaming HOT queries never stop)
+        self._cleanup_collect_jobs()
+
+    def _cleanup_collect_jobs(self) -> None:
+        """Cancel all RUNNING 'collect' jobs in Flink to free task slots.
+
+        Flink SQL Gateway streaming queries leave zombie 'collect' jobs running
+        indefinitely. Cancel them via Flink REST API before each HOT query so
+        the new query can acquire task slots.
+        """
+        try:
+            flink_url = "http://jobmanager:8081"
+            r = requests.get(f"{flink_url}/jobs/overview", timeout=5)
+            if r.status_code != 200:
+                return
+            for job in r.json().get("jobs", []):
+                if job.get("name") == "collect" and job.get("state") == "RUNNING":
+                    jid = job.get("jid", "")
+                    try:
+                        requests.patch(f"{flink_url}/jobs/{jid}", timeout=5)
+                        logger.info(f"Cancelled zombie collect job {jid[:8]}...")
+                    except Exception as e:
+                        logger.debug(f"Could not cancel job {jid[:8]}: {e}")
+        except Exception as e:
+            logger.debug(f"Could not clean up collect jobs: {e}")
 
     def _exec_flink_statement(
         self,
@@ -85,29 +173,45 @@ class TrinoClient:
         op_handle = exec_resp.json()["operationHandle"]
 
         # Poll result pages with token-based pagination.
-        # Two execution modes via the gateway:
-        #   Bounded (SELECT ... LIMIT N): ends with EOS → return all accumulated rows.
-        #   Streaming aggregate (COUNT(*), SUM ...): emits UPDATE_AFTER pages indefinitely;
-        #     we track the latest "snapshot" (last page of UPDATE_AFTER rows) and return
-        #     it on timeout or when values stop changing.
+        # Flink SQL Gateway only supports tokens 0 and 1 (token 2+ → HTTP 500).
+        # Token advancement rules (CRITICAL — see token behavior notes below):
+        #   - Advance 0→1 ONLY when: page has rows OR resultType=="PAYLOAD" (not NOT_READY)
+        #   - NOT_READY with empty page = job still running, data not buffered yet → stay at 0
+        #   - PAYLOAD with empty page = buffer consumed / job done → advance once to check token 1
+        #   - isQueryRunning is ABSENT in all Flink 1.18 SQL Gateway responses
+        #     (do NOT use it for state detection; rely on resultType and EOS instead)
         HTTP_TIMEOUT = min(timeout, 30)
-        TOTAL_DEADLINE = time.time() + 240
+        TOTAL_DEADLINE = time.time() + max(timeout, 30)  # respect caller's timeout
         result_token = 0
         all_rows: List[Dict[str, Any]] = []
         latest_agg_rows: List[Dict[str, Any]] = []
         columns: List[Dict] = []
         stable_polls = 0
+        consecutive_500s = 0
+        MAX_TOKEN = 1          # Gateway supports tokens 0 and 1 only
+        MAX_CONSEC_500 = 5     # Give up after 5 consecutive HTTP 500s (stale session)
 
         while time.time() < TOTAL_DEADLINE:
             result_resp = requests.get(
                 f"{gateway_url}/v1/sessions/{session_id}/operations/{op_handle}/result/{result_token}",
                 timeout=HTTP_TIMEOUT
             )
-            result_resp.raise_for_status()
+            if result_resp.status_code != 200:
+                consecutive_500s += 1
+                logger.warning(
+                    f"Gateway result/{result_token} returned {result_resp.status_code} "
+                    f"(attempt {consecutive_500s}/{MAX_CONSEC_500})"
+                )
+                if consecutive_500s >= MAX_CONSEC_500:
+                    logger.error("Too many HTTP errors from Gateway — aborting poll")
+                    break
+                result_token = 0  # reset to start position
+                time.sleep(2)
+                continue
+            consecutive_500s = 0
             data = result_resp.json()
 
             result_type = data.get("resultType", "NOT_READY")
-            is_running = data.get("isQueryRunning", result_type == "NOT_READY")
 
             results_block = data.get("results", {})
             if not columns and results_block.get("columns"):
@@ -130,34 +234,61 @@ class TrinoClient:
             if page_rows:
                 stable_polls = 0
                 all_rows.extend(page_rows)
-                latest_agg_rows = page_rows
+                # For streaming aggregates (e.g. Fluss GROUP BY), the same group keys
+                # are emitted repeatedly as UPDATE_AFTER events with updated aggregates.
+                # Keep only the LATEST value per group-by key to avoid returning thousands
+                # of intermediate streaming updates.
+                # Dedup heuristic:
+                #   - 2+ columns: use all-but-last as key (last col = aggregate value)
+                #   - 1 column: use that column as key (SELECT col FROM table → unique values)
+                #   - 0 columns: no dedup (return all_rows as fallback)
+                if columns:
+                    n = len(columns)
+                    key_cols = columns[:n - 1] if n > 1 else columns
+                    dedup_key_names = [c.get("name") for c in key_cols]
+                    dedup_dict: Dict[tuple, Dict] = {}
+                    for row in all_rows:
+                        k = tuple(row.get(cn) for cn in dedup_key_names)
+                        dedup_dict[k] = row
+                    latest_agg_rows = list(dedup_dict.values())
+                else:
+                    latest_agg_rows = list(all_rows)
             else:
                 stable_polls += 1
 
             if result_type == "EOS":
-                return all_rows if all_rows else latest_agg_rows
+                return latest_agg_rows if latest_agg_rows else all_rows
 
             next_uri = data.get("nextResultUri")
-            if next_uri:
-                try:
-                    result_token = int(next_uri.rstrip("/").split("/")[-1])
-                except (ValueError, IndexError):
-                    break
-                continue
+            if next_uri and result_token < MAX_TOKEN:
+                # Advance ONLY when safe: page had rows (consume batch), or
+                # resultType is PAYLOAD (buffer acknowledged, data may be at next token).
+                # Do NOT advance on NOT_READY (job running, data not yet in buffer) —
+                # that would strand the data at the current token.
+                if page_rows or result_type == "PAYLOAD":
+                    try:
+                        next_token = int(next_uri.rstrip("/").split("/")[-1])
+                        if next_token <= MAX_TOKEN:
+                            result_token = next_token
+                    except (ValueError, IndexError):
+                        pass
+                    continue  # fetch next page immediately (no sleep)
 
-            if not is_running:
-                break
-
-            if stable_polls >= 3 and latest_agg_rows:
+            # 2 consecutive empty polls → streaming aggregate has converged
+            # (lowered from 3 to return faster; 4s gap between data pages is enough
+            # for Fluss streaming aggregate to reach stable state)
+            if stable_polls >= 2 and latest_agg_rows:
                 logger.info(f"Streaming aggregate stabilized after {stable_polls} empty polls")
+                self._cancel_operation(session_id, op_handle, gateway_url)
                 return latest_agg_rows
 
             time.sleep(2)
 
-        elapsed = 240 - (TOTAL_DEADLINE - time.time())
+        elapsed = time.time() - (TOTAL_DEADLINE - max(timeout, 30))
         logger.info(f"Flink statement polling ended after {elapsed:.0f}s: "
-                    f"{len(all_rows)} direct rows, {len(latest_agg_rows)} agg rows")
-        return all_rows if all_rows else latest_agg_rows
+                    f"{len(latest_agg_rows)} deduped rows (from {len(all_rows)} total)")
+        self._cancel_operation(session_id, op_handle, gateway_url)
+        return latest_agg_rows if latest_agg_rows else all_rows
 
     def _query_flink_gateway(
         self,
@@ -226,8 +357,15 @@ class TrinoClient:
     def _adapt_sql_for_flink_hot(sql: str) -> str:
         """Convert SQL to Flink SQL for HOT (Fluss) queries.
 
-        Strips fluss.security. prefix (handled by USE CATALOG + USE in session init),
-        fixes TIMESTAMP_LTZ vs TIMESTAMP(3) mismatch, and quotes reserved keywords.
+        Key behaviors:
+        1. Strips fluss.security. prefix (session handles USE CATALOG + USE)
+        2. Quotes the reserved keyword `timestamp`
+        3. REMOVES time-based WHERE clauses — Fluss primary key table uses snapshot
+           scan ONLY when there is no non-PK WHERE filter. Adding a timestamp filter
+           forces Flink to use unbounded streaming scan (sees only future records).
+           Since Fluss has ~1-2hr retention, all data in the table is already "hot"
+           — time filtering is unnecessary and breaks snapshot reads.
+        4. Ensures a LIMIT exists to make the scan bounded.
         """
         import re
         result = sql
@@ -235,8 +373,89 @@ class TrinoClient:
         result = result.replace("fluss.", "")
         result = result.replace("historical_violence_incidents", "hot_violence_alerts")
         result = result.replace('"timestamp"', '`timestamp`')
+        # Map non-existent column aliases that Gemini tends to generate
+        # hot_violence_alerts schema: incident_id, camera_id, timestamp, risk_score,
+        #   confidence, is_violent, event_type  (NO event_id, id, alert_id)
+        result = re.sub(r'\bevent_id\b', 'incident_id', result, flags=re.IGNORECASE)
+        result = re.sub(r'\balert_id\b', 'incident_id', result, flags=re.IGNORECASE)
+        result = re.sub(r'(?<!\w)\bid\b(?!\w)', 'incident_id', result, flags=re.IGNORECASE)
         result = re.sub(r'\bNOW\(\)', "LOCALTIMESTAMP", result, flags=re.IGNORECASE)
         result = re.sub(r'\bCURRENT_TIMESTAMP\b', "LOCALTIMESTAMP", result, flags=re.IGNORECASE)
+
+        # Strip time-based WHERE clauses (backtick-quoted timestamp first, then plain)
+        # Pattern: WHERE/AND `timestamp`/<timestamp> OP expr INTERVAL ... DAY/HOUR/MIN
+        # We remove the entire condition (it's redundant — Fluss only holds recent data)
+        _time_filter = re.compile(
+            r"(?:WHERE\s+|AND\s+)"
+            r"(?:`timestamp`|timestamp)\s*[><=!]+\s*"
+            r"(?:LOCALTIMESTAMP|NOW\(\)|CURRENT_TIMESTAMP)"
+            r"(?:\s*[-+]\s*INTERVAL\s*'[^']+'\s*\w+)?",
+            re.IGNORECASE,
+        )
+        result = _time_filter.sub("", result).strip()
+
+        # Also strip standalone TIMESTAMP literal comparisons, including arithmetic expressions:
+        # e.g. AND `timestamp` >= TIMESTAMP '2026-05-18 13:23:36'
+        # e.g. AND `timestamp` >= (TIMESTAMP '2026-05-18 13:23:36' - INTERVAL '30' MINUTE)
+        _ts_literal = re.compile(
+            r"(?:WHERE\s+|AND\s+)"
+            r"(?:`timestamp`|\"timestamp\"|timestamp)\s*[><=!]+\s*"
+            r"\(?"                                          # optional opening paren
+            r"\s*TIMESTAMP\s*'[^']+'"                       # TIMESTAMP 'literal'
+            r"(?:\s*[-+]\s*INTERVAL\s*'[^']+'\s*\w+)?"     # optional - INTERVAL 'N' UNIT
+            r"\s*\)?",                                      # optional closing paren
+            re.IGNORECASE,
+        )
+        result = _ts_literal.sub("", result).strip()
+
+        # Fix SQL structure after timestamp removal:
+        # 1. "WHERE [whitespace] AND x" → "WHERE x"
+        #    Handles: timestamp was the FIRST WHERE condition; WHERE keyword survived
+        #    but next condition is orphaned with AND.
+        #    \s+ covers both "WHERE AND" (single-line) and "WHERE\n    AND" (multi-line)
+        result = re.sub(r'\bWHERE\s+AND\b', 'WHERE', result, flags=re.IGNORECASE)
+        # 2. No WHERE left + orphaned AND lines (timestamp WAS the entire WHERE clause;
+        #    the regex strips "WHERE\s+<condition>" taking the WHERE keyword with it).
+        #    Gemini often formats FROM/table on separate lines so simple FROM+table regex fails.
+        #    Solution: if WHERE is completely gone, find the first line-initial AND and make
+        #    it a WHERE. multiline mode: ^ matches start of each line.
+        if not re.search(r'\bWHERE\b', result, re.IGNORECASE):
+            result = re.sub(r'(?m)^(\s*)AND\b', r'\1WHERE ', result, count=1)
+        # 3. Trailing WHERE with no conditions (before GROUP BY / ORDER BY / LIMIT / end)
+        result = re.sub(
+            r'\bWHERE\s+(?=GROUP\s+BY|ORDER\s+BY|LIMIT|HAVING|$)',
+            '', result, flags=re.IGNORECASE
+        )
+        result = result.strip()
+
+        # Strip ORDER BY from streaming HOT queries.
+        # Flink streaming aggregates (GROUP BY) don't support ORDER BY on aggregate columns —
+        # only time-attribute-based sorting is allowed on unbounded streams.
+        # With ORDER BY present, Flink raises an internal server error on result fetch.
+        # We remove ORDER BY entirely and let Python post-process sort if needed.
+        # Case 1: ORDER BY ... LIMIT N → keep only LIMIT N
+        result = re.sub(
+            r'\bORDER\s+BY\b.*?\bLIMIT\b',
+            'LIMIT',
+            result, flags=re.IGNORECASE | re.DOTALL
+        )
+        # Case 2: trailing ORDER BY (no LIMIT after it)
+        result = re.sub(
+            r'\bORDER\s+BY\b[^;]*$',
+            '',
+            result, flags=re.IGNORECASE
+        )
+        result = result.strip()
+
+        # Normalize LIMIT: Gemini may generate LIMIT 1 for "top camera" queries,
+        # but without ORDER BY this returns an arbitrary row. Use LIMIT 100 instead.
+        result = re.sub(r'\bLIMIT\s+\d+\b', 'LIMIT 100', result, flags=re.IGNORECASE)
+
+        # Ensure LIMIT exists (bounds the Flink snapshot scan)
+        if not re.search(r'\bLIMIT\b', result, re.IGNORECASE):
+            result = result.rstrip(";").strip() + " LIMIT 100"
+
+        # Quote reserved keyword `timestamp` (after WHERE removal to avoid partial matches)
         result = re.sub(r"(?<!`)\btimestamp\b(?!`\s*\()", "`timestamp`", result, flags=re.IGNORECASE)
         return result
 
@@ -318,31 +537,45 @@ class TrinoClient:
     def query_fluss(self, sql: str, timeout: int = 30) -> List[Dict[str, Any]]:
         """Query HOT layer (Fluss) via Flink SQL Gateway.
 
-        Retries session setup once on catalog_not_found before falling back.
-        """
-        logger.info(f"Querying Fluss (HOT): {sql[:100]}...")
+        Uses a cached session to avoid 3 DDL roundtrips (CREATE CATALOG + USE + USE)
+        on every call. Falls back to fresh session on catalog/session errors.
 
-        flink_sql = self._adapt_sql_for_flink_hot(sql)
+        Fluss queries run as unbounded streaming aggregations (BATCH mode unsupported
+        for full table scans). We cap the polling deadline at FLUSS_MAX_TIMEOUT so the
+        caller gets the latest streaming aggregate rather than waiting indefinitely.
+        _exec_flink_statement returns `latest_agg_rows` when the deadline expires.
+        """
+        # Fluss streaming aggregates stabilise in ~10s; 45s cap keeps latency reasonable
+        FLUSS_MAX_TIMEOUT = 45
+        fluss_timeout = min(timeout, FLUSS_MAX_TIMEOUT)
+
+        # Cancel zombie 'collect' jobs before submitting new query to ensure task slots
+        self._cleanup_collect_jobs()
+
+        logger.info(f"Querying Fluss (HOT): {sql[:100]}... (timeout={fluss_timeout}s)")
+
         import re as _re
+        flink_sql = self._adapt_sql_for_flink_hot(sql)
         flink_sql = _re.sub(r'\bviolence_incidents\b', 'hot_violence_alerts', flink_sql)
 
-        init = [
-            _FLUSS_CATALOG_DDL,
-            "USE CATALOG fluss_hot",
-            "USE `security`",
-        ]
-
-        _catalog_errors = ("catalog_not_found", "catalog", "does not exist", "not found")
+        gateway_url = f"http://{self.flink_gateway_host}:{self.flink_gateway_port}"
+        _session_errors = (
+            "catalog_not_found", "does not exist", "session", "not found",
+            "no resource", "noresource", "could not acquire",
+        )
 
         for attempt in range(2):
             try:
-                return self._query_flink_gateway(flink_sql, init_statements=init, timeout=timeout)
+                session_id = self._ensure_fluss_session(init_timeout=60)
+                return self._exec_flink_statement(session_id, flink_sql, gateway_url, fluss_timeout)
             except Exception as e:
                 err_lower = str(e).lower()
-                if attempt == 0 and any(x in err_lower for x in _catalog_errors):
+                if attempt == 0 and any(x in err_lower for x in _session_errors):
                     logger.warning(
-                        f"Fluss catalog init failed (attempt {attempt+1}), retrying: {e}"
+                        f"Fluss query failed (attempt {attempt+1}), invalidating session: {e}"
                     )
+                    # Invalidate cached session so next attempt creates fresh one
+                    self._fluss_session_id = None
                     time.sleep(2)
                     continue
                 raise
@@ -431,7 +664,7 @@ class TrinoClient:
                    CAST(risk_score AS VARCHAR) AS score,
                    CAST(timestamp AS VARCHAR) AS event_time
             FROM paimon.security.violence_incidents
-            WHERE timestamp BETWEEN NOW() - INTERVAL '7' DAY AND NOW() - INTERVAL '1' HOUR
+            WHERE timestamp >= NOW() - INTERVAL '7' DAY
             ORDER BY timestamp DESC
             LIMIT 10
         """
@@ -440,7 +673,6 @@ class TrinoClient:
                    CAST(risk_score AS VARCHAR) AS score,
                    CAST(timestamp AS VARCHAR) AS event_time
             FROM iceberg.security.historical_violence_incidents
-            WHERE timestamp < NOW() - INTERVAL '7' DAY
             ORDER BY timestamp DESC
             LIMIT 10
         """

@@ -339,6 +339,8 @@ services:
       - violence-detection-net
     volumes:
       - ../scripts/transform:/opt/flink/scripts
+      # Fluss batch scanner reads KV snapshots directly from this path
+      - fluss-tablet-remote:/var/fluss/remote-data
     restart: always
     deploy:
       resources:
@@ -416,12 +418,14 @@ services:
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
-        taskmanager.numberOfTaskSlots: 6
+        taskmanager.numberOfTaskSlots: 8
         taskmanager.memory.process.size: 1536m
     networks:
       - violence-detection-net
     volumes:
       - ../scripts/transform:/opt/flink/scripts
+      # Fluss batch scanner reads KV snapshot files directly from this path
+      - fluss-tablet-remote:/var/fluss/remote-data
     restart: always
     deploy:
       resources:
@@ -464,8 +468,14 @@ services:
         advertised.listeners: INTERNAL://fluss-coordinator:9092,CLIENT://fluss-coordinator:9123
         internal.listener.name: INTERNAL
         client.listener.name: CLIENT
+        remote.data.dir: /var/fluss/remote-data
     ports:
       - "9123:9123"
+    # Share the same remote-data volume as fluss-tablet so that:
+    # - coordinator writes _METADATA files to the shared volume
+    # - tablet can read them from the same volume
+    volumes:
+      - fluss-tablet-remote:/var/fluss/remote-data
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/9123' || exit 1"]
       interval: 10s
@@ -687,6 +697,9 @@ services:
         limits:
           memory: 384m
           cpus: "0.25"
+    volumes:
+      # Fluss batch scanner reads KV snapshot files directly from this path
+      - fluss-tablet-remote:/var/fluss/remote-data
     networks:
       - violence-detection-net
     restart: unless-stopped
