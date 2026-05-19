@@ -551,13 +551,19 @@ async def _exec_flink_statement(
     """
     Submit one SQL statement to Flink Gateway and collect all rows.
 
-    Poll strategy (from trino_client.py reference implementation):
-    - Token-based pagination: result/0 → result/1 → ...
-    - nextResultUri advances token when new data is available
-    - nextResultUri stays at same token when query is still running (empty page)
-    - resultType == 'EOS' signals bounded query finished
-    - Streaming aggregates: 3 consecutive empty pages → values have converged
-    - Collect INSERT + UPDATE_AFTER rows; UPDATE_AFTER overwrites the running total
+    Poll strategy:
+    - Token-based pagination: result/0 → result/1 (MAX_TOKEN=1)
+    - Flink SQL Gateway only supports tokens 0 and 1; token 2+ returns HTTP 500.
+    - nextResultUri advances token ONCE (0→1); after token 1 we stay and re-poll.
+    - resultType == 'EOS' signals bounded query finished.
+    - Streaming aggregates: 3 consecutive empty polls → values have converged.
+    - Collect INSERT + UPDATE_AFTER rows only.
+
+    Why MAX_TOKEN=1:
+    For streaming aggregates (COUNT, SUM, GROUP BY), Flink emits continuous
+    UPDATE_AFTER rows across many tokens. Without a cap, the loop races through
+    millions of tokens in seconds, accumulating duplicate rows. Capping at token 1
+    forces the stable_polls convergence check to trigger after real data arrives.
     """
     resp = await client.post(
         f"{FLINK_GATEWAY_BASE}/v1/sessions/{session_id}/statements",
@@ -566,6 +572,7 @@ async def _exec_flink_statement(
     resp.raise_for_status()
     op_handle = resp.json()["operationHandle"]
 
+    MAX_TOKEN = 1          # Flink SQL Gateway: only tokens 0 and 1 are valid
     result_token = 0
     all_rows: list[list] = []
     latest_agg_rows: list[list] = []
@@ -599,7 +606,6 @@ async def _exec_flink_statement(
             stable_polls = 0
             all_rows.extend(page_rows)
             latest_agg_rows = page_rows  # latest stable snapshot for streaming aggregates
-
         else:
             stable_polls += 1
 
@@ -608,18 +614,25 @@ async def _exec_flink_statement(
             break  # bounded query finished normally
 
         next_uri = data.get("nextResultUri")
-        if next_uri:
+        if next_uri and result_token < MAX_TOKEN:
+            # Advance token only when it is safe to do so:
+            #   (a) The current page had rows (data consumed, move to next batch), OR
+            #   (b) resultType is PAYLOAD with 0 rows (job finished / buffer acknowledged,
+            #       real data may be sitting at token+1).
+            # Do NOT advance on NOT_READY (job still running with empty buffer) —
+            # advancing early would leave the data stranded at the old token.
+            # NOTE: isQueryRunning is ABSENT from Flink SQL Gateway responses in this
+            # version, so we rely on resultType for state detection instead.
             try:
-                result_token = int(next_uri.rstrip("/").split("/")[-1])
+                next_token = int(next_uri.rstrip("/").split("/")[-1])
+                if next_token <= MAX_TOKEN and (page_rows or result_type == "PAYLOAD"):
+                    result_token = next_token
+                    continue  # fetch next page immediately (no sleep)
             except (ValueError, IndexError):
                 break
-            continue  # fetch next page immediately (no sleep)
 
-        if not data.get("isQueryRunning", result_type == "NOT_READY"):
-            exited_eos = True
-            break
-
-        # 3 consecutive empty polls → streaming aggregate has converged
+        # 3 consecutive empty polls on the current token → aggregate has converged
+        # (or bounded scan done with data already returned via latest_agg_rows)
         if stable_polls >= 3 and latest_agg_rows:
             logger.info("Flink Gateway: aggregate stable after %d empty polls", stable_polls)
             break
@@ -1085,11 +1098,7 @@ async def get_recent_incidents(limit: int = Query(50, ge=1, le=500)):
         incident_id = r[0] or ""
         camera_id = r[1] or ""
         incident_date = r[8] or ""
-        frame_url = (
-            None
-            if _UUID_RE.match(incident_id)
-            else await _get_frame_url(camera_id, incident_date, incident_id)
-        )
+        frame_url = await _get_frame_url(camera_id, incident_date, incident_id)
         return {
             "event_id":       incident_id,
             "camera_id":      camera_id,
@@ -1141,7 +1150,7 @@ async def get_stats():
         COUNT(*) AS alert_count
     FROM iceberg.security.historical_violence_incidents
     WHERE is_violent = true
-      AND timestamp >= NOW() - INTERVAL '40' DAY
+      AND timestamp >= NOW() - INTERVAL '1' DAY
     GROUP BY date_trunc('hour', timestamp)
     ORDER BY date_trunc('hour', timestamp)
     LIMIT 24
@@ -1157,7 +1166,7 @@ async def get_stats():
         COUNT(*) AS cnt
     FROM iceberg.security.historical_violence_incidents
     WHERE is_violent = true
-      AND timestamp >= NOW() - INTERVAL '40' DAY
+      AND timestamp >= NOW() - INTERVAL '1' DAY
     GROUP BY location
     ORDER BY cnt DESC
     LIMIT 5
@@ -1167,7 +1176,7 @@ async def get_stats():
     SELECT COALESCE(event_type, 'Unknown') AS etype, COUNT(*) AS cnt
     FROM iceberg.security.historical_violence_incidents
     WHERE is_violent = true
-      AND timestamp >= NOW() - INTERVAL '40' DAY
+      AND timestamp >= NOW() - INTERVAL '1' DAY
     GROUP BY event_type
     ORDER BY cnt DESC
     """
@@ -1178,7 +1187,7 @@ async def get_stats():
         CAST(timestamp AS DATE) AS day_date,
         AVG(risk_score) AS avg_score
     FROM iceberg.security.historical_violence_incidents
-    WHERE timestamp >= NOW() - INTERVAL '40' DAY
+    WHERE timestamp >= NOW() - INTERVAL '1' DAY
     GROUP BY CAST(timestamp AS DATE)
     ORDER BY CAST(timestamp AS DATE)
     LIMIT 30
@@ -1284,11 +1293,7 @@ async def _fetch_evidence_incidents(limit: int = 6) -> list[dict]:
         incident_id = r[0] or ""
         camera_id = r[1] or ""
         incident_date = r[6] or ""
-        frame_url = (
-            None
-            if _UUID_RE2.match(incident_id)
-            else await _get_frame_url(camera_id, incident_date, incident_id)
-        )
+        frame_url = await _get_frame_url(camera_id, incident_date, incident_id)
         results.append({
             "incident_id":    incident_id,
             "camera_id":      camera_id,

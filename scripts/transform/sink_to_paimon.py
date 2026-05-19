@@ -40,6 +40,31 @@ def main():
         )
     """)
 
+    # 1b. Ensure Paimon database + table exist (idempotent after hard reset)
+    t_env.execute_sql("CREATE DATABASE IF NOT EXISTS `paimon`.`security`")
+    t_env.execute_sql("""
+        CREATE TABLE IF NOT EXISTS `paimon`.`security`.`violence_incidents` (
+            incident_id      STRING,
+            camera_id        STRING,
+            `timestamp`      TIMESTAMP(3),
+            risk_score       DOUBLE,
+            confidence       DOUBLE,
+            is_violent       BOOLEAN,
+            event_type       STRING,
+            location         STRING,
+            is_deleted       BOOLEAN,
+            frame_url        STRING,
+            thumbnail_b64    STRING,
+            frame_capture_ts BIGINT,
+            PRIMARY KEY (incident_id) NOT ENFORCED
+        ) WITH (
+            'merge-engine' = 'deduplicate',
+            'changelog-producer' = 'input',
+            'bucket' = '4'
+        )
+    """)
+    print("[INFO] Paimon table violence_incidents ready.")
+
     # 2. Define Kafka Source Table
     t_env.execute_sql(f"""
         CREATE TEMPORARY TABLE kafka_valid_alerts (

@@ -616,13 +616,14 @@ async def get_evidence_frames(
 
 @app.get("/api/recent-incidents")
 async def get_recent_incidents(limit: int = 50):
-    """Latest incidents from Iceberg cold layer via Trino."""
+    """Latest incidents from Iceberg cold layer via Trino, with frame_url from MinIO."""
     sql = f"""
     SELECT
         incident_id, camera_id,
         CAST(timestamp AS VARCHAR) AS timestamp,
         risk_score, event_type, location,
-        is_violent
+        is_violent,
+        CAST(incident_date AS VARCHAR) AS incident_date
     FROM iceberg.security.historical_violence_incidents
     ORDER BY timestamp DESC
     LIMIT {limit}
@@ -633,6 +634,13 @@ async def get_recent_incidents(limit: int = 50):
         logger.error(f"Trino error (recent-incidents): {e}")
         raise HTTPException(status_code=503, detail=f"Trino unavailable: {e}")
 
+    minio_external = os.getenv("MINIO_EXTERNAL_URL", "http://localhost:9000")
+    evidence_bucket = os.getenv("S3_BUCKET", "evidence-frames")
+
+    def build_frame_url(incident_id: str, camera_id: str, incident_date: str) -> str:
+        """Build HTTP URL for evidence frame in MinIO."""
+        return f"{minio_external}/{evidence_bucket}/{camera_id}/{incident_date}/{incident_id}.jpg"
+
     return [
         {
             "event_id": r[0], "camera_id": r[1], "timestamp": r[2],
@@ -640,6 +648,7 @@ async def get_recent_incidents(limit: int = 50):
             "label": r[4] or "Anomaly", "location": r[5] or r[1],
             "model_version": "VioMobileNet v2.1", "clip_link": "#",
             "status": "Unreviewed" if r[6] else "False Alarm",
+            "frame_url": build_frame_url(r[0], r[1], r[7]) if r[7] else None,
         }
         for r in rows
     ]

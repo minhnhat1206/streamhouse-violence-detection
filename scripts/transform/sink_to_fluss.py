@@ -25,6 +25,24 @@ def main():
         )
     """)
 
+    # 1b. Ensure Fluss database + table exist (idempotent after hard reset)
+    t_env.execute_sql("CREATE DATABASE IF NOT EXISTS `fluss`.`security`")
+    t_env.execute_sql("""
+        CREATE TABLE IF NOT EXISTS `fluss`.`security`.`hot_violence_alerts` (
+            incident_id   STRING,
+            camera_id     STRING,
+            `timestamp`   TIMESTAMP(3),
+            risk_score    DOUBLE,
+            confidence    DOUBLE,
+            is_violent    BOOLEAN,
+            event_type    STRING,
+            PRIMARY KEY (incident_id) NOT ENFORCED
+        ) WITH (
+            'bucket.num' = '3'
+        )
+    """)
+    print("[INFO] Fluss table hot_violence_alerts ready.")
+
     # 2. Define Kafka Source Table
     # Note: We use the exact field names from the producer/validator
     t_env.execute_sql(f"""
