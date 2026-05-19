@@ -43,6 +43,24 @@ def main():
     """)
     print("[INFO] Fluss table hot_violence_alerts ready.")
 
+    # dim_camera — versioned primary key table for temporal joins
+    t_env.execute_sql("""
+        CREATE TABLE IF NOT EXISTS `fluss`.`security`.`dim_camera` (
+            camera_id   STRING,
+            location    STRING,
+            ward_id     STRING,
+            district    STRING,
+            latitude    DOUBLE,
+            longitude   DOUBLE,
+            status      STRING,
+            updated_at  TIMESTAMP(3),
+            PRIMARY KEY (camera_id) NOT ENFORCED
+        ) WITH (
+            'bucket.num' = '3'
+        )
+    """)
+    print("[INFO] Fluss table dim_camera ready.")
+
     # 2. Define Kafka Source Table
     # Note: We use the exact field names from the producer/validator
     t_env.execute_sql(f"""

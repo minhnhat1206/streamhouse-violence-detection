@@ -183,9 +183,19 @@ Columns:
 Example:
   SELECT camera_id, COUNT(*) cnt, AVG(risk_score) avg_score
   FROM fluss.security.hot_violence_alerts
-  WHERE is_violent = true
-    AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '60' MINUTE
   GROUP BY camera_id ORDER BY cnt DESC LIMIT 5
+
+### 6. paimon.security.fact_violence_incidents  [ENGINE: Flink SQL Gateway]
+Use for: star schema analysis — incidents enriched with camera dimension data
+Columns:
+  incident_id STRING, camera_id STRING, timestamp TIMESTAMP(3),
+  date_id DATE, risk_score DOUBLE, confidence DOUBLE, is_violent BOOLEAN,
+  event_type STRING, location STRING, ward_id STRING, district STRING, frame_url STRING
+Example:
+  SELECT ward_id, COUNT(*) cnt
+  FROM paimon.security.fact_violence_incidents
+  WHERE is_violent = true AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '7' DAY
+  GROUP BY ward_id ORDER BY cnt DESC LIMIT 10
 
 ## SQL Generation Rules
 1. ONLY SELECT statements — never INSERT/UPDATE/DELETE/DROP/CREATE/ALTER
@@ -253,6 +263,7 @@ FALLBACK_SQL: dict[str, str] = {
 ALLOWED_TABLES = {
     "iceberg.security.historical_violence_incidents",
     "paimon.security.violence_incidents",
+    "paimon.security.fact_violence_incidents",
     "paimon.security.daily_incident_stats",
     "paimon.security.camera_stats",
     "fluss.security.hot_violence_alerts",
@@ -314,11 +325,13 @@ def _adapt_sql_for_flink(sql: str, layer: str = "warm") -> str:
 
     if layer == "hot":
         # HOT: only strip fluss catalog prefix; keep table name hot_violence_alerts
-        # Fluss catalog is registered as 'fluss' in the session init — keep that prefix
-        # but strip 'fluss.security.' since we USE CATALOG fluss + USE security
         adapted = adapted.replace("fluss.security.", "")
         adapted = adapted.replace("fluss.", "")
         adapted = adapted.replace("historical_violence_incidents", "hot_violence_alerts")
+        # Remove is_violent = TRUE filter: HOT has all detection events, ~2% violent
+        adapted = re.sub(r'\bWHERE\s+is_violent\s*=\s*TRUE\s+AND\s+', 'WHERE ', adapted, flags=re.IGNORECASE)
+        adapted = re.sub(r'\bAND\s+is_violent\s*=\s*TRUE\b', '', adapted, flags=re.IGNORECASE)
+        adapted = re.sub(r'\bWHERE\s+is_violent\s*=\s*TRUE\b', 'WHERE 1=1', adapted, flags=re.IGNORECASE)
     else:
         # 1. Strip catalog/schema prefixes (order matters: longer prefix first)
         for prefix in (
@@ -1615,6 +1628,122 @@ async def union_read():
         "rows": results[:20],
         "counts": {"hot": len(hot_rows), "warm": len(warm_rows), "cold": len(cold_rows)},
         "duration_ms": int((time.time() - start) * 1000),
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/layer-counts  — Task 4.1: real record counts per layer
+# ---------------------------------------------------------------------------
+
+@app.get("/api/layer-counts")
+async def get_layer_counts():
+    """Approximate record counts from all 3 Streamhouse storage layers."""
+
+    async def _count_hot() -> int | None:
+        """Get HOT records-out from Flink job metrics (avoids slow streaming aggregate)."""
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get("http://jobmanager:8081/jobs/overview")
+                if r.status_code != 200:
+                    return None
+                for job in r.json().get("jobs", []):
+                    if (
+                        "hot_violence_alerts" in job.get("name", "")
+                        and job.get("state") == "RUNNING"
+                    ):
+                        jid = job["jid"]
+                        r2 = await client.get(f"http://jobmanager:8081/jobs/{jid}")
+                        if r2.status_code != 200:
+                            break
+                        for v in r2.json().get("vertices", []):
+                            vname = v.get("name", "").lower()
+                            if "sink" in vname or "fluss" in vname:
+                                mr = await client.get(
+                                    f"http://jobmanager:8081/jobs/{jid}/vertices/{v['id']}/metrics",
+                                    params={"get": "numRecordsOut"},
+                                )
+                                if mr.status_code == 200:
+                                    for m in mr.json():
+                                        if m.get("id") == "numRecordsOut":
+                                            return int(m.get("value", 0))
+        except Exception as exc:
+            logger.debug("count_hot via Flink metrics failed: %s", exc)
+        return None
+
+    async def _count_warm() -> int | None:
+        try:
+            rows = await _trino_query(
+                "SELECT COUNT(*) FROM paimon.security.violence_incidents",
+                timeout=15.0, catalog="paimon",
+            )
+            return int(rows[0][0]) if rows and rows[0] else 0
+        except Exception:
+            return None
+
+    async def _count_cold() -> int | None:
+        try:
+            rows = await _trino_query(
+                "SELECT COUNT(*) FROM iceberg.security.historical_violence_incidents",
+                timeout=15.0,
+            )
+            return int(rows[0][0]) if rows and rows[0] else 0
+        except Exception:
+            return None
+
+    t0 = time.time()
+    hot, warm, cold = await asyncio.gather(_count_hot(), _count_warm(), _count_cold())
+    return {
+        "hot":         hot,
+        "warm":        warm,
+        "cold":        cold,
+        "duration_ms": round((time.time() - t0) * 1000),
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/latency  — Task 4.2: query latency per storage layer
+# ---------------------------------------------------------------------------
+
+@app.get("/api/latency")
+async def get_latency():
+    """Measure round-trip query latency for each Streamhouse storage layer."""
+
+    async def _probe(layer: str) -> dict:
+        t0 = time.time()
+        ok = False
+        error = None
+        try:
+            if layer == "hot":
+                sql = _adapt_sql_for_flink(
+                    "SELECT incident_id FROM hot_violence_alerts LIMIT 1", layer="hot"
+                )
+                await _flink_gateway_query(sql, timeout=30.0, layer="hot")
+            elif layer == "warm":
+                await _trino_query(
+                    "SELECT incident_id FROM paimon.security.violence_incidents LIMIT 1",
+                    timeout=15.0, catalog="paimon",
+                )
+            else:
+                await _trino_query(
+                    "SELECT incident_id FROM iceberg.security.historical_violence_incidents LIMIT 1",
+                    timeout=15.0,
+                )
+            ok = True
+        except Exception as exc:
+            error = str(exc)[:120]
+        return {
+            "latency_ms": round((time.time() - t0) * 1000),
+            "ok":         ok,
+            "error":      error,
+        }
+
+    hot, warm, cold = await asyncio.gather(
+        _probe("hot"), _probe("warm"), _probe("cold")
+    )
+    return {
+        "hot":  {**hot,  "target_ms": 100,   "layer_name": "Fluss"},
+        "warm": {**warm, "target_ms": 10000, "layer_name": "Paimon"},
+        "cold": {**cold, "target_ms": 30000, "layer_name": "Iceberg"},
     }
 
 

@@ -507,6 +507,15 @@ async def generate_sql(state: AgentState) -> AgentState:
                         "Iceberg timestamp column is TIMESTAMP(6) WITH TIME ZONE.\n"
                         "Time filter example: \"timestamp\" >= TIMESTAMP '2026-05-14 00:00:00'"
                     )
+                elif layer and "FLUSS" in str(layer).upper():
+                    # HOT layer: Fluss snapshot scan — use LIMIT instead of COUNT(*)
+                    # Streaming COUNT(*) only counts future events (starts at 0); LIMIT reads snapshot
+                    dialect_hint = (
+                        'Syntax: Flink SQL. Use double-quote for reserved keyword: "timestamp".\n'
+                        'QUAN TRỌNG: KHÔNG dùng COUNT(*) hay SUM() — hãy dùng SELECT với LIMIT.\n'
+                        'Ví dụ tốt: SELECT incident_id, camera_id, "timestamp", risk_score, is_violent FROM hot_violence_alerts LIMIT 50\n'
+                        'Nếu câu hỏi hỏi số lượng: dùng LIMIT 200 và đếm ở Python — KHÔNG dùng COUNT().'
+                    )
                 else:
                     dialect_hint = (
                         'Syntax: Trino SQL. Use double-quote for reserved keyword: "timestamp".\n'
