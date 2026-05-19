@@ -44,10 +44,42 @@ Xây dựng và tối ưu hóa hệ thống phát hiện bạo lực thời gian
 ## 🤝 Handover Protocol (MUST READ)
 *Mỗi khi chuyển đổi Agent (Gemini <-> Claude), Agent hiện tại PHẢI cập nhật phần "Last State" bên dưới.*
 
-### 📍 Last State (Updated: 2026-05-19 — Phiên 30) ✅ STREAMHOUSE COMPLETION PLAN
+### 📍 Last State (Updated: 2026-05-19 — Phiên 32) ✅ E2E ALL PASS + ARCHITECTURE COMPLETE
 
-- **Agent vừa làm:** Claude (Session 30 — Streamhouse Architecture Completion)
-- **Trạng thái:** ✅ HOÀN THÀNH phases 1–4 của `docs/streamhouse-completion-plan.md`
+- **Agent vừa làm:** Claude (Sessions 30–32 — Streamhouse Architecture Completion + E2E)
+- **Trạng thái:** ✅ TẤT CẢ 5 PHASES HOÀN THÀNH — `docs/streamhouse-completion-plan.md`
+
+---
+
+**🎯 Phiên 32 — Fixes & E2E Run:**
+
+| Fix | Mô tả |
+|-----|-------|
+| `pipeline_manager.py` NameError | `log.info()` gọi trước `log = getLogger()` → chuyển sang `_TIERING_NOTE` variable |
+| `pipeline_manager.py` timeout | `sink_to_paimon_star.py` cần >180s để init catalogs → tăng `submit_timeout=400` |
+| `pipeline_manager.py` archival | Archival trigger khi `hour >= 2` → fix: initialize `last_archive=now` nếu past archive hour |
+| `docs/agent-guides/architecture.md` | Cập nhật diagram với star schema + 4 Flink jobs + temporal join |
+
+**📊 E2E Results (2026-05-19 Session 32):**
+| Test | Result | Metric |
+|------|--------|--------|
+| Infrastructure | PASS | 18 services UP |
+| Flink Jobs | PASS | 4/4 RUNNING |
+| Kafka | PASS | 70k+ messages |
+| HOT (Fluss) | PASS | 8781+ records, T1=46ms < 100ms |
+| WARM (Paimon) | PASS | 202k+ records, fact=3000+ growing |
+| COLD (Iceberg) | PASS | 5000 records, 8s < 30s |
+| RTSP Pipeline | PASS | mediamtx+rtsp_pusher+rtsp-inference all running |
+| Chatbot API | PASS | /health, /chat, /api/layer-counts, /api/latency |
+| MinIO Evidence | PASS | evidence-frames bucket + 50 recent incidents |
+| Trino Federation | PASS | paimon+iceberg catalogs, 5 tables |
+| T1/T2/T3 benchmark | PASS | HOT=46ms, WARM growing, COLD=daily |
+
+**🗂️ Git commits (devNhat):**
+- `a072a3f` fix(flink): NameError pipeline_manager.py
+- `2746c28` fix(flink): increase Paimon job timeout + fix archival trigger
+
+---
 
 ---
 
