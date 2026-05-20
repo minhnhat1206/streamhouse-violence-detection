@@ -69,9 +69,9 @@ def main():
     t_env.execute_sql("""
         CREATE TABLE IF NOT EXISTS `paimon`.`security`.`dim_time` (
             date_id      DATE,
-            year         INT,
-            month        INT,
-            day          INT,
+            `year`       INT,
+            `month`      INT,
+            `day`        INT,
             day_of_week  STRING,
             week_of_year INT,
             is_weekend   BOOLEAN,
