@@ -21,6 +21,11 @@ RUN wget -q -O /opt/flink/lib/flink-sql-connector-kafka-3.1.0-1.18.jar \
 RUN wget -q -O /opt/flink/lib/fluss-flink-1.18-0.9.0-incubating.jar \
     https://repo1.maven.org/maven2/org/apache/fluss/fluss-flink-1.18/0.9.0-incubating/fluss-flink-1.18-0.9.0-incubating.jar
 
+# Tải Apache Fluss Tiering JAR cho Flink 1.18 (true Streamhouse write-once)
+RUN wget -q -O /opt/flink/lib/fluss-flink-tiering-1.18-0.9.0-incubating.jar \
+    https://archive.apache.org/dist/incubator/fluss/0.9.0-incubating/fluss-flink-tiering-1.18-0.9.0-incubating.jar || \
+    echo "WARNING: Tiering JAR not available — fallback to sink_to_paimon_star.py"
+
 # Tải Apache Paimon Connector cho Flink 1.18 (Warm Storage)
 RUN wget -q -O /opt/flink/lib/paimon-flink-1.18-0.8.2.jar \
     https://repo1.maven.org/maven2/org/apache/paimon/paimon-flink-1.18/0.8.2/paimon-flink-1.18-0.8.2.jar
