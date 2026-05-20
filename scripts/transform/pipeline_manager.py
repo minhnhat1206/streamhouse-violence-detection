@@ -227,18 +227,110 @@ def _submit_jar_job(job_key: str, cfg: dict) -> bool:
     return ok
 
 
+def _seed_dim_camera_via_gateway() -> bool:
+    """
+    Seed dim_camera (Fluss) via Flink SQL Gateway REST API (streaming mode).
+
+    Batch mode INSERT into Fluss primary key tables does NOT commit data because
+    Fluss relies on streaming checkpoints for durability. The SQL Gateway runs
+    in streaming mode by default, so INSERT via HTTP is the correct approach.
+
+    Idempotent: dim_camera uses PRIMARY KEY (camera_id) → duplicate INSERTs
+    are treated as upserts (UPDATE_AFTER), so safe to re-run.
+    """
+    gateway = os.getenv("FLINK_GATEWAY_URL", "http://flink-sql-gateway:8083")
+
+    cameras = [
+        ("cam_01", "Đường Nguyễn Huệ",         "Phường Bến Nghé",          "Quận 1", 10.77845, 106.70014),
+        ("cam_02", "Đường Lê Lợi",              "Phường Nguyễn Thái Bình",  "Quận 1", 10.77322, 106.69453),
+        ("cam_03", "Đường Nguyễn Thái Học",     "Phường Bến Thành",         "Quận 1", 10.77407, 106.70229),
+        ("cam_04", "Đường Lê Thánh Tôn",        "Phường Cầu Ông Lãnh",      "Quận 1", 10.77613, 106.69705),
+        ("cam_05", "Đường Pasteur",              "Phường Phạm Ngũ Lão",      "Quận 1", 10.77157, 106.70435),
+        ("cam_06", "Đường Trần Hưng Đạo",       "Phường Tân Định",          "Quận 1", 10.77336, 106.70019),
+        ("cam_07", "Đường Đồng Khởi",           "Phường Đa Kao",            "Quận 1", 10.77833, 106.69332),
+        ("cam_08", "Đường Hai Bà Trưng",        "Phường Bến Thành",         "Quận 1", 10.78446, 106.70214),
+        ("cam_09", "Đường Nguyễn Du",           "Phường Nguyễn Cư Trinh",   "Quận 1", 10.77002, 106.70027),
+        ("cam_10", "Đường Võ Văn Kiệt",         "Phường Cầu Kho",           "Quận 1", 10.78266, 106.70826),
+        ("cam_11", "Đường Nguyễn Công Trứ",     "Phường Tân Định",          "Quận 1", 10.77552, 106.70748),
+        ("cam_12", "Đường Công Trường Mê Linh", "Phường Nguyễn Thái Bình",  "Quận 1", 10.77956, 106.70549),
+        ("cam_13", "Đường Hàm Nghi",            "Phường Phạm Ngũ Lão",      "Quận 1", 10.78320, 106.69630),
+        ("cam_14", "Đường Nguyễn Bỉnh Khiêm",  "Phường Bến Nghé",          "Quận 1", 10.78074, 106.70235),
+        ("cam_15", "Đường Trương Định",         "Phường Đa Kao",            "Quận 1", 10.77709, 106.69288),
+    ]
+
+    def _gw_exec(session_id: str, sql: str, timeout: int = 60) -> str:
+        resp = urllib.request.urlopen(
+            urllib.request.Request(
+                f"{gateway}/v1/sessions/{session_id}/statements",
+                data=json.dumps({"statement": sql}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            ),
+            timeout=30,
+        )
+        op = json.loads(resp.read())["operationHandle"]
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            sr = json.loads(urllib.request.urlopen(
+                f"{gateway}/v1/sessions/{session_id}/operations/{op}/status", timeout=10
+            ).read())
+            if sr.get("status") in ("FINISHED", "ERROR", "CLOSED", "CANCELED"):
+                return sr.get("status", "UNKNOWN")
+            time.sleep(2)
+        return "TIMEOUT"
+
+    try:
+        sess_resp = json.loads(urllib.request.urlopen(
+            urllib.request.Request(
+                f"{gateway}/v1/sessions",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            ),
+            timeout=30,
+        ).read())
+        sid = sess_resp["sessionHandle"]
+        log.info("SQL Gateway session for dim_camera seeding: %s", sid)
+
+        fluss_coord = os.getenv("FLUSS_COORDINATOR", "fluss-coordinator:9123")
+        _gw_exec(sid, f"CREATE CATALOG fluss WITH ('type'='fluss','bootstrap.servers'='{fluss_coord}')")
+        _gw_exec(sid, "USE CATALOG fluss")
+        _gw_exec(sid, "CREATE DATABASE IF NOT EXISTS security")
+        _gw_exec(sid, "USE security")
+
+        rows_sql = ",\n    ".join(
+            f"('{cid}', '{loc}', '{ward}', '{dist}', {lat}, {lon}, 'ACTIVE', "
+            f"TIMESTAMP '2025-01-01 00:00:00')"
+            for cid, loc, ward, dist, lat, lon in cameras
+        )
+        st = _gw_exec(sid, f"INSERT INTO dim_camera VALUES\n    {rows_sql}", timeout=120)
+        if st == "FINISHED":
+            log.info("✓ dim_camera seeded with %d cameras via SQL Gateway.", len(cameras))
+            return True
+        else:
+            log.warning("dim_camera seed via Gateway returned status=%s", st)
+            return False
+
+    except Exception as exc:
+        log.warning("dim_camera seed via SQL Gateway failed: %s — dim_camera may be empty.", exc)
+        return False
+
+
 def _run_star_schema_setup() -> bool:
     """
-    Chạy setup_star_schema.py một lần khi pipeline manager khởi động.
-    Tạo dim_camera (Fluss), dim_time (Paimon), fact_violence_incidents (Paimon).
-    Idempotent — an toàn khi chạy nhiều lần.
+    Chạy setup_star_schema.py để tạo DDL tables (batch mode).
+    Sau đó seed dim_camera qua SQL Gateway (streaming mode).
+
+    Note: setup_star_schema.py dùng batch mode cho DDL (CREATE TABLE).
+    Nhưng INSERT vào Fluss primary key table cần streaming checkpoint →
+    dùng SQL Gateway để seed dim_camera sau khi DDL hoàn thành.
     """
     setup_script = f"{SCRIPTS_DIR}/setup_star_schema.py"
     if not os.path.exists(setup_script):
         log.warning("setup_star_schema.py not found at %s — skipping.", setup_script)
         return True
 
-    log.info("Running star schema setup (Task 1.2): %s", setup_script)
+    log.info("Running star schema DDL setup: %s", setup_script)
     ok, err = _run_flink(
         args=[
             "run",
@@ -249,9 +341,13 @@ def _run_star_schema_setup() -> bool:
         timeout=600,
     )
     if ok:
-        log.info("✓ Star schema setup complete (dim_camera, dim_time, fact_violence_incidents).")
+        log.info("✓ Star schema DDL complete (tables created/verified).")
     else:
-        log.warning("Star schema setup failed (non-fatal, streaming jobs will continue): %s", err)
+        log.warning("Star schema DDL failed (non-fatal): %s", err)
+
+    # Seed dim_camera via SQL Gateway (streaming mode required for Fluss commit)
+    log.info("Seeding dim_camera via SQL Gateway (streaming mode)...")
+    _seed_dim_camera_via_gateway()
     return ok
 
 
