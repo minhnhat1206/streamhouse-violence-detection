@@ -1865,3 +1865,92 @@ Chi tiết: `docs/E2E_TEST_REPORT_2026-05-20.md`
 **Session**: 35 (E2E Tests + Bug Fix)  
 **Status**: ✅ COMPLETE — 18/20 tests PASS, bug fixed, code pushed
 
+---
+
+## **Session 36: True Streamhouse Tiering Implementation (2026-05-20)**
+
+### **Mục Tiêu**
+Triển khai kiến trúc Streamhouse gốc: thay thế dual-write pattern bằng write-once vào Fluss HOT + tiering job mỗi 30 phút di chuyển dữ liệu cũ sang Paimon WARM.
+
+### **Kiến Trúc Thay Đổi**
+
+```
+BEFORE (dual-write):
+Kafka → hot-violence-alerts-valid
+  ├─ sink_to_fluss.py        → Fluss HOT  (không có location)
+  └─ sink_to_paimon_star.py  → Paimon WARM (temporal join tại đây)
+
+AFTER (true tiering):
+Kafka → hot-violence-alerts-valid
+  └─ sink_to_fluss_enriched.py → Fluss HOT (có location từ temporal join)
+                                   │
+                   mỗi 30 phút: tier_fluss_to_paimon.py
+                   Phase 1: INSERT dữ liệu cũ >2h → Paimon WARM
+                   Phase 2: DELETE dữ liệu đã tier khỏi Fluss (best-effort)
+```
+
+### **Files Created / Modified**
+
+| File | Action | Mô tả |
+|------|--------|-------|
+| `scripts/transform/sink_to_fluss_enriched.py` | **NEW** | Kafka → temporal join dim_camera → Fluss HOT (có location/ward_id/district) |
+| `scripts/transform/tier_fluss_to_paimon.py` | **NEW** | Periodic tiering job: Fluss aged → Paimon WARM → DELETE from Fluss |
+| `scripts/transform/pipeline_manager.py` | **MODIFIED** | Thay sink_to_fluss → enriched; xóa sink_to_paimon_star; thêm tiering schedule |
+| `scripts/transform/init_fluss_tables.py` | **MODIFIED** | Cập nhật hot_violence_alerts schema (+location/ward_id/district) |
+
+### **Progress (updated trong session)**
+- ✅ Part 1: `sink_to_fluss_enriched.py` — DONE
+- ✅ Part 2: `tier_fluss_to_paimon.py` — DONE
+- ✅ Part 3: `pipeline_manager.py` — DONE
+- ✅ Part 4: `init_fluss_tables.py` — DONE
+
+### **Tóm Tắt Thay Đổi Kiến Trúc**
+
+#### STREAMING_JOBS (pipeline_manager.py v2.0)
+| Job Key | Script | Mô tả |
+|---------|--------|-------|
+| `Contract Validator` | `data_contract_validator.py` | Không đổi |
+| `hot_violence_alerts` | `sink_to_fluss_enriched.py` (**MỚI**) | Write-once vào Fluss HOT với location/ward_id/district |
+| `daily_incident_stats` | `aggregate_paimon.py` | Không đổi |
+| ~~`fact_violence_incidents`~~ | ~~`sink_to_paimon_star.py`~~ | **ĐÃ XÓA** — không còn dual-write |
+
+#### Tiering Schedule (mỗi 30 phút, thay vì streaming)
+```
+last_tiering = None (khởi động)
+→ Sau watchdog tick đầu tiên (~5 phút): tier_fluss_to_paimon.py
+  Phase 1: INSERT aged (>2h) FROM Fluss → Paimon (fact + violence_incidents)
+           wait 120s (4 checkpoints @ 30s) → cancel streaming job
+  Phase 2: DELETE FROM Fluss WHERE timestamp < cutoff (best-effort, 60s timeout)
+→ last_tiering = now
+→ Repeat mỗi 30 phút
+```
+
+#### Schema Changes (hot_violence_alerts)
+```sql
+-- Thêm 3 cột: location STRING, ward_id STRING, district STRING
+-- init_fluss_tables.py dùng DROP TABLE IF EXISTS + CREATE TABLE (migration)
+-- sink_to_fluss_enriched.py cũng DROP + CREATE tại startup (safety fallback)
+```
+
+### **Deployment Steps**
+1. Rebuild pipeline-manager Docker image (hoặc volume-mounted scripts)
+2. Stop streaming jobs (sẽ bị thay thế)
+3. Run `init_fluss_tables.py` (một lần) để migrate schema
+4. Restart pipeline-manager → tự động submit jobs mới
+5. Tiering chạy tự động sau 5 phút đầu tiên
+
+### **Architecture Properties Restored**
+| Property | Dual-Write (before) | True Tiering (after) |
+|----------|---------------------|----------------------|
+| Write-once | ❌ ghi 2 lần | ✅ ghi 1 lần vào Fluss |
+| Single source of truth | ❌ cùng data ở Fluss+Paimon | ✅ data ở đúng 1 layer |
+| Temporal join accuracy | ✅ | ✅ (giữ nguyên, tại HOT write) |
+| Tiering semantics | ❌ copy | ✅ MOVE (Phase 1 INSERT + Phase 2 DELETE) |
+| Flink jobs count | 4 streaming | 3 streaming + 1 tiering (periodic) |
+
+---
+
+**Updated by**: Claude Code  
+**Date**: 2026-05-20 (Session 36)  
+**Status**: ✅ COMPLETE — True Streamhouse Tiering implemented, 4 files created/modified
+
