@@ -5,22 +5,30 @@ Tự động hoá vòng đời dữ liệu HOT → WARM → COLD:
 
   STARTUP  : Chờ Flink sẵn sàng, submit tất cả streaming jobs còn thiếu
   WATCHDOG : Cứ mỗi CHECK_INTERVAL giây, kiểm tra và restart job bị chết
+  TIERING  : Cứ mỗi TIERING_INTERVAL_MINS phút, di chuyển dữ liệu cũ Fluss → Paimon
   ARCHIVAL : Mỗi ngày lúc ARCHIVE_HOUR:00, trigger batch Paimon → Iceberg
 
 Chạy như Docker service (container: pipeline-manager).
 Sử dụng Flink REST API (port 8081) — không cần docker exec, không cần Airflow.
 
+True Streamhouse Tiering (không dùng dual-write):
+  Kafka → sink_to_fluss_enriched.py → Fluss HOT (write once, với location enrichment)
+                                           │
+                    mỗi TIERING_INTERVAL_MINS phút: tier_fluss_to_paimon.py
+                    Phase 1: INSERT aged (>TIERING_HOURS) → Paimon WARM
+                    Phase 2: DELETE aged from Fluss (best-effort)
+
 Environment variables:
-  FLINK_API              - Flink REST endpoint  (default: http://jobmanager:8081)
-  FLINK_JM_ADDRESS       - JobManager hostname   (default: jobmanager)
-  FLINK_JM_RPC_PORT      - JobManager RPC port   (default: 6123)
-  SCRIPTS_DIR            - Path to PyFlink scripts (default: /opt/flink/scripts)
-  CHECK_INTERVAL_SECONDS - Watchdog interval     (default: 300 = 5 min)
-  ARCHIVE_HOUR           - Hour to run archival  (default: 2 = 02:00 AM)
-  STARTUP_WAIT_SECS      - Max wait for Flink JM (default: 180)
+  FLINK_API              - Flink REST endpoint         (default: http://jobmanager:8081)
+  FLINK_JM_ADDRESS       - JobManager hostname          (default: jobmanager)
+  FLINK_JM_RPC_PORT      - JobManager RPC port          (default: 6123)
+  SCRIPTS_DIR            - Path to PyFlink scripts      (default: /opt/flink/scripts)
+  CHECK_INTERVAL_SECONDS - Watchdog interval            (default: 300 = 5 min)
+  TIERING_INTERVAL_MINS  - Tiering interval in minutes  (default: 30)
+  ARCHIVE_HOUR           - Hour to run archival         (default: 2 = 02:00 AM)
+  STARTUP_WAIT_SECS      - Max wait for Flink JM        (default: 180)
 """
 
-import glob as _glob
 import json
 import logging
 import os
@@ -32,83 +40,45 @@ from datetime import datetime
 from typing import Optional
 
 # ── Configuration ───────────────────────────────────────────────────────────────
-FLINK_API          = os.getenv("FLINK_API",              "http://jobmanager:8081")
-FLINK_JM_ADDRESS   = os.getenv("FLINK_JM_ADDRESS",       "jobmanager")
-FLINK_JM_RPC_PORT  = os.getenv("FLINK_JM_RPC_PORT",      "6123")
-SCRIPTS_DIR        = os.getenv("SCRIPTS_DIR",             "/opt/flink/scripts")
-CHECK_INTERVAL     = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))   # 5 min
-ARCHIVE_HOUR       = int(os.getenv("ARCHIVE_HOUR",            "2"))    # 02:00
-STARTUP_WAIT_SECS  = int(os.getenv("STARTUP_WAIT_SECS",      "180"))   # 3 min
-
-# ── Fluss Tiering Service (Task 1.1) ────────────────────────────────────────────
-# Tự động tier data từ Fluss → Paimon khi JAR có sẵn.
-# JAR cần có: fluss-flink-tiering-*.jar trong /opt/fluss/lib/ hoặc /opt/flink/lib/
-_TIERING_JAR_PATTERNS = [
-    "/opt/fluss/lib/fluss-flink-tiering-*.jar",
-    "/opt/flink/lib/fluss-flink-tiering-*.jar",
-]
-_TIERING_JAR: Optional[str] = None
-for _pat in _TIERING_JAR_PATTERNS:
-    _matches = _glob.glob(_pat)
-    if _matches:
-        _TIERING_JAR = _matches[0]
-        break
+FLINK_API              = os.getenv("FLINK_API",              "http://jobmanager:8081")
+FLINK_JM_ADDRESS       = os.getenv("FLINK_JM_ADDRESS",       "jobmanager")
+FLINK_JM_RPC_PORT      = os.getenv("FLINK_JM_RPC_PORT",      "6123")
+SCRIPTS_DIR            = os.getenv("SCRIPTS_DIR",             "/opt/flink/scripts")
+CHECK_INTERVAL         = int(os.getenv("CHECK_INTERVAL_SECONDS",  "300"))  # 5 min
+TIERING_INTERVAL_MINS  = int(os.getenv("TIERING_INTERVAL_MINS",    "30"))  # 30 min
+ARCHIVE_HOUR           = int(os.getenv("ARCHIVE_HOUR",              "2"))  # 02:00
+STARTUP_WAIT_SECS      = int(os.getenv("STARTUP_WAIT_SECS",        "180"))  # 3 min
 
 # ── Streaming jobs — MUST always be running ─────────────────────────────────────
 # key: substring phải tìm thấy trong tên Flink job (Flink đặt tên theo sink table)
 # THỨ TỰ QUAN TRỌNG: validator phải chạy TRƯỚC sink jobs vì sink jobs đọc từ
 # hot-violence-alerts-valid (output của validator). Pipeline-manager submit tuần tự.
+#
+# True Streamhouse Tiering:
+#   - sink_to_fluss_enriched.py: write-once → Fluss HOT (với temporal join enrichment)
+#   - sink_to_paimon_star.py đã BỊ XÓA khỏi STREAMING_JOBS (không còn dual-write)
+#   - Paimon WARM được populate bởi tier_fluss_to_paimon.py (run mỗi TIERING_INTERVAL_MINS)
 STREAMING_JOBS: dict[str, dict] = {
     "Contract Validator": {
         "script":      f"{SCRIPTS_DIR}/data_contract_validator.py",
         "description": "Kafka urban-safety-alerts → hot-violence-alerts-valid (DATA CONTRACT)",
     },
     "hot_violence_alerts": {
-        "script":      f"{SCRIPTS_DIR}/sink_to_fluss.py",
-        "description": "Kafka hot-violence-alerts-valid → Fluss (HOT layer) + dim_camera DDL",
-    },
-    # Task 1.3: Star schema sink với temporal join (thay thế sink_to_paimon.py)
-    # Ghi vào cả fact_violence_incidents (mới) và violence_incidents (backward compat)
-    # submit_timeout=400 vì script cần >180s để khởi tạo catalogs + DDLs + compile plan
-    "fact_violence_incidents": {
-        "script":         f"{SCRIPTS_DIR}/sink_to_paimon_star.py",
-        "description":    "Kafka → temporal join dim_camera → Paimon star schema (HOT→WARM)",
-        "submit_timeout": 400,
+        "script":         f"{SCRIPTS_DIR}/sink_to_fluss_enriched.py",
+        "description":    "Kafka → temporal join dim_camera → Fluss HOT (write-once, enriched)",
+        "submit_timeout": 400,  # cần thời gian init catalogs + DDL migration + compile plan
     },
     "daily_incident_stats": {
         "script":         f"{SCRIPTS_DIR}/aggregate_paimon.py",
-        "description":    "Paimon CDC → daily_stats + camera_stats (WARM gold)",
+        "description":    "Paimon CDC → daily_incident_stats + camera_stats (WARM gold)",
         "submit_timeout": 400,
     },
 }
 
-# Task 1.1: Thêm Fluss Tiering Service nếu JAR có sẵn
-if _TIERING_JAR:
-    log.info("Found Fluss Tiering JAR: %s — adding to STREAMING_JOBS", _TIERING_JAR)
-    STREAMING_JOBS["Fluss Tiering Service"] = {
-        "script":      _TIERING_JAR,
-        "description": "Fluss → Paimon automatic tiering (HOT→WARM, no Lambda)",
-        "is_jar":      True,
-        "main_class":  "com.alibaba.fluss.flink.tiering.FlinkTieredStorageDriver",
-        "jar_args": [
-            "--fluss.bootstrap.servers", "fluss-coordinator:9123",
-            "--datalake.format", "paimon",
-            "--datalake.paimon.metastore", "filesystem",
-            "--datalake.paimon.warehouse",
-            os.getenv("PAIMON_WAREHOUSE", "s3://warehouse/paimon"),
-            "--datalake.paimon.s3.endpoint",
-            os.getenv("S3_ENDPOINT", "http://minio:9000"),
-            "--datalake.paimon.s3.access-key",
-            os.getenv("MINIO_ROOT_USER", "minio"),
-            "--datalake.paimon.s3.secret-key",
-            os.getenv("MINIO_ROOT_PASSWORD", "mypassword"),
-            "--datalake.paimon.s3.path.style.access", "true",
-        ],
-    }
-else:
-    _TIERING_NOTE = "Fluss Tiering JAR not found — using sink_to_paimon_star.py for HOT→WARM"
+# ── Periodic tiering job: Fluss HOT → Paimon WARM ──────────────────────────────
+TIERING_SCRIPT = f"{SCRIPTS_DIR}/tier_fluss_to_paimon.py"
 
-# ── Batch archival job ──────────────────────────────────────────────────────────
+# ── Batch archival job: Paimon WARM → Iceberg COLD ─────────────────────────────
 ARCHIVE_SCRIPT = f"{SCRIPTS_DIR}/archive_to_iceberg.py"
 
 # ── Logging ─────────────────────────────────────────────────────────────────────
@@ -118,10 +88,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("pipeline-manager")
-if _TIERING_JAR:
-    log.info("Fluss Tiering JAR found: %s", _TIERING_JAR)
-else:
-    log.info(_TIERING_NOTE)
+log.info("True Streamhouse Tiering enabled — tier_fluss_to_paimon.py every %d min", TIERING_INTERVAL_MINS)
 
 # ── Flink REST helpers ──────────────────────────────────────────────────────────
 
@@ -288,6 +255,41 @@ def _run_star_schema_setup() -> bool:
     return ok
 
 
+def should_run_tiering(last_tiering: Optional[datetime]) -> bool:
+    """
+    Trả True nếu đã đến lúc chạy tiering (cứ mỗi TIERING_INTERVAL_MINS phút).
+    Lần đầu tiên sau khởi động: chạy ngay.
+    """
+    if last_tiering is None:
+        return True
+    elapsed = (datetime.now() - last_tiering).total_seconds()
+    return elapsed >= TIERING_INTERVAL_MINS * 60
+
+
+def run_tiering_job() -> bool:
+    """
+    Chạy tier_fluss_to_paimon.py (blocking — không dùng --detached).
+    Timeout 600s (10 phút): bao gồm Phase1 wait 120s + Phase2 delete 60s + overhead.
+    """
+    log.info("Starting tiering job: Fluss HOT → Paimon WARM")
+    log.info("  script: %s", TIERING_SCRIPT)
+
+    ok, err = _run_flink(
+        args=[
+            "run",
+            "--python", TIERING_SCRIPT,
+            f"-Dpipeline.name=tier_fluss_to_paimon",
+        ],
+        timeout=600,
+    )
+
+    if ok:
+        log.info("✓ Tiering job completed successfully.")
+    else:
+        log.error("✗ Tiering job failed: %s", err)
+    return ok
+
+
 def run_archive_job() -> bool:
     """Chạy batch job Paimon → Iceberg (blocking, chờ hoàn thành)."""
     log.info("Starting archival batch job: Paimon WARM → Iceberg COLD")
@@ -430,10 +432,11 @@ def wait_for_flink(timeout: int = 180) -> bool:
 
 def main() -> None:
     log.info("=" * 60)
-    log.info("Streamhouse Pipeline Manager v1.0")
+    log.info("Streamhouse Pipeline Manager v2.0  (True Tiering)")
     log.info("  Streaming jobs   : %s", list(STREAMING_JOBS.keys()))
     log.info("  Check interval   : %ds (%.1f min)", CHECK_INTERVAL, CHECK_INTERVAL / 60)
-    log.info("  Archival at      : %02d:00 daily", ARCHIVE_HOUR)
+    log.info("  Tiering every    : %d min  (Fluss HOT → Paimon WARM)", TIERING_INTERVAL_MINS)
+    log.info("  Archival at      : %02d:00 daily  (Paimon WARM → Iceberg COLD)", ARCHIVE_HOUR)
     log.info("  Scripts dir      : %s", SCRIPTS_DIR)
     log.info("  Flink API        : %s", FLINK_API)
     log.info("=" * 60)
@@ -460,6 +463,9 @@ def main() -> None:
             ARCHIVE_HOUR, ARCHIVE_HOUR,
         )
 
+    # Tiering: bắt đầu chạy ngay sau khởi động (first run)
+    last_tiering: Optional[datetime] = None
+
     # 3. Main loop
     while True:
         time.sleep(CHECK_INTERVAL)
@@ -467,7 +473,16 @@ def main() -> None:
         log.info("--- Watchdog tick @ %s ---", datetime.now().strftime("%H:%M:%S"))
         watchdog_tick()
 
-        # Archival check
+        # Tiering check (Fluss HOT → Paimon WARM)
+        if should_run_tiering(last_tiering):
+            log.info("--- Tiering triggered @ %s ---",
+                     datetime.now().strftime("%Y-%m-%d %H:%M"))
+            if run_tiering_job():
+                last_tiering = datetime.now()
+            else:
+                log.warning("Tiering failed — will retry next check interval.")
+
+        # Archival check (Paimon WARM → Iceberg COLD)
         if should_run_archival(last_archive):
             log.info("--- Daily archival triggered @ %s ---",
                      datetime.now().strftime("%Y-%m-%d %H:%M"))
