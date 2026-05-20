@@ -1816,5 +1816,52 @@ wsl -d Ubuntu -- bash -c "rm -f /mnt/c/Users/user/AppData/Local/Docker/run/docke
 **Updated by**: Claude Code  
 **Date**: 2026-05-20 09:45 UTC  
 **Session**: 35 (Docker Desktop Recovery)  
-**Status**: 🔄 IN PROGRESS — jobs 3 & 4 still submitting
+**Status**: ✅ COMPLETE
+
+---
+
+## **Session 35 Addendum: E2E Test Suite + Bug Fix (2026-05-20 13:00–14:00 UTC)**
+
+### **Mục Tiêu**
+Chạy toàn bộ E2E test suite theo plan. Commit + push code. Fix bugs phát hiện.
+
+### **Kết Quả E2E Tests: 18/20 PASS**
+
+| Section | Tests | PASS | WARN |
+|---------|-------|------|------|
+| Prerequisites (P1-P3) | 3 | 3 | 0 |
+| Data Flow (S1-S4) | 4 | 4 | 0 |
+| Star Schema (Star1-Star5) | 5 | 5 | 0 |
+| Chatbot (C1-C7) | 7 | 5 | 2 |
+| Cross-Layer (U1) | 1 | 1 | 0 |
+
+Chi tiết: `docs/E2E_TEST_REPORT_2026-05-20.md`
+
+### **Bug Fix: setup_star_schema.py Reserved Keywords**
+- **Lỗi**: `ParseException: Encountered "year" at line 4, column 13`
+- **Nguyên nhân**: `year`, `month`, `day` là reserved keywords trong Flink SQL
+- **Fix**: Backtick-quote: `` `year` ``, `` `month` ``, `` `day` ``
+- **Commit**: `b9a5ba5`
+- **Impact**: dim_time không được seed sau hard reset → fix đảm bảo dim_time (730 rows) luôn được tạo
+
+### **Infrastructure State khi E2E kết thúc**
+- ✅ 4/4 Flink jobs RUNNING (watchdog confirmed 13:47)
+- ✅ Paimon: 34,275+ rows (growing)
+- ✅ dim_camera (Fluss): 15 cameras seeded
+- ✅ dim_time (Paimon): 730 rows (2025–2026)
+- ✅ Temporal join: location enriched ("Đường Nguyễn Du", "Đường Đồng Khởi")
+- ✅ Chatbot: HOT+WARM routing correct, COLD routing correct
+- ✅ SQL Gateway: running (port 8083, profile `ui`)
+- ⚠️ HOT latency: 57s (SQL Gateway session cold start, không phải data latency)
+
+### **Commits Session 35**
+- `0be6149` — docs(session34): hard reset + RTSP E2E test report
+- `b9a5ba5` — fix(flink): quote reserved keywords year/month/day in dim_time DDL
+
+---
+
+**Updated by**: Claude Code  
+**Date**: 2026-05-20 14:00 UTC  
+**Session**: 35 (E2E Tests + Bug Fix)  
+**Status**: ✅ COMPLETE — 18/20 tests PASS, bug fixed, code pushed
 
