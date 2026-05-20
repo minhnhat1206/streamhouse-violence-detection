@@ -374,16 +374,17 @@ class TrinoClient:
         result = result.replace("historical_violence_incidents", "hot_violence_alerts")
         result = result.replace('"timestamp"', '`timestamp`')
         # Map non-existent column aliases that Gemini tends to generate
-        # hot_violence_alerts schema: incident_id, camera_id, timestamp, risk_score,
-        #   confidence, is_violent, event_type  (NO event_id, id, alert_id)
+        # hot_violence_alerts schema (enriched): incident_id, camera_id, timestamp,
+        #   risk_score, confidence, is_violent, event_type, location, ward_id, district
+        #   (NO event_id, id, alert_id, frame_url, frame_data, date_id)
         result = re.sub(r'\bevent_id\b', 'incident_id', result, flags=re.IGNORECASE)
         result = re.sub(r'\balert_id\b', 'incident_id', result, flags=re.IGNORECASE)
         result = re.sub(r'(?<!\w)\bid\b(?!\w)', 'incident_id', result, flags=re.IGNORECASE)
         result = re.sub(r'\bNOW\(\)', "LOCALTIMESTAMP", result, flags=re.IGNORECASE)
         result = re.sub(r'\bCURRENT_TIMESTAMP\b', "LOCALTIMESTAMP", result, flags=re.IGNORECASE)
         # Strip columns that don't exist in hot_violence_alerts
-        # Schema: incident_id, camera_id, timestamp, risk_score, confidence, is_violent, event_type
-        for _col in ("location", "frame_url", "frame_data", "ward_id", "district", "date_id"):
+        # location, ward_id, district now exist (true tiering enrichment) — only strip old columns
+        for _col in ("frame_url", "frame_data", "date_id"):
             result = re.sub(rf',\s*\b{_col}\b', '', result, flags=re.IGNORECASE)
             result = re.sub(rf'\b{_col}\b\s*,\s*', '', result, flags=re.IGNORECASE)
             result = re.sub(rf'\bWHERE\s+{_col}\b', 'WHERE 1=1', result, flags=re.IGNORECASE)
