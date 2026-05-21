@@ -44,6 +44,93 @@ Xây dựng và tối ưu hóa hệ thống phát hiện bạo lực thời gian
 ## 🤝 Handover Protocol (MUST READ)
 *Mỗi khi chuyển đổi Agent (Gemini <-> Claude), Agent hiện tại PHẢI cập nhật phần "Last State" bên dưới.*
 
+### 📍 Last State (Updated: 2026-05-22 — Phiên 39) ✅ 22/23 PASS — Chatbot routing fully fixed
+
+- **Agent vừa làm:** Claude (Session 39 — Fix BUG-A + BUG-B + T6.4 boundary test)
+- **Trạng thái:** 22P / 1W / 0F / 0? — TẤT CẢ critical tests PASS, vượt target 21+/23
+- **Nhánh git:** `devNhat` — commit mới: `fix: chatbot routing evidence override + HOT SQL location`
+- **Report đầy đủ:** `docs/E2E_TEST_REPORT_2026-05-22_SESSION39.md`
+
+#### Scorecard Session 39
+```
+S1 Infrastructure:   T1.1[P] T1.2[P] T1.3[P]
+S2 Data Pipeline:    T2.1[P] T2.2[P] T2.3[P]
+S3 HOT Layer:        T3.1[P] T3.2[P] T3.3[P]
+S4 Tiering MOVE ⭐: T4.1[P] T4.2[P] T4.3[P] T4.4[W]
+S5 WARM + COLD:      T5.1[P] T5.2[P]
+S6 Chatbot:          T6.1[P] T6.2[P] T6.3[P] T6.4[P] T6.5[P]
+S7 Data Quality:     T7.1[P] T7.2[P]
+TOTAL: 22P / 1W / 0F / 0? của 23  ✅ (target: 21+/23)
+```
+
+#### Fixes đã áp dụng:
+- **BUG-A (T6.1):** `scripts/chatbot/agent.py` — `_detect_evidence_intent()` dùng word-boundary regex cho `"anh"` thay vì substring match → tránh false positive với "canh bao"
+- **BUG-B (T6.3):** `scripts/chatbot/agent.py` — HOT `dialect_hint` bắt buộc SELECT location/ward_id/district; is_violent type check robust (`str(...).lower() in ("true","1")`); sample_rows 5→10; explicit location instruction #6 trong Gemini prompt
+- **BETWEEN fix:** `scripts/chatbot/components/trino_client.py` — thêm `_ts_between` regex để strip `BETWEEN TIMESTAMP '...' AND TIMESTAMP '...'` filters
+- **T6.4 PASS:** boundary test "45 phút"→Fluss + "2 giờ"→Paimon verified đúng
+
+#### Stack state sau session 39:
+- Tất cả services RUNNING (kafka, minio, mysql, hive, trino, flink, fluss, chatbot, flink-sql-gateway)
+- HOT=4,761 (producer up ~14 min), WARM=158,589, COLD=0
+- Docker build cache cleared (~9.5GB freed)
+- Flink: 3 jobs RUNNING (validator, hot_sink, aggregate)
+
+---
+
+### 📍 Last State (Updated: 2026-05-21 — Phiên 38) ⚠️ 18/23 PASS — 2 chatbot routing bugs cần fix
+
+- **Agent vừa làm:** Claude (Session 38 — Full E2E test run after stack recovery)
+- **Trạng thái:** 18P / 2W / 2F / 1? — S1-S5 và S7 ổn định, S6 chatbot có 2 bug
+- **Nhánh git:** `devNhat` (không có commit mới — test run thuần)
+- **Report đầy đủ:** `docs/E2E_TEST_REPORT_2026-05-21_SESSION38.md`
+
+#### Scorecard Session 38
+```
+S1 Infrastructure:   T1.1[P] T1.2[P] T1.3[P]
+S2 Data Pipeline:    T2.1[P] T2.2[P] T2.3[P]
+S3 HOT Layer:        T3.1[P] T3.2[P] T3.3[P]
+S4 Tiering MOVE ⭐: T4.1[P] T4.2[P] T4.3[P] T4.4[W]
+S5 WARM + COLD:      T5.1[P] T5.2[P]
+S6 Chatbot:          T6.1[F] T6.2[P] T6.3[F] T6.4[?] T6.5[P]
+S7 Data Quality:     T7.1[P] T7.2[P]
+TOTAL: 18P / 1W / 2F / 1? của 23
+```
+
+#### Bugs cần fix (Session 39):
+
+**BUG-A (T6.1 FAIL):** Evidence query override sai
+- File: `scripts/chatbot/agent.py`, function `select_data_layer`
+- Triệu chứng: Query "trong 30 phut qua co bao nhieu canh bao?" → route Paimon (sai, phải Fluss)
+- Log: `"Evidence query: overriding Fluss → PAIMON (frame_url)"`
+- Root cause: từ "canh bao" trigger evidence query logic sai
+- Fix: chỉ override khi user explicitly hỏi về hình ảnh/video/evidence
+
+**BUG-B (T6.3 FAIL):** SQL không SELECT `location` column
+- File: `scripts/chatbot/agent.py`, function `generate_sql` (HOT path)  
+- Triệu chứng: Query "bao luc xay ra o dau trong 15 phut qua?" → trả `cam_01` thay vì `Đường Nguyễn Huệ`
+- Root cause: Generated SQL không include `location` trong SELECT
+- Fix: Prompt/instruction cho generate_sql phải include `location`, `ward_id`, `district` khi query HOT layer
+
+#### T6.4 chưa chạy (interrupt):
+```bash
+# "45 phút" → Fluss (expected)
+curl -s -m 120 -X POST http://localhost:5002/chat \
+  -H "Content-Type: application/json" \
+  -d '{"query": "45 phut qua co gi?"}'
+# "2 giờ" → Paimon (expected)
+curl -s -m 120 -X POST http://localhost:5002/chat \
+  -H "Content-Type: application/json" \
+  -d '{"query": "trong 2 gio qua co bao nhieu vu?"}'
+```
+
+#### Stack state sau session 38:
+- Tất cả services RUNNING (kafka, minio, mysql, hive, trino, flink, fluss, chatbot)
+- flink-sql-gateway đang chạy (profile ui)
+- HOT=13166, WARM=158589, COLD=0 (fresh stack, data < 7 days)
+- 3 Flink streaming jobs RUNNING + pipeline-manager watchdog active
+
+---
+
 ### 📍 Last State (Updated: 2026-05-19 — Phiên 32) ✅ E2E ALL PASS + ARCHITECTURE COMPLETE
 
 - **Agent vừa làm:** Claude (Session 32 — Pipeline fixes, E2E run, architecture docs)

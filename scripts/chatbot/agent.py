@@ -150,19 +150,29 @@ class AgentState(TypedDict):
 # Node Functions (Stubs - To Be Implemented)
 # ============================================================================
 
-# Vietnamese keywords that signal the user wants to see evidence images
+# Vietnamese keywords that signal the user wants to see evidence images.
+# NOTE: short tokens like "anh" (photo without diacritic) are NOT here because
+# they appear as substrings in unrelated words, e.g. "canh" in "cảnh báo".
+# Use _EVIDENCE_WORD_TOKENS + word-boundary regex for those.
 _EVIDENCE_KEYWORDS = (
-    "ảnh", "anh", "hình", "hinh", "ảnh bằng chứng", "bang chung",
+    "ảnh", "hình", "hinh", "ảnh bằng chứng", "bang chung",
     "bằng chứng", "xem ảnh", "xem hinh", "ảnh chụp", "screenshot",
     "frame", "clip", "video", "chứng cứ", "chung cu", "hình ảnh",
     "cho xem", "xem được không", "có ảnh không", "có hình không",
 )
 
+# Short tokens that need whole-word matching to avoid false-positives:
+# "anh" alone means "photo" (without diacritic) but appears inside "canh" (cảnh/canh).
+_EVIDENCE_WORD_TOKENS = ("anh",)
+
 
 def _detect_evidence_intent(query: str) -> bool:
     """Return True if the user is asking to see evidence/frame images."""
     q = query.lower()
-    return any(kw in q for kw in _EVIDENCE_KEYWORDS)
+    if any(kw in q for kw in _EVIDENCE_KEYWORDS):
+        return True
+    # Word-boundary check for short ambiguous tokens
+    return any(re.search(r'\b' + re.escape(tok) + r'\b', q) for tok in _EVIDENCE_WORD_TOKENS)
 
 
 async def understand_query(state: AgentState) -> AgentState:
@@ -513,7 +523,8 @@ async def generate_sql(state: AgentState) -> AgentState:
                     dialect_hint = (
                         'Syntax: Flink SQL. Use double-quote for reserved keyword: "timestamp".\n'
                         'QUAN TRỌNG: KHÔNG dùng COUNT(*) hay SUM() — hãy dùng SELECT với LIMIT.\n'
-                        'Ví dụ tốt: SELECT incident_id, camera_id, "timestamp", risk_score, is_violent FROM hot_violence_alerts LIMIT 50\n'
+                        'Ví dụ tốt: SELECT incident_id, camera_id, "timestamp", risk_score, confidence, is_violent, event_type, location, ward_id, district FROM hot_violence_alerts LIMIT 50\n'
+                        'BẮT BUỘC: LUÔN LUÔN include các cột location, ward_id, district trong SELECT — đây là tên đường/phường/quận của camera.\n'
                         'Nếu câu hỏi hỏi số lượng: dùng LIMIT 200 và đếm ở Python — KHÔNG dùng COUNT().'
                     )
                 else:
@@ -868,7 +879,14 @@ async def generate_response(state: AgentState) -> AgentState:
                 state["response_confidence"] = 0.5
             else:
                 # Format data as Vietnamese text
-                formatted_data = _safe_json_dumps(results[:5])
+                # For HOT layer queries, show violent events first so Gemini sees location data
+                # is_violent can be Python bool True, int 1, or string "true"/"1" from Flink
+                violent_rows = [
+                    r for r in results
+                    if str(r.get("is_violent", "false")).lower() in ("true", "1")
+                ]
+                sample_rows = violent_rows[:10] if violent_rows else results[:10]
+                formatted_data = _safe_json_dumps(sample_rows)
 
                 frame_urls = state.get("frame_urls") or []
                 evidence_note_for_gemini = ""
@@ -903,7 +921,8 @@ Hãy tổng hợp kết quả truy vấn dưới đây thành một câu trả l
 2. Nêu các con số cụ thể từ kết quả
 3. Cuối cùng, thêm dòng citation: "Nguồn: {src} ({dlayer}), {row_count} hàng"
 4. Không bịa dữ liệu, chỉ sử dụng những gì có trong kết quả
-5. Trả về CHỈ câu trả lời, không có giải thích thêm{evidence_note_for_gemini}
+5. Trả về CHỈ câu trả lời, không có giải thích thêm
+6. KHI đề cập địa điểm xảy ra sự kiện: PHẢI dùng giá trị cột `location` (ví dụ: "tại Đường Nguyễn Huệ", "tại Đường Võ Văn Kiệt"), KHÔNG dùng "tại camera cam_XX". Nếu có cột `ward_id`/`district` thì thêm thông tin phường/quận.{evidence_note_for_gemini}
 
 **Câu trả lời:**
                         """.strip()

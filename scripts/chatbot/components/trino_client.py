@@ -415,6 +415,17 @@ class TrinoClient:
         )
         result = _ts_literal.sub("", result).strip()
 
+        # Strip BETWEEN timestamp range filters (e.g. WHERE timestamp BETWEEN TIMESTAMP '...' AND TIMESTAMP '...')
+        _ts_between = re.compile(
+            r"(?:WHERE\s+|AND\s+)"
+            r"(?:`timestamp`|\"timestamp\"|timestamp)\s+BETWEEN\s+"
+            r"\(?\s*TIMESTAMP\s*'[^']+'\s*\)?"
+            r"\s+AND\s+"
+            r"\(?\s*TIMESTAMP\s*'[^']+'\s*\)?",
+            re.IGNORECASE,
+        )
+        result = _ts_between.sub("", result).strip()
+
         # Fix SQL structure after timestamp removal:
         # 1. "WHERE [whitespace] AND x" → "WHERE x"
         #    Handles: timestamp was the FIRST WHERE condition; WHERE keyword survived
