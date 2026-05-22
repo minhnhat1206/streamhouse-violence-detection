@@ -44,12 +44,12 @@ Xây dựng và tối ưu hóa hệ thống phát hiện bạo lực thời gian
 ## 🤝 Handover Protocol (MUST READ)
 *Mỗi khi chuyển đổi Agent (Gemini <-> Claude), Agent hiện tại PHẢI cập nhật phần "Last State" bên dưới.*
 
-### 📍 Last State (Updated: 2026-05-22 — Phiên 40 COMPLETE) ✅ Full Pipeline Verified on Clean Stack
+### 📍 Last State (Updated: 2026-05-22 — Phiên 41 COMPLETE) ✅ Chatbot Logic + Dual-Layer Routing
 
-- **Agent vừa làm:** Claude (Session 40 — Cleanup + Hard Reset + Pipeline Test + Documentation)
-- **Trạng thái:** Clean stack, full pipeline verified end-to-end, all routing correct
-- **Nhánh git:** `devNhat` — commits: `d925357` (cleanup), `2e8d525` (docs + Dockerfile fixes), `74497a6` (docs complete)
-- **Disk:** C: drive ~134GB free (VHD compacted 122GB → 24.6GB)
+- **Agent vừa làm:** Claude (Session 41 — Chatbot cleanup + logic fix + dual-layer routing)
+- **Trạng thái:** Chatbot hoạt động đúng logic; routing 13/13 PASS; dual-layer verified với live data
+- **Nhánh git:** `devNhat` — commits: `65e28dd` (remove MinIO fallback), `c21258c` (dual-layer + routing fixes)
+- **Disk:** C: drive ~134GB free
 
 #### Session 40 — What was done:
 
@@ -104,11 +104,35 @@ HOT latency: 32ms ✅   |  WARM latency: 1182ms ✅
 - Tiering will run every 30 min (next: ~08:53 UTC)
 - Archive will run at 02:00 UTC (for data >7 days old)
 
-#### Next steps (Session 41):
-1. Run full E2E test suite to confirm 22/23 still passes on clean RTSP data
+#### Session 41 — What was done:
+
+**Chatbot cleanup:**
+- Removed both MinIO fallback blocks (~60 lines) — 0 DB records = 0 confirmed violence = 0 evidence
+- Commit: `65e28dd`
+
+**Dual-layer routing (hôm nay = HOT + WARM):**
+- "hôm nay" now queries PAIMON (primary) + Fluss HOT (supplementary scan) and merges
+- COUNT queries: WARM count + HOT violent count = total today
+- LIST queries: combine + deduplicate by incident_id
+- Verified with live data: WARM=1 + HOT_new=46 = 47 total ✅
+
+**Routing fixes (13/13 PASS):**
+- "năm 2025" (bare year from Gemini) → Iceberg (regex `\b(20\d\d|19\d\d)\b`)
+- "gần đây"/"hiện tại" (Gemini diacritical forms) → Fluss HOT
+- "hôm qua" false-positive dual-layer fix ("hôm" substring → explicit exclusion)
+- Commit: `c21258c`
+
+#### Stack state after session 41:
+- All services healthy, RTSP streaming active
+- HOT: ~5441+ events, WARM: 0 (data not yet 2h old for tiering)
+- Chatbot routing: 13/13 correct across all time-period variants
+- Dual-layer: verified with live HOT+WARM merge
+
+#### Next steps (Session 42):
+1. Run full E2E test suite once WARM has data (after 2h tiering cycle)
 2. Begin thesis finalization: architecture chapter, performance benchmarks
 3. Create system diagrams for thesis document
-4. Optional: test COLD layer (wait for data to be >2h old, trigger tiering, then >7 days for archive)
+4. Consider: reduce HOT supplementary scan timeout (currently 45s → potentially slow for UX)
 
 ---
 
