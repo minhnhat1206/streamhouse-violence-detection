@@ -13,12 +13,7 @@ RUN apt-get update && apt-get install -y \
 COPY docker/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 3. Download embedding model (separate layer for caching)
-RUN pip install -q sentence-transformers && \
-    python -c "from sentence_transformers import SentenceTransformer; \
-    SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
-
-# 4. Copy application code
+# 3. Copy application code
 COPY scripts/chatbot/ /app/scripts/chatbot/
 COPY config/ /app/config/
 
@@ -28,7 +23,6 @@ ENV PYTHONUNBUFFERED=1
 
 # Configuration
 ENV API_PORT=5002
-ENV CHROMA_DIR=/data/chroma
 ENV DEBUG=False
 ENV LOG_FORMAT=json
 

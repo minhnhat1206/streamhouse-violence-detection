@@ -36,7 +36,6 @@ except ImportError:
     genai = None
 
 from .logger import setup_logger, log_agent_node
-from .components.chromadb_wrapper import ChromaDBWrapper
 from .components.trino_client import TrinoClient, DataLayer
 from .components.sql_generator import SQLGenerator
 from .components.evidence_service import EvidenceService
@@ -45,21 +44,18 @@ from .components.schema_registry import get_schema_for_prompt, get_full_table_re
 logger = setup_logger(__name__)
 
 # Global component instances (initialized in main.py)
-_chromadb: Optional[ChromaDBWrapper] = None
 _trino_client: Optional[TrinoClient] = None
 _sql_generator: Optional[SQLGenerator] = None
 _evidence_service: Optional[EvidenceService] = None
 
 
 def set_components(
-    chromadb: ChromaDBWrapper,
     trino_client: TrinoClient,
     sql_generator: SQLGenerator,
     evidence_service: EvidenceService
 ) -> None:
     """Set global component instances."""
-    global _chromadb, _trino_client, _sql_generator, _evidence_service
-    _chromadb = chromadb
+    global _trino_client, _sql_generator, _evidence_service
     _trino_client = trino_client
     _sql_generator = sql_generator
     _evidence_service = evidence_service
@@ -798,10 +794,7 @@ async def self_correct(state: AgentState) -> Optional[AgentState]:
         # Use SQL generator to fix SQL based on error
         if _sql_generator:
             try:
-                # Get fresh schema context
                 schema_context = []
-                if _chromadb:
-                    schema_context = _chromadb.search_schema(state["user_query"], top_k=3)
 
                 # Fix SQL using Gemini
                 fixed_sql = _sql_generator.fix_sql_error(

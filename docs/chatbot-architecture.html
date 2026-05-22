@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kiến trúc Chatbot — Streamhouse Violence Detection</title>
+<style>
+  :root {
+    --bg:       #0d1117;
+    --bg2:      #161b22;
+    --bg3:      #21262d;
+    --border:   #30363d;
+    --text:     #e6edf3;
+    --muted:    #8b949e;
+    --hot:      #ff4d4f;
+    --hot-bg:   #2a1215;
+    --hot-b:    #5c2122;
+    --warm:     #fa8c16;
+    --warm-bg:  #2b1d0e;
+    --warm-b:   #613400;
+    --cold:     #4096ff;
+    --cold-bg:  #0a1929;
+    --cold-b:   #003a8c;
+    --gemini:   #a855f7;
+    --gemini-bg:#1e0a2e;
+    --green:    #3fb950;
+    --yellow:   #e3b341;
+    --accent:   #58a6ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.6;
+    font-size: 15px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+
+  /* ─── Layout ─────────────────────────────────────────── */
+  .page { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem 6rem; }
+
+  .hero {
+    text-align: center; padding: 3rem 1rem 2.5rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 3rem;
+  }
+  .hero h1 { font-size: 2.2rem; font-weight: 700; margin-bottom: .5rem; }
+  .hero p  { color: var(--muted); font-size: 1rem; max-width: 600px; margin: 0 auto; }
+  .badge {
+    display: inline-block; padding: .2em .6em; border-radius: 4px;
+    font-size: .75rem; font-weight: 600; margin: .15rem;
+  }
+  .badge-hot  { background: var(--hot-bg);  color: var(--hot);  border:1px solid var(--hot-b);  }
+  .badge-warm { background: var(--warm-bg); color: var(--warm); border:1px solid var(--warm-b); }
+  .badge-cold { background: var(--cold-bg); color: var(--cold); border:1px solid var(--cold-b); }
+  .badge-gem  { background: var(--gemini-bg); color: var(--gemini); border:1px solid #6b21a8; }
+  .badge-ok   { background: #0d2010; color: var(--green); border:1px solid #1a4020; }
+
+  /* ─── Section headers ────────────────────────────────── */
+  h2 {
+    font-size: 1.35rem; font-weight: 700; margin: 3rem 0 1rem;
+    padding-bottom: .5rem; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: .5rem;
+  }
+  h2 .num {
+    background: var(--accent); color: #000;
+    width: 1.7rem; height: 1.7rem; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: .85rem; font-weight: 800; flex-shrink: 0;
+  }
+  h3 { font-size: 1.05rem; font-weight: 600; margin: 1.5rem 0 .6rem; color: var(--accent); }
+  p  { margin-bottom: .8rem; color: #c9d1d9; }
+  ul, ol { padding-left: 1.4rem; margin-bottom: .8rem; }
+  li { margin-bottom: .3rem; color: #c9d1d9; }
+  strong { color: var(--text); }
+
+  /* ─── Cards ──────────────────────────────────────────── */
+  .card {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1.25rem 1.5rem; margin-bottom: 1.2rem;
+  }
+  .card-grid { display: grid; gap: 1rem; }
+  .card-grid-2 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .card-grid-3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+
+  /* ─── Code blocks ────────────────────────────────────── */
+  pre {
+    background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;
+    padding: .9rem 1.1rem; overflow-x: auto; font-size: .82rem;
+    font-family: "Cascadia Code","JetBrains Mono","Fira Code",monospace;
+    margin: .8rem 0; line-height: 1.5;
+  }
+  code {
+    background: var(--bg3); border-radius: 3px; padding: .1em .35em;
+    font-size: .85em;
+    font-family: "Cascadia Code","JetBrains Mono","Fira Code",monospace;
+  }
+  .kw  { color: #ff7b72; }
+  .fn  { color: #d2a8ff; }
+  .str { color: #a5d6ff; }
+  .cm  { color: #8b949e; font-style: italic; }
+  .num { color: #79c0ff; }
+  .cls { color: #ffa657; }
+
+  /* ─── LangGraph diagram ──────────────────────────────── */
+  .graph-wrap {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 2rem 1rem; overflow-x: auto;
+    margin: 1.2rem 0;
+  }
+  .graph {
+    display: flex; align-items: center; gap: 0;
+    min-width: 860px; justify-content: center;
+  }
+  .gnode {
+    display: flex; flex-direction: column; align-items: center;
+    cursor: pointer; position: relative;
+  }
+  .gnode-box {
+    background: var(--bg3); border: 2px solid var(--border);
+    border-radius: 8px; padding: .6rem .85rem; text-align: center;
+    min-width: 100px; transition: all .2s;
+    user-select: none;
+  }
+  .gnode-box:hover { border-color: var(--accent); background: #1c2738; transform: translateY(-2px); }
+  .gnode-label { font-size: .7rem; font-weight: 700; text-transform: uppercase;
+                 letter-spacing: .04em; color: var(--accent); margin-bottom: .2rem; }
+  .gnode-name  { font-size: .82rem; font-weight: 600; }
+  .gnode-sub   { font-size: .68rem; color: var(--muted); margin-top: .15rem; }
+
+  .garrow { display: flex; align-items: center; flex-shrink: 0; }
+  .garrow-line {
+    width: 28px; height: 2px; background: var(--border);
+    position: relative;
+  }
+  .garrow-line::after {
+    content: ''; position: absolute; right: -5px; top: -4px;
+    border: 5px solid transparent; border-left-color: var(--muted);
+  }
+  .garrow-cond {
+    display: flex; flex-direction: column; align-items: center;
+    width: 60px; gap: 2px;
+  }
+  .garrow-cond .line-top { width: 1px; height: 22px; background: var(--border); }
+  .garrow-cond .cond-box {
+    font-size: .6rem; background: #1e2b3a; border: 1px solid var(--cold-b);
+    color: var(--cold); border-radius: 4px; padding: .15rem .35rem;
+    white-space: nowrap;
+  }
+  .garrow-cond .line-bot { width: 1px; height: 22px; background: var(--border); }
+
+  /* ─── Layer comparison table ─────────────────────────── */
+  .layer-table { width: 100%; border-collapse: collapse; margin: .8rem 0; font-size: .88rem; }
+  .layer-table th {
+    background: var(--bg3); padding: .6rem .8rem; text-align: left;
+    border: 1px solid var(--border); font-size: .8rem; text-transform: uppercase;
+    letter-spacing: .04em; color: var(--muted);
+  }
+  .layer-table td { padding: .55rem .8rem; border: 1px solid var(--border); vertical-align: top; }
+  .layer-table tr:hover td { background: var(--bg3); }
+  .layer-table .hot-row td:first-child { border-left: 3px solid var(--hot); }
+  .layer-table .warm-row td:first-child { border-left: 3px solid var(--warm); }
+  .layer-table .cold-row td:first-child { border-left: 3px solid var(--cold); }
+
+  /* ─── Routing diagram ────────────────────────────────── */
+  .routing-tree {
+    display: flex; flex-direction: column; align-items: center; gap: 0;
+    padding: 1.5rem; background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 10px; margin: 1rem 0;
+  }
+  .rt-box {
+    border-radius: 8px; padding: .55rem 1.2rem; font-size: .85rem;
+    font-weight: 600; text-align: center; min-width: 160px;
+  }
+  .rt-query { background: #161b22; border: 2px solid var(--accent); color: var(--accent); }
+  .rt-regex { background: #1a1a2e; border: 2px solid var(--gemini); color: var(--gemini); min-width: 200px; }
+  .rt-fluss { background: var(--hot-bg); border: 2px solid var(--hot); color: var(--hot); }
+  .rt-paimon{ background: var(--warm-bg); border: 2px solid var(--warm); color: var(--warm); }
+  .rt-iceberg{ background: var(--cold-bg); border: 2px solid var(--cold); color: var(--cold); }
+  .rt-arrow  { font-size: 1.4rem; color: var(--muted); line-height: 1; }
+  .rt-row    { display: flex; align-items: flex-start; gap: 0; }
+  .rt-branch { display: flex; gap: 1.5rem; align-items: flex-start; }
+  .rt-branch-item { display: flex; flex-direction: column; align-items: center; gap: 0; }
+  .rt-label  { font-size: .72rem; color: var(--muted); font-style: italic; margin: .15rem 0; }
+  .rt-vert   { width: 2px; height: 18px; background: var(--border); }
+  .rt-horiz  { height: 2px; background: var(--border); }
+
+  /* ─── SQL adaptation ─────────────────────────────────── */
+  .sql-diff { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: .8rem 0; }
+  .sql-diff-item { }
+  .sql-diff-title {
+    font-size: .72rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .05em; margin-bottom: .4rem; padding: .3rem .6rem;
+    border-radius: 4px;
+  }
+  .sql-diff-before { background: #2a1215; color: var(--hot); }
+  .sql-diff-after  { background: #0d2010; color: var(--green); }
+  @media(max-width:640px) { .sql-diff { grid-template-columns: 1fr; } }
+
+  /* ─── Timeline / steps ───────────────────────────────── */
+  .steps { position: relative; padding-left: 2.5rem; }
+  .steps::before {
+    content: ''; position: absolute; left: .85rem; top: 0; bottom: 0;
+    width: 2px; background: var(--border);
+  }
+  .step { position: relative; margin-bottom: 1.5rem; }
+  .step-dot {
+    position: absolute; left: -1.75rem;
+    width: 1.2rem; height: 1.2rem; border-radius: 50%;
+    border: 2px solid var(--accent); background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    font-size: .65rem; font-weight: 800; color: var(--accent);
+    top: .15rem;
+  }
+  .step-title { font-weight: 700; color: var(--text); margin-bottom: .3rem; }
+  .step-body  { color: #c9d1d9; font-size: .9rem; }
+
+  /* ─── Retry loop diagram ─────────────────────────────── */
+  .retry-wrap {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 1.5rem; display: flex; flex-direction: column; align-items: center; gap: .5rem;
+  }
+  .retry-row { display: flex; align-items: center; gap: 1rem; }
+  .rbox {
+    border-radius: 8px; padding: .5rem 1rem; font-size: .82rem; font-weight: 600;
+    white-space: nowrap; min-width: 130px; text-align: center;
+  }
+  .rbox-exec    { background: #0d2010; border: 2px solid var(--green); color: var(--green); }
+  .rbox-check   { background: #1a1a2e; border: 2px solid var(--gemini); color: var(--gemini); }
+  .rbox-correct { background: var(--warm-bg); border: 2px solid var(--warm); color: var(--warm); }
+  .rbox-resp    { background: var(--cold-bg); border: 2px solid var(--cold); color: var(--cold); }
+  .rbox-fail    { background: var(--hot-bg); border: 2px solid var(--hot); color: var(--hot); }
+  .rarrow       { color: var(--muted); font-size: 1.1rem; font-weight: 700; }
+  .retry-label  { font-size: .7rem; color: var(--muted); }
+  .retry-loop   {
+    border: 1px dashed var(--warm-b); border-radius: 8px;
+    padding: .5rem 1rem; color: var(--muted); font-size: .72rem;
+    text-align: center; width: 100%;
+  }
+
+  /* ─── Tooltip ─────────────────────────────────────────── */
+  .tooltip-wrap { position: relative; display: inline-block; }
+  .tooltip-wrap .tooltip {
+    display: none; position: absolute; bottom: calc(100% + 8px); left: 50%;
+    transform: translateX(-50%); background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 6px; padding: .5rem .8rem; font-size: .78rem; white-space: nowrap;
+    z-index: 10; pointer-events: none; min-width: 200px; line-height: 1.4;
+    color: var(--text);
+  }
+  .tooltip-wrap:hover .tooltip { display: block; }
+
+  /* ─── Info box ───────────────────────────────────────── */
+  .info { background: #0a1929; border-left: 3px solid var(--cold); border-radius: 0 6px 6px 0;
+          padding: .75rem 1rem; margin: .8rem 0; font-size: .88rem; color: #a8c4e0; }
+  .warn { background: #2b1d0e; border-left: 3px solid var(--warm); border-radius: 0 6px 6px 0;
+          padding: .75rem 1rem; margin: .8rem 0; font-size: .88rem; color: #d4a96a; }
+  .success { background: #0d2010; border-left: 3px solid var(--green); border-radius: 0 6px 6px 0;
+             padding: .75rem 1rem; margin: .8rem 0; font-size: .88rem; color: #8bd4a0; }
+
+  /* ─── Tabs ───────────────────────────────────────────── */
+  .tabs { display: flex; gap: .5rem; margin-bottom: -1px; flex-wrap: wrap; }
+  .tab {
+    padding: .4rem .9rem; border: 1px solid var(--border); border-bottom: none;
+    border-radius: 6px 6px 0 0; background: var(--bg2); cursor: pointer;
+    font-size: .82rem; color: var(--muted); transition: all .15s;
+  }
+  .tab.active { background: var(--bg3); color: var(--text); border-color: var(--border); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+  .tabpanel {
+    background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 0 6px 6px 6px; padding: 1.2rem;
+  }
+
+  /* ─── Metric chips ───────────────────────────────────── */
+  .metrics { display: flex; gap: .75rem; flex-wrap: wrap; margin: .8rem 0; }
+  .metric {
+    background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 8px; padding: .6rem 1rem; text-align: center;
+  }
+  .metric-val { font-size: 1.4rem; font-weight: 700; }
+  .metric-lbl { font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .hot-val  { color: var(--hot); }
+  .warm-val { color: var(--warm); }
+  .cold-val { color: var(--cold); }
+
+  /* ─── Responsive ─────────────────────────────────────── */
+  @media(max-width:700px) {
+    .hero h1 { font-size: 1.6rem; }
+    .graph { min-width: 600px; }
+    .sql-diff { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="hero">
+  <h1>Kiến trúc Chatbot &amp; Agentic RAG</h1>
+  <p>Hệ thống giám sát an ninh thông minh — Streamhouse Violence Detection</p>
+  <div style="margin-top:1rem">
+    <span class="badge badge-hot">Fluss HOT</span>
+    <span class="badge badge-warm">Paimon WARM</span>
+    <span class="badge badge-cold">Iceberg COLD</span>
+    <span class="badge badge-gem">Gemini 2.0</span>
+    <span class="badge badge-ok">LangGraph</span>
+  </div>
+</div>
+
+<div class="page">
+
+<!-- ══════════════════════════════════════════════════════════
+     §1  TỔNG QUAN
+════════════════════════════════════════════════════════════ -->
+<h2><span class="num">1</span>Tổng quan hệ thống</h2>
+
+<p>Chatbot là lớp <strong>Agentic RAG</strong> (Retrieval-Augmented Generation) của dự án — nhận câu hỏi tiếng Việt từ người dùng, tự động xác định dữ liệu cần truy vấn từ tầng nào của Streamhouse, sinh SQL phù hợp, tự sửa lỗi nếu thất bại, rồi trả lời bằng tiếng Việt.</p>
+
+<div class="card-grid card-grid-3">
+  <div class="card">
+    <h3 style="color:var(--gemini)">🤖 LLM Engine</h3>
+    <p><strong>Google Gemini 2.0 Flash</strong> đảm nhận 3 vai trò: phân tích ngữ nghĩa câu hỏi, sinh SQL đúng dialect, và tự sửa lỗi SQL khi query thất bại.</p>
+  </div>
+  <div class="card">
+    <h3 style="color:var(--accent)">🔀 Orchestrator</h3>
+    <p><strong>LangGraph</strong> quản lý luồng xử lý 6 node với nhánh điều kiện — retry tối đa 3 lần, fallback tự động khi infrastructure gặp sự cố.</p>
+  </div>
+  <div class="card">
+    <h3 style="color:var(--green)">🗃️ Multi-layer Storage</h3>
+    <p>Tự động route query sang đúng tầng lưu trữ: <span class="badge badge-hot">Fluss</span> (≤1h), <span class="badge badge-warm">Paimon</span> (1h–7d), <span class="badge badge-cold">Iceberg</span> (&gt;7d).</p>
+  </div>
+</div>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="metric-val hot-val">≤100ms</div>
+    <div class="metric-lbl">HOT latency target</div>
+  </div>
+  <div class="metric">
+    <div class="metric-val warm-val">≤10s</div>
+    <div class="metric-lbl">WARM latency target</div>
+  </div>
+  <div class="metric">
+    <div class="metric-val cold-val">≤30s</div>
+    <div class="metric-lbl">COLD latency target</div>
+  </div>
+  <div class="metric">
+    <div class="metric-val" style="color:var(--green)">3</div>
+    <div class="metric-lbl">max self-correct retries</div>
+  </div>
+  <div class="metric">
+    <div class="metric-val" style="color:var(--gemini)">6</div>
+    <div class="metric-lbl">LangGraph nodes</div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════
+     §2  LANGGRAPH AGENT GRAPH
+════════════════════════════════════════════════════════════ -->
+<h2><span class="num">2</span>LangGraph Agent Graph (6 node)</h2>
+
+<p>Toàn bộ luồng xử lý một câu hỏi được mô hình hoá thành một <strong>directed state graph</strong> — mỗi node nhận <code>AgentState</code>, xử lý một phần công việc, rồi chuyển trạng thái sang node tiếp theo.</p>
+
+<div class="graph-wrap">
+  <div class="graph">
+
+    <!-- START -->
+    <div class="gnode">
+      <div class="gnode-box" style="border-color:#3fb950;min-width:70px">
+        <div class="gnode-label" style="color:#3fb950">START</div>
+        <div class="gnode-name" style="font-size:.75rem">ChatRequest</div>
+      </div>
+    </div>
+
+    <div class="garrow"><div class="garrow-line"></div></div>
+
+    <!-- N1 understand_query -->
+    <div class="gnode tooltip-wrap">
+      <div class="gnode-box">
+        <div class="gnode-label">Node 1</div>
+        <div class="gnode-name">understand_query</div>
+        <div class="gnode-sub">Gemini + regex</div>
+      </div>
+      <div class="tooltip">
+        <strong>Phân tích câu hỏi</strong><br>
+        · Trích xuất: time_period, location, metric<br>
+        · Phát hiện intent: count / list / evidence<br>
+        · Phát hiện wants_evidence (ảnh, bằng chứng, frame)<br>
+        · Dùng Gemini Flash; fallback regex nếu API lỗi
+      </div>
+    </div>
+
+    <div class="garrow"><div class="garrow-line"></div></div>
+
+    <!-- N2 select_data_layer -->
+    <div class="gnode tooltip-wrap">
+      <div class="gnode-box">
+        <div class="gnode-label">Node 2</div>
+        <div class="gnode-name">select_data_layer</div>
+        <div class="gnode-sub">routing logic</div>
+      </div>
+      <div class="tooltip">
+        <strong>Chọn tầng dữ liệu</strong><br>
+        1. Numeric regex (ưu tiên): số phút/giờ/ngày<br>
+        2. Keyword patterns: "hôm nay", "tháng trước"<br>
+        3. Evidence override → force PAIMON<br>
+        (&lt;1h→Fluss, 1h-7d→Paimon, &gt;7d→Iceberg)
+      </div>
+    </div>
+
+    <div class="garrow"><div class="garrow-line"></div></div>
+
+    <!-- N3 generate_sql -->
+    <div class="gnode tooltip-wrap">
+      <div class="gnode-box">
+        <div class="gnode-label">Node 3</div>
+        <div class="gnode-name">generate_sql</div>
+        <div class="gnode-sub">Gemini Text-to-SQL</div>
+      </div>
+      <div class="tooltip">
+        <strong>Sinh SQL tự động</strong><br>
+        · Schema từ schema_registry (ground truth)<br>
+        · Dialect hint theo layer (Flink/Trino)<br>
+        · Fluss: NO COUNT/SUM, dùng LIMIT<br>
+        · Iceberg: TIMESTAMP(6) WITH TIME ZONE<br>
+        · Paimon: standard Trino SQL
+      </div>
+    </div>
+
+    <div class="garrow"><div class="garrow-line"></div></div>
+
+    <!-- N4 execute_query -->
+    <div class="gnode tooltip-wrap">
+      <div class="gnode-box">
+        <div class="gnode-label">Node 4</div>
+        <div class="gnode-name">execute_query</div>
+        <div class="gnode-sub">trino_client</div>
+      </div>
+      <div class="tooltip">
+        <strong>Thực thi truy vấn</strong><br>
+        · HOT → Flink SQL Gateway REST<br>
+        · WARM → Trino (Paimon catalog)<br>
+        · COLD → Trino PyTrino (Iceberg)<br>
+        · Fallback MinIO nếu SQL lỗi + wants_evidence
+      </div>
+    </div>
+
+    <div class="garrow"><div class="garrow-line"></div></div>
+
+    <!-- N5 should_retry + self_correct (gộp) -->
+    <div class="gnode tooltip-wrap">
+      <div class="gnode-box" style="border-color:var(--warm)">
+        <div class="gnode-label" style="color:var(--warm)">Node 5</div>
+        <div class="gnode-name">self_correct</div>
+        <div class="gnode-sub">max 3 retries</div>
+      </div>
+      <div class="tooltip">
+        <strong>Tự sửa lỗi SQL</strong><br>
+        · Kiểm tra success flag<br>
+        · Gửi error message cho Gemini → regenerate<br>
+        · Fallback: strip ORDER BY / bad columns<br>
+        · Vòng lặp: self_correct ↔ execute_query<br>
+        · Thoát sau 3 lần thất bại
+      </div>
+    </div>
+
+    <div class="garrow"><div class="garrow-line"></div></div>
+
+    <!-- N6 generate_response -->
+    <div class="gnode tooltip-wrap">
+      <div class="gnode-box">
+        <div class="gnode-label">Node 6</div>
+        <div class="gnode-name">generate_response</div>
+        <div class="gnode-sub">Gemini + format</div>
+      </div>
+      <div class="tooltip">
+        <strong>Sinh câu trả lời</strong><br>
+        · Format kết quả dạng Markdown tiếng Việt<br>
+        · Thêm frame_urls (image gallery) nếu evidence<br>
+        · Citation: source_table, layer, time_period<br>
+        · Gemini tổng hợp hoặc dùng template
+      </div>
+    </div>
+
+    <div class="garrow"><div class="garrow-line"></div></div>
+
+    <!-- END -->
+    <div class="gnode">
+      <div class="gnode-box" style="border-color:var(--accent);min-width:80px">
+        <div class="gnode-label" style="color:var(--accent)">END</div>
+        <div class="gnode-name" style="font-size:.75rem">ChatResponse</div>
+      </div>
+    </div>
+
+  </div>
+  <p style="text-align:center;font-size:.72rem;color:var(--muted);margin-top:.8rem">
+    ↑ Hover vào từng node để xem chi tiết • Nhánh retry: <strong>Node 5 ⇄ Node 4</strong> (tối đa 3 lần)
+  </p>
+</div>
+
+<div class="info">
+  <strong>AgentState</strong> là dictionary Python được truyền xuyên suốt tất cả các node, chứa toàn bộ thông tin: <code>user_query</code>, <code>time_period</code>, <code>selected_layer</code>, <code>generated_sql</code>, <code>query_result</code>, <code>retry_count</code>, <code>final_answer</code>, <code>frame_urls</code>...
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════
+     §3  LAYER ROUTING LOGIC
+════════════════════════════════════════════════════════════ -->
+<h2><span class="num">3</span>Logic chọn tầng lưu trữ (Layer Routing)</h2>
+
+<p>Đây là bước quyết định nhất: query sai tầng sẽ trả về rỗng hoặc sai dữ liệu. Hệ thống dùng <strong>3 chiến lược ưu tiên</strong> theo thứ tự:</p>
+
+<div class="routing-tree">
+  <!-- Input -->
+  <div class="rt-box rt-query">💬 Câu hỏi tiếng Việt</div>
+  <div class="rt-arrow">↓</div>
+
+  <!-- Regex -->
+  <div class="rt-box rt-regex">🔢 Numeric Regex (ưu tiên cao nhất)</div>
+  <div style="font-size:.75rem;color:var(--muted);margin:.25rem 0">
+    <code>(\d+)\s*(phút|giờ|ngày|tuần|tháng|hour|minute|day|week|month)</code>
+  </div>
+  <div class="rt-arrow">↓</div>
+
+  <!-- Branches -->
+  <div class="rt-row">
+    <div class="rt-branch">
+      <div class="rt-branch-item">
+        <div class="rt-label">Số &lt; 60 phút</div>
+        <div class="rt-vert"></div>
+        <div class="rt-box rt-fluss">🔥 Fluss HOT<br><small style="font-weight:400">Flink SQL Gateway</small></div>
+        <div class="rt-vert"></div>
+        <div style="font-size:.7rem;color:var(--muted)">32ms avg</div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div class="rt-label">1h ≤ khoảng ≤ 7 ngày</div>
+        <div class="rt-vert"></div>
+        <div class="rt-box rt-paimon">🌡️ Paimon WARM<br><small style="font-weight:400">Trino + Flink GW</small></div>
+        <div class="rt-vert"></div>
+        <div style="font-size:.7rem;color:var(--muted)">~1–3s avg</div>
+      </div>
+
+      <div class="rt-branch-item">
+        <div class="rt-label">Khoảng &gt; 7 ngày</div>
+        <div class="rt-vert"></div>
+        <div class="rt-box rt-iceberg">❄️ Iceberg COLD<br><small style="font-weight:400">Trino PyTrino</small></div>
+        <div class="rt-vert"></div>
+        <div style="font-size:.7rem;color:var(--muted)">5–30s avg</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h3>3.1 — Ví dụ routing thực tế</h3>
+<div class="card-grid card-grid-2">
+  <div class="card" style="border-left:3px solid var(--hot)">
+    <strong>→ Fluss HOT</strong>
+    <ul style="margin-top:.5rem">
+      <li><code>"30 phút qua"</code> → 30 phút → HOT</li>
+      <li><code>"45 phút gần đây"</code> → 45 phút → HOT</li>
+      <li><code>"bây giờ"</code>, <code>"real-time"</code></li>
+      <li><code>"1 giờ trước"</code> → 60 phút = ranh giới → HOT</li>
+    </ul>
+  </div>
+  <div class="card" style="border-left:3px solid var(--warm)">
+    <strong>→ Paimon WARM</strong>
+    <ul style="margin-top:.5rem">
+      <li><code>"2 giờ qua"</code> → 120 phút → WARM</li>
+      <li><code>"24 giờ"</code>, <code>"hôm nay"</code></li>
+      <li><code>"3 ngày qua"</code>, <code>"tuần này"</code></li>
+      <li><code>wants_evidence=True</code> → <strong>force WARM</strong> (frame_url chỉ có ở đây)</li>
+    </ul>
+  </div>
+  <div class="card" style="border-left:3px solid var(--cold)">
+    <strong>→ Iceberg COLD</strong>
+    <ul style="margin-top:.5rem">
+      <li><code>"tháng trước"</code> → ~30 ngày → COLD</li>
+      <li><code>"năm ngoái"</code>, <code>"quý 1"</code></li>
+      <li><code>"7 ngày qua"</code> → ranh giới → COLD</li>
+    </ul>
+  </div>
+  <div class="card" style="border-left:3px solid var(--gemini)">
+    <strong>Evidence Override (đặc biệt)</strong>
+    <ul style="margin-top:.5rem">
+      <li>Phát hiện: <code>ảnh, hình, bằng chứng, frame, video, chứng cứ</code></li>
+      <li>Nếu layer ≠ Paimon → <strong>bắt buộc override sang PAIMON</strong></li>
+      <li>Lý do: chỉ bảng <code>violence_incidents</code> (Paimon) có cột <code>frame_url</code></li>
+      <li>Token ngắn (<code>"anh"</code>) dùng word-boundary <code>\b</code> để tránh match "c<u>anh</u> báo"</li>
+    </ul>
+  </div>
+</div>
+
+<h3>3.2 — Code routing thực tế</h3>
+<pre><span class="cm"># Bước 1: Numeric regex — ưu tiên cao nhất</span>
+<span class="kw">pattern</span> = <span class="str">r'(\d+)\s*(phút|giờ|gio|hour|minute|day|ngày|week|tuần|month|tháng)'</span>
+<span class="kw">match</span> = re.search(pattern, time_period)
+<span class="kw">if</span> match:
+    num, unit = int(match.group(1)), match.group(2)
+    minutes = num * <span class="fn">unit_to_minutes</span>(unit)   <span class="cm"># phút=1, giờ=60, ngày=1440...</span>
+    <span class="kw">if</span>   minutes <= <span class="num">60</span>:    layer = <span class="str">"FLUSS"</span>
+    <span class="kw">elif</span> minutes <= <span class="num">10080</span>:  layer = <span class="str">"PAIMON"</span>   <span class="cm"># ≤ 7 ngày</span>
+    <span class="kw">else</span>:               layer = <span class="str">"ICEBERG"</span>
+
+<span class="cm"># Bước 2: Keyword patterns</span>
+<span class="kw">elif</span> any(kw <span class="kw">in</span> time_period <span class="kw">for</span> kw <span class="kw">in</span> [<span class="str">"tháng trước"</span>, <span class="str">"năm"</span>, <span class="str">"quý"</span>]):
+    layer = <span class="str">"ICEBERG"</span>
+<span class="kw">elif</span> any(kw <span class="kw">in</span> time_period <span class="kw">for</span> kw <span class="kw">in</span> [<span class="str">"hôm nay"</span>, <span class="str">"tuần trước"</span>]):
+    layer = <span class="str">"PAIMON"</span>
+
+<span class="cm"># Bước 3: Evidence override — LUÔN về Paimon</span>
+<span class="kw">if</span> state[<span class="str">"wants_evidence"</span>] <span class="kw">and</span> layer != <span class="str">"PAIMON"</span>:
+    layer = <span class="str">"PAIMON"</span>   <span class="cm"># frame_url chỉ có ở violence_incidents (Paimon)</span></pre>
+
+
+<!-- ══════════════════════════════════════════════════════════
+     §4  SQL GENERATION PER LAYER
+════════════════════════════════════════════════════════════ -->
+<h2><span class="num">4</span>Sinh SQL tự động (Text-to-SQL)</h2>
+
+<p>Node <code>generate_sql</code> gửi câu hỏi + schema + <strong>dialect hint</strong> tới Gemini để nhận SQL phù hợp với từng tầng. Mỗi tầng có syntax khác nhau.</p>
+
+<div class="tabs" id="sql-tabs">
+  <div class="tab active" onclick="switchTab('sql','fluss')">🔥 Fluss (Flink SQL)</div>
+  <div class="tab" onclick="switchTab('sql','paimon')">🌡️ Paimon (Trino SQL)</div>
+  <div class="tab" onclick="switchTab('sql','iceberg')">❄️ Iceberg (Trino SQL)</div>
+</div>
+<div class="tabpanel">
+  <div class="tab-content active" id="sql-fluss">
+    <h3>Schema (hot_violence_alerts)</h3>
+    <pre><span class="kw">incident_id</span>  STRING         <span class="cm">-- PK</span>
+<span class="kw">camera_id</span>    STRING
+<span class="kw">timestamp</span>    TIMESTAMP(3)
+<span class="kw">risk_score</span>   DOUBLE         <span class="cm">-- 0.0 – 1.0</span>
+<span class="kw">confidence</span>   DOUBLE
+<span class="kw">is_violent</span>   BOOLEAN
+<span class="kw">event_type</span>   STRING         <span class="cm">-- shooting, fighting, stabbing...</span>
+<span class="kw">location</span>     STRING         <span class="cm">-- từ temporal join dim_camera</span>
+<span class="kw">ward_id</span>      STRING
+<span class="kw">district</span>     STRING</pre>
+    <h3>Dialect rules (Gemini nhận được)</h3>
+    <ul>
+      <li>❌ <strong>KHÔNG dùng COUNT(*) hay SUM()</strong> — streaming job không đếm được dữ liệu cũ, luôn trả về 0. Thay vào đó dùng <code>LIMIT N</code> rồi đếm trong Python</li>
+      <li>❌ <strong>KHÔNG dùng ORDER BY</strong> — Flink streaming không hỗ trợ ORDER BY trên aggregate</li>
+      <li>✅ Dùng backtick: <code>`` `timestamp` ``</code> thay vì <code>"timestamp"</code></li>
+      <li>✅ Luôn có <code>LIMIT</code> (thường là 50–100) để bounded scan hoạt động</li>
+      <li>✅ Bắt buộc SELECT <code>location</code>, <code>ward_id</code>, <code>district</code></li>
+    </ul>
+    <h3>Ví dụ SQL tốt cho Fluss</h3>
+    <pre><span class="kw">SELECT</span> incident_id, camera_id, `timestamp`, risk_score, is_violent,
+       event_type, location, ward_id, district
+<span class="kw">FROM</span> `fluss`.`security`.`hot_violence_alerts`
+<span class="kw">WHERE</span> is_violent = <span class="kw">TRUE</span>
+<span class="kw">LIMIT</span> <span class="num">50</span></pre>
+  </div>
+
+  <div class="tab-content" id="sql-paimon">
+    <h3>Schema (violence_incidents)</h3>
+    <pre><span class="kw">incident_id</span>   STRING   PK
+<span class="kw">camera_id</span>     STRING
+<span class="kw">"timestamp"</span>   TIMESTAMP(3)
+<span class="kw">risk_score</span>    DOUBLE
+<span class="kw">confidence</span>    DOUBLE
+<span class="kw">is_violent</span>    BOOLEAN
+<span class="kw">event_type</span>    STRING
+<span class="kw">location</span>      STRING
+<span class="kw">is_deleted</span>    BOOLEAN
+<span class="kw">frame_url</span>     STRING   <span class="cm">-- URL ảnh bằng chứng (MinIO)</span></pre>
+    <h3>Dialect rules</h3>
+    <ul>
+      <li>✅ Standard Trino SQL — dùng double-quote: <code>"timestamp"</code></li>
+      <li>✅ COUNT(*), GROUP BY, ORDER BY đều hoạt động bình thường</li>
+      <li>✅ <code>TIMESTAMP '2026-05-22 08:00:00'</code> cho time filter</li>
+      <li>✅ Tham chiếu đầy đủ: <code>paimon.security.violence_incidents</code></li>
+    </ul>
+    <h3>Ví dụ SQL tốt cho Paimon</h3>
+    <pre><span class="kw">SELECT</span> camera_id, <span class="fn">COUNT</span>(*) <span class="kw">AS</span> total,
+       <span class="fn">AVG</span>(risk_score) <span class="kw">AS</span> avg_risk
+<span class="kw">FROM</span> paimon.security.violence_incidents
+<span class="kw">WHERE</span> is_violent = <span class="kw">TRUE</span>
+  <span class="kw">AND</span> <span class="str">"timestamp"</span> >= <span class="kw">TIMESTAMP</span> <span class="str">'2026-05-21 08:00:00'</span>
+<span class="kw">GROUP BY</span> camera_id
+<span class="kw">ORDER BY</span> total <span class="kw">DESC</span>
+<span class="kw">LIMIT</span> <span class="num">10</span></pre>
+  </div>
+
+  <div class="tab-content" id="sql-iceberg">
+    <h3>Schema (historical_violence_incidents)</h3>
+    <pre><span class="kw">incident_id</span>   VARCHAR
+<span class="kw">camera_id</span>     VARCHAR
+<span class="kw">"timestamp"</span>   TIMESTAMP(6) WITH TIME ZONE  <span class="cm">-- khác Paimon!</span>
+<span class="kw">risk_score</span>    DOUBLE
+<span class="kw">is_violent</span>    BOOLEAN
+<span class="kw">event_type</span>    VARCHAR
+<span class="kw">location</span>      VARCHAR</pre>
+    <h3>Dialect rules (khác biệt với Paimon)</h3>
+    <ul>
+      <li>✅ <code>TIMESTAMP(6) WITH TIME ZONE</code> — không phải TIMESTAMP(3)</li>
+      <li>✅ Dùng <code>NOW() - INTERVAL '7' DAY</code> cho time filter</li>
+      <li>✅ Tên bảng: <code>iceberg.security.historical_violence_incidents</code></li>
+      <li>⚠️ Nếu Gemini ghi sai tên bảng (e.g. <code>violence_incidents</code>) → <code>_adapt_sql_to_iceberg()</code> tự sửa</li>
+    </ul>
+    <h3>Ví dụ SQL tốt cho Iceberg</h3>
+    <pre><span class="kw">SELECT</span> camera_id, <span class="fn">COUNT</span>(*) <span class="kw">AS</span> total_incidents,
+       <span class="fn">SUM</span>(<span class="kw">CASE WHEN</span> is_violent <span class="kw">THEN</span> <span class="num">1</span> <span class="kw">ELSE</span> <span class="num">0</span> <span class="kw">END</span>) <span class="kw">AS</span> violent
+<span class="kw">FROM</span> iceberg.security.historical_violence_incidents
+<span class="kw">WHERE</span> <span class="str">"timestamp"</span> >= <span class="fn">NOW</span>() - <span class="kw">INTERVAL</span> <span class="str">'30'</span> <span class="kw">DAY</span>
+<span class="kw">GROUP BY</span> camera_id
+<span class="kw">ORDER BY</span> violent <span class="kw">DESC</span>
+<span class="kw">LIMIT</span> <span class="num">20</span></pre>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════
+     §5  SQL ADAPTATION (Fluss quirks)
+════════════════════════════════════════════════════════════ -->
+<h2><span class="num">5</span>SQL Adaptation — Quirks của Fluss</h2>
+
+<p>Flink SQL / Fluss có nhiều hạn chế so với Trino SQL. Trước khi gửi query tới Flink SQL Gateway, <code>trino_client._adapt_sql_for_flink_hot()</code> tự động sửa SQL:</p>
+
+<div class="sql-diff">
+  <div class="sql-diff-item">
+    <div class="sql-diff-title sql-diff-before">❌ SQL từ Gemini (chưa sửa)</div>
+    <pre style="font-size:.76rem">SELECT camera_id, COUNT(*) AS total
+FROM fluss.security.hot_violence_alerts
+WHERE is_violent = TRUE
+  AND <span style="background:#3a1215;border-radius:2px">timestamp >= TIMESTAMP '2026-05-22 08:00:00'</span>
+  AND <span style="background:#3a1215;border-radius:2px">timestamp <= NOW()</span>
+<span style="background:#3a1215;border-radius:2px">ORDER BY total DESC</span>
+LIMIT 50</pre>
+  </div>
+  <div class="sql-diff-item">
+    <div class="sql-diff-title sql-diff-after">✅ Sau khi adapt (gửi tới Flink)</div>
+    <pre style="font-size:.76rem">SELECT camera_id, <span style="background:#0d2010;border-radius:2px">incident_id, location</span>
+FROM `security`.`hot_violence_alerts`
+<span style="background:#0d2010;border-radius:2px"><span class="cm">-- WHERE timestamp filters STRIPPED</span></span>
+<span style="background:#0d2010;border-radius:2px"><span class="cm">-- ORDER BY STRIPPED</span></span>
+<span style="background:#0d2010;border-radius:2px"><span class="cm">-- COUNT() → đếm Python sau khi nhận rows</span></span>
+LIMIT 50</pre>
+  </div>
+</div>
+
+<h3>Lý do phải strip time filters</h3>
+<div class="warn">
+  Fluss thực hiện <strong>snapshot scan</strong> khi có <code>LIMIT</code>: đọc tất cả dữ liệu hiện có trong partition rồi dừng. Nếu thêm <code>WHERE timestamp >= ...</code>, Flink hiểu đây là streaming scan và chỉ trả về các event mới tới SAU khi query bắt đầu — tức là không có dữ liệu nào. Ngoài ra, toàn bộ data trong Fluss (retention 1-2h) đều đã là "hot" nên filtering theo time không cần thiết.
+</div>
+
+<h3>Các transformation khác</h3>
+<table class="layer-table" style="font-size:.83rem">
+  <thead><tr><th>Input</th><th>Sau adapt</th><th>Lý do</th></tr></thead>
+  <tbody>
+    <tr><td><code>fluss.security.hot_violence_alerts</code></td><td><code>`security`.`hot_violence_alerts`</code></td><td>Session đã <code>USE CATALOG fluss</code></td></tr>
+    <tr><td><code>"timestamp"</code> (double-quote)</td><td><code>`timestamp`</code> (backtick)</td><td>Flink dùng backtick, Trino dùng double-quote</td></tr>
+    <tr><td><code>WHERE timestamp &gt;= ... AND timestamp &lt;= ...</code></td><td>Xóa hoàn toàn</td><td>Breaks snapshot scan</td></tr>
+    <tr><td><code>BETWEEN TIMESTAMP '...' AND TIMESTAMP '...'</code></td><td>Xóa hoàn toàn</td><td>Breaks snapshot scan</td></tr>
+    <tr><td><code>WHERE is_violent = TRUE</code></td><td>Xóa</td><td>~2% violent → trả về quá ít rows</td></tr>
+    <tr><td><code>frame_url, frame_data</code></td><td>Xóa khỏi SELECT</td><td>Cột không tồn tại trong hot_violence_alerts</td></tr>
+    <tr><td><code>ORDER BY x DESC</code></td><td>Xóa</td><td>Flink streaming không hỗ trợ</td></tr>
+  </tbody>
+</table>
+
+
+<!-- ══════════════════════════════════════════════════════════
+     §6  QUERY EXECUTION PER LAYER
+════════════════════════════════════════════════════════════ -->
+<h2><span class="num">6</span>Thực thi query theo từng tầng</h2>
+
+<div class="card-grid card-grid-3">
+
+  <div class="card" style="border-top:3px solid var(--hot)">
+    <h3 style="color:var(--hot)">🔥 HOT — Fluss via SQL Gateway</h3>
+    <div class="steps">
+      <div class="step">
+        <div class="step-dot">1</div>
+        <div class="step-title">Tái sử dụng session (cache 30 min)</div>
+        <div class="step-body">Tránh 3 DDL roundtrips (CREATE CATALOG + USE CATALOG + USE schema) mỗi query</div>
+      </div>
+      <div class="step">
+        <div class="step-dot">2</div>
+        <div class="step-title">Dọn zombie 'collect' jobs</div>
+        <div class="step-body">Cancel các Flink 'collect' job cũ còn chạy để tránh hết task slots</div>
+      </div>
+      <div class="step">
+        <div class="step-dot">3</div>
+        <div class="step-title">POST statement → poll /status</div>
+        <div class="step-body">Gửi SQL qua REST, poll tới khi status=FINISHED</div>
+      </div>
+      <div class="step">
+        <div class="step-dot">4</div>
+        <div class="step-title">GET /result/0 → rows</div>
+        <div class="step-body">Bounded scan: data có ngay ở token 0. Dedup UPDATE_AFTER cho streaming aggregates</div>
+      </div>
+    </div>
+    <div class="info" style="margin-top:.5rem">Latency: <strong style="color:var(--hot)">32ms</strong> avg (warm session)</div>
+  </div>
+
+  <div class="card" style="border-top:3px solid var(--warm)">
+    <h3 style="color:var(--warm)">🌡️ WARM — Paimon via Trino</h3>
+    <div class="steps">
+      <div class="step">
+        <div class="step-dot">1</div>
+        <div class="step-title">Convert backticks → double-quotes</div>
+        <div class="step-body">Trino dùng <code>"timestamp"</code>, Flink dùng <code>`timestamp`</code></div>
+      </div>
+      <div class="step">
+        <div class="step-dot">2</div>
+        <div class="step-title">Trino query (paimon catalog)</div>
+        <div class="step-body"><code>catalog="paimon"</code>, <code>schema="security"</code></div>
+      </div>
+      <div class="step">
+        <div class="step-dot">3</div>
+        <div class="step-title">PyTrino fetchall()</div>
+        <div class="step-body">Trả về list[dict] với column names từ <code>cursor.description</code></div>
+      </div>
+    </div>
+    <div class="warn" style="margin-top:.5rem">
+      <strong>Lưu ý:</strong> Paimon-Trino connector (<code>paimon-trino-476</code>) chưa có trên Maven Central → queries dài sẽ fallback qua Flink SQL Gateway
+    </div>
+  </div>
+
+  <div class="card" style="border-top:3px solid var(--cold)">
+    <h3 style="color:var(--cold)">❄️ COLD — Iceberg via Trino</h3>
+    <div class="steps">
+      <div class="step">
+        <div class="step-dot">1</div>
+        <div class="step-title">Adapt table references</div>
+        <div class="step-body">Rename <code>violence_incidents</code> → <code>historical_violence_incidents</code>; tổng hợp aggregation tables về raw table</div>
+      </div>
+      <div class="step">
+        <div class="step-dot">2</div>
+        <div class="step-title">Extract time filter</div>
+        <div class="step-body">Tái xây dựng: <code>timestamp &gt;= NOW() - INTERVAL 'N' UNIT</code></div>
+      </div>
+      <div class="step">
+        <div class="step-dot">3</div>
+        <div class="step-title">Trino query (iceberg catalog)</div>
+        <div class="step-body">PyTrino với <code>catalog="iceberg"</code> → đọc Parquet từ MinIO</div>
+      </div>
+    </div>
+    <div class="info" style="margin-top:.5rem">Data chỉ có sau archival (chạy lúc 02:00 UTC, di chuyển data &gt;7 ngày từ Paimon)</div>
+  </div>
+
+</div>
+
+<h3>Fallback khi infrastructure lỗi</h3>
+<pre><span class="kw">def</span> <span class="fn">route_query</span>(sql, layer):
+    <span class="kw">try</span>:
+        <span class="kw">if</span> <span class="str">"FLUSS"</span> <span class="kw">in</span> layer:   <span class="kw">return</span> <span class="fn">query_fluss</span>(sql)
+        <span class="kw">if</span> <span class="str">"PAIMON"</span> <span class="kw">in</span> layer:  <span class="kw">return</span> <span class="fn">query_paimon</span>(sql)
+        <span class="kw">if</span> <span class="str">"ICEBERG"</span> <span class="kw">in</span> layer: <span class="kw">return</span> <span class="fn">query_iceberg</span>(sql)
+    <span class="kw">except</span> <span class="cls">InfraError</span>:   <span class="cm"># connection refused, catalog_not_found, 500...</span>
+        log.warning(<span class="str">"Layer unavailable → fallback to Iceberg"</span>)
+        <span class="kw">return</span> <span class="fn">query_iceberg</span>(<span class="fn">adapt_to_iceberg</span>(sql))</pre>
+
+
+<!-- ══════════════════════════════════════════════════════════
+     §7  SELF-CORRECTION LOOP
+════════════════════════════════════════════════════════════ -->
+<h2><span class="num">7</span>Self-Correction — Tự sửa lỗi SQL</h2>
+
+<p>Khi query thất bại (cột không tồn tại, syntax lỗi, timeout...), hệ thống không im lặng mà tự sửa tối đa <strong>3 lần</strong> trước khi báo lỗi cho người dùng.</p>
+
+<div class="retry-wrap">
+  <div class="retry-row">
+    <div class="rbox rbox-exec">⚡ execute_query</div>
+    <div class="rarrow">→</div>
+    <div class="rbox rbox-check">🔍 should_retry?</div>
+    <div class="rarrow">→</div>
+    <div class="rbox rbox-resp">✅ generate_response</div>
+  </div>
+  <div style="font-size:.72rem;color:var(--muted);text-align:center">
+    (success=True <strong>hoặc</strong> retry_count ≥ 3)
+  </div>
+
+  <div style="width:2px;height:20px;background:var(--warn-b);margin:0 auto"></div>
+
+  <div class="retry-loop">
+    🔄 <strong>Retry loop</strong> — nếu success=False &amp;&amp; retry_count &lt; 3
+    <div style="margin-top:.5rem;display:flex;align-items:center;justify-content:center;gap:1rem;flex-wrap:wrap">
+      <div class="rbox rbox-correct" style="font-size:.75rem;padding:.35rem .7rem">
+        🤖 self_correct<br><small>Gemini phân tích lỗi</small>
+      </div>
+      <div class="rarrow">→</div>
+      <div class="rbox rbox-exec" style="font-size:.75rem;padding:.35rem .7rem">
+        ⚡ execute_query<br><small>thử lại SQL mới</small>
+      </div>
+      <div class="rarrow">→</div>
+      <div class="rbox rbox-check" style="font-size:.75rem;padding:.35rem .7rem">
+        🔍 check lại
+      </div>
+    </div>
+  </div>
+
+  <div style="width:2px;height:20px;background:var(--hot-b);margin:0 auto"></div>
+  <div class="rbox rbox-fail" style="font-size:.78rem">
+    ❌ Thất bại sau 3 lần → generate_response báo lỗi rõ ràng
+  </div>
+</div>
+
+<h3>Chiến lược tự sửa</h3>
+<div class="card-grid card-grid-2">
+  <div class="card">
+    <strong>🤖 Gemini-guided correction</strong>
+    <p style="margin-top:.5rem">Gửi: <em>câu hỏi gốc + SQL lỗi + error message</em> → Gemini sinh SQL mới đúng hơn. Ví dụ: nếu lỗi là <code>Column 'frame_url' not found</code>, Gemini sẽ bỏ cột đó ra khỏi SELECT.</p>
+  </div>
+  <div class="card">
+    <strong>🔧 Rule-based fallback</strong>
+    <p style="margin-top:.5rem">Nếu Gemini API lỗi, dùng regex đơn giản: xóa <code>ORDER BY</code>, xóa cột lạ khỏi SELECT, đổi tên bảng sai, strip <code>TIMESTAMP</code> filter. Ít thông minh hơn nhưng nhanh và không phụ thuộc AI.</p>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════
+     §8  EVIDENCE RETRIEVAL
+════════════════════════════════════════════════════════════ -->
+<h2><span class="num">8</span>Evidence Retrieval — Truy xuất ảnh bằng chứng</h2>
+
+<p>Khi người dùng hỏi về <strong>ảnh / bằng chứng</strong> (<code>ảnh, hình, bằng chứng, frame, video, chứng cứ</code>), hệ thống thực hiện luồng đặc biệt để trả về URL ảnh từ MinIO.</p>
+
+<div class="steps">
+  <div class="step">
+    <div class="step-dot">1</div>
+    <div class="step-title">Phát hiện intent (understand_query)</div>
+    <div class="step-body">
+      Regex với word-boundary: <code>r'\b(ảnh|hình|bằng chứng|frame|video|chứng cứ)\b'</code><br>
+      Token ngắn như <code>"anh"</code> → <code>\banh\b</code> để tránh match sai trong "c<strong>anh</strong> báo"
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-dot">2</div>
+    <div class="step-title">Force layer = PAIMON (select_data_layer)</div>
+    <div class="step-body">
+      Cột <code>frame_url</code> chỉ có trong bảng <code>paimon.security.violence_incidents</code> → luôn override sang PAIMON dù time_period ngắn đến đâu
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-dot">3</div>
+    <div class="step-title">Thực thi query Paimon (execute_query)</div>
+    <div class="step-body">
+      SQL include <code>frame_url</code>. Rows có <code>frame_url != null</code> → thu thập vào <code>evidence_urls[]</code>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-dot">4</div>
+    <div class="step-title">Fallback về MinIO nếu SQL fail</div>
+    <div class="step-body">
+      Nếu Paimon query lỗi nhưng <code>wants_evidence=True</code> → <code>EvidenceService.list_recent_frames()</code> → list trực tiếp từ MinIO bucket <code>evidence-frames</code>
+    </div>
+  </div>
+  <div class="step">
+    <div class="step-dot">5</div>
+    <div class="step-title">Trả kết quả có ảnh (generate_response)</div>
+    <div class="step-body">
+      Response JSON chứa <code>frame_urls[]</code> (list URL) và <code>frame_base64</code> (ảnh đơn encode base64 nếu 1 incident).<br>
+      MinIO path pattern: <code>evidence-frames/{camera_id}/{YYYY-MM-DD}/{uuid}.jpg</code>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════
+     §9  REQUEST → RESPONSE FLOW
+════════════════════════════════════════════════════════════ -->
+<h2><span class="num">9</span>Luồng Request → Response đầy đủ</h2>
+
+<div class="card" style="font-family:monospace;font-size:.82rem;line-height:2">
+<div style="color:var(--accent)">POST /chat  {"query": "30 phút qua có bao nhiêu vụ bạo lực ở Quận 1?"}</div>
+<div style="margin-left:1rem;color:var(--muted)">↓ FastAPI nhận ChatRequest, khởi tạo AgentState</div>
+<div style="margin-left:1rem;color:var(--gemini)">↓ [Node 1] understand_query → time_period="30 phút", location="Quận 1"</div>
+<div style="margin-left:1rem;color:var(--gemini)">↓ [Node 2] select_data_layer → 30 phút &lt; 60 → layer=<span style="color:var(--hot)">FLUSS</span></div>
+<div style="margin-left:1rem;color:var(--gemini)">↓ [Node 3] generate_sql → Gemini sinh Flink SQL (no COUNT, LIMIT 50)</div>
+<div style="margin-left:1rem;color:var(--green)">↓ [Node 4] execute_query → adapt SQL → Flink SQL Gateway REST</div>
+<div style="margin-left:2rem;color:var(--muted)">→ Reuse session cache (tiết kiệm ~5s DDL)</div>
+<div style="margin-left:2rem;color:var(--muted)">→ Cancel zombie 'collect' jobs</div>
+<div style="margin-left:2rem;color:var(--muted)">→ POST statement → poll status → GET /result/0</div>
+<div style="margin-left:2rem;color:var(--muted)">→ Nhận 50 rows, đếm violent=TRUE trong Python → total=12</div>
+<div style="margin-left:1rem;color:var(--warm)">↓ [Node 5] should_retry? → success=True → bỏ qua self_correct</div>
+<div style="margin-left:1rem;color:var(--gemini)">↓ [Node 6] generate_response → Gemini format tiếng Việt</div>
+<div style="margin-left:1rem;color:var(--accent)">↓ ChatResponse: answer + sql_used + citations + layer=Fluss + duration_ms=32</div>
+<div style="color:var(--green);margin-top:.3rem">{
+  "answer": "Trong 30 phút qua tại Quận 1 có 12 vụ bạo lực được ghi nhận...",
+  "layer": "Fluss",
+  "sql_used": "SELECT ... FROM hot_violence_alerts LIMIT 50",
+  "citations": ["hot_violence_alerts (Fluss)", "30 phút", "12 hàng"],
+  "duration_ms": 32
+}</div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════
+     §10  API ENDPOINTS
+════════════════════════════════════════════════════════════ -->
+<h2><span class="num">10</span>API Endpoints</h2>
+
+<table class="layer-table" style="font-size:.83rem">
+  <thead>
+    <tr><th>Endpoint</th><th>Method</th><th>Mô tả</th></tr>
+  </thead>
+  <tbody>
+    <tr class="hot-row">
+      <td><code>/chat</code></td><td>POST</td>
+      <td>Main chatbot — nhận <code>{"query": "..."}</code>, trả <code>{"answer", "sql_used", "layer", "frame_urls"}</code></td>
+    </tr>
+    <tr>
+      <td><code>/webhook/chat</code></td><td>POST</td>
+      <td>Tương tự <code>/chat</code>, dùng cho tích hợp n8n workflow</td>
+    </tr>
+    <tr class="warm-row">
+      <td><code>/api/layer-counts</code></td><td>GET</td>
+      <td>Row count xấp xỉ: <code>{"hot": N, "warm": N, "cold": N}</code></td>
+    </tr>
+    <tr class="warm-row">
+      <td><code>/api/latency</code></td><td>GET</td>
+      <td>Đo round-trip latency thực: <code>{"hot": {"latency_ms": 32, "ok": true, ...}}</code></td>
+    </tr>
+    <tr class="cold-row">
+      <td><code>/api/recent-incidents</code></td><td>GET</td>
+      <td>Các sự kiện mới nhất từ Iceberg + frame_url từ MinIO</td>
+    </tr>
+    <tr>
+      <td><code>/api/evidence/{incident_id}/frame</code></td><td>GET</td>
+      <td>Ảnh bằng chứng cho 1 incident cụ thể (URL hoặc base64)</td>
+    </tr>
+    <tr>
+      <td><code>/api/union-read</code></td><td>GET</td>
+      <td>Federated read cả 3 tầng: HOT (1h) + WARM (1h-7d) + COLD (7d+)</td>
+    </tr>
+    <tr>
+      <td><code>/api/stats</code></td><td>GET</td>
+      <td>Thống kê tổng hợp: hourly trends, top locations, event types</td>
+    </tr>
+    <tr>
+      <td><code>/metrics</code></td><td>GET</td>
+      <td>Prometheus metrics: <code>chatbot_query_duration_seconds</code> (by layer), <code>chatbot_queries_total</code></td>
+    </tr>
+    <tr>
+      <td><code>/health</code></td><td>GET</td>
+      <td>Service status + sub-services (Trino, Fluss, MinIO)</td>
+    </tr>
+  </tbody>
+</table>
+
+
+<!-- ══════════════════════════════════════════════════════════
+     §11  GIỚI HẠN VÀ ĐẶC ĐIỂM CẦN LƯU Ý
+════════════════════════════════════════════════════════════ -->
+<h2><span class="num">11</span>Giới hạn và đặc điểm cần lưu ý</h2>
+
+<div class="card-grid card-grid-2">
+  <div class="card">
+    <h3>⚡ HOT layer</h3>
+    <ul>
+      <li><strong>COUNT(*) luôn = 0</strong> cho dữ liệu cũ — chỉ đếm event mới từ lúc query bắt đầu. Fix: LIMIT + đếm Python.</li>
+      <li>Session cache 30 phút — query đầu sau restart tốn thêm ~5s để khởi tạo Fluss catalog</li>
+      <li>Zombie 'collect' jobs cần dọn trước mỗi query</li>
+      <li>Không có <code>frame_url</code>, <code>date_id</code></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>🌡️ WARM layer</h3>
+    <ul>
+      <li>Data chỉ có sau khi tiering chạy (mỗi 30 phút)</li>
+      <li>Data mới (&lt;2h) vẫn còn trong Fluss HOT, chưa tier sang Paimon</li>
+      <li>Paimon-Trino connector bị disable → fallback Flink SQL Gateway (~3-5 phút/query)</li>
+      <li>Evidence query (<code>wants_evidence</code>) luôn force WARM</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>❄️ COLD layer</h3>
+    <ul>
+      <li>Data chỉ có sau archival (chạy 02:00 UTC, data &gt;7 ngày)</li>
+      <li>Fresh stack = 0 rows trong Iceberg — hoàn toàn bình thường</li>
+      <li>Iceberg schema <code>security</code> không tồn tại trước archival đầu tiên</li>
+      <li>TIMESTAMP(6) WITH TIME ZONE — khác với Paimon TIMESTAMP(3)</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>🤖 Chatbot chung</h3>
+    <ul>
+      <li>Latency phụ thuộc Gemini API (~1-3s mỗi lần gọi) — 1 query có thể gọi Gemini 2-4 lần</li>
+      <li>Tiếng Việt có nhiều dạng (giờ/gio/h, ngày/day/d) — regex phải cover nhiều variant</li>
+      <li>COLD query tốn nhiều thời gian nhất (~30-180s) do Trino đọc Parquet từ MinIO</li>
+      <li>Đọc <code>docs/agent-guides/agentic-rag.md</code> để biết thêm chi tiết</li>
+    </ul>
+  </div>
+</div>
+
+</div><!-- /page -->
+
+<script>
+function switchTab(group, id) {
+  // Find all tabs and contents in the vicinity
+  const tabs = document.querySelectorAll('#sql-tabs .tab');
+  const contents = document.querySelectorAll('.tab-content');
+  tabs.forEach(t => t.classList.remove('active'));
+  contents.forEach(c => c.classList.remove('active'));
+  // Activate matching
+  tabs.forEach(t => {
+    if (t.getAttribute('onclick') && t.getAttribute('onclick').includes(id)) {
+      t.classList.add('active');
+    }
+  });
+  const target = document.getElementById('sql-' + id);
+  if (target) target.classList.add('active');
+}
+</script>
+</body>
+</html>
