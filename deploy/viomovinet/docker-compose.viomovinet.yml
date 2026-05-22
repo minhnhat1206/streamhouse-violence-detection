@@ -1,0 +1,56 @@
+# =============================================================================
+# VioMoViNet — GPU Inference Machine Compose
+# Run on a machine with NVIDIA GPU + CUDA 12.x
+# Usage: docker compose -f deploy/viomovinet/docker-compose.viomovinet.yml up -d
+# Requires: docker compose plugin, NVIDIA Container Toolkit
+# =============================================================================
+
+services:
+
+  # ─── VioMoViNet Inference ─────────────────────────────────────────────────
+  viomovinet:
+    container_name: viomovinet
+    image: huy-dataguy/viomovinet:latest  # Build from github.com/huy-dataguy/VioMoViNet
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    env_file:
+      - kafka-bridge.env        # Kafka + MinIO connection to Oracle Cloud
+    volumes:
+      - ./models:/app/models    # Pre-downloaded model weights
+      - viomovinet-logs:/app/logs
+    ports:
+      - "8001:8001"  # HIGH server (high-confidence model)
+      - "8002:8002"  # LOW_MED server (low/medium model)
+    deploy:
+      resources:
+        limits:
+          memory: 6g
+          cpus: "4.00"
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── Local Redis (camera dedup cache) ─────────────────────────────────────
+  redis:
+    container_name: redis-viomovinet
+    image: redis:7-alpine
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          memory: 320m
+          cpus: "0.25"
+    restart: unless-stopped
+
+volumes:
+  viomovinet-logs:
