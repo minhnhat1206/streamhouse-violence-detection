@@ -44,6 +44,57 @@ Xây dựng và tối ưu hóa hệ thống phát hiện bạo lực thời gian
 ## 🤝 Handover Protocol (MUST READ)
 *Mỗi khi chuyển đổi Agent (Gemini <-> Claude), Agent hiện tại PHẢI cập nhật phần "Last State" bên dưới.*
 
+### 📍 Last State (Updated: 2026-05-22 — Phiên 40) 🧹 Cleanup + Reset + Documentation
+
+- **Agent vừa làm:** Claude (Session 40 — Cleanup, Hard Reset, WSL Disk Cleanup, README)
+- **Trạng thái:** Codebase sạch, volumes reset, docs hoàn chỉnh — sẵn sàng cho thesis finalization
+- **Nhánh git:** `devNhat` — commits: `d925357` (cleanup), `2e8d525` (docs + Dockerfile fixes)
+- **Disk:** freed ~7.3GB on Windows (62GB Docker images removed; WSL VHD sparse-compacted)
+
+#### Session 40 — What was done:
+
+**Phase 1 — File Cleanup (54 files, 5522 lines deleted)**
+- Deleted old Flink sinks: `sink_to_fluss.py`, `sink_to_paimon.py`, `sink_to_paimon_star.py`, `bronze.py`, `gold.py`
+- Deleted old streaming simulators: `simulateRTSP.py`, `metadataRTSP.py`, `producerRTSP.py`
+- Deleted temp directories: `e2e-test-dashboard/`, `tmp/`
+- Deleted Claude worktree: `.claude/worktrees/loving-lederberg-714daa/`
+
+**Phase 2 — Hard Reset Data**
+- All Docker volumes deleted: kafka-data, minio_data, mysql-data, fluss-tablet-*, chroma_data, grafana-storage, etc.
+- All containers stopped and removed
+- Clean slate for Phase 4 restart
+
+**Phase 3 — Disk Cleanup**
+- 62GB Docker images removed (27.73GB freed inside VHD)
+- WSL2 VHD marked sparse + compacted
+- Result: 28.5GB → 36GB free on C: drive (+7.5GB)
+
+**Phase 4 — Stack Restart**
+- `violence-detection-net` re-created (was deleted by system prune)
+- kafka, minio, mysql pulled fresh and started (healthy)
+- Full stack building in background (images re-pulled/rebuilt)
+
+**Phase 5 — Documentation**
+- `README.md` — Complete rewrite: architecture, quick start, API reference, port table, troubleshooting
+- `QUICKSTART.md` — New: 5-minute setup guide for new users
+- `CONTRIBUTING.md` — New: code conventions, commit style, resource budget, testing guide
+- `docker/Dockerfile.producer` — Fixed: removed COPY of deleted `producerRTSP.py`
+- `docker/docker-compose.yml` — Fixed: removed obsolete `producer` service and `producer-tmp` volume
+
+#### Stack state after session 40:
+- Core services running: kafka ✅ (healthy), minio ✅ (healthy), mysql ✅ (healthy)
+- Full stack build in progress (hive-metastore, flink, fluss, trino, chatbot being pulled/built)
+- All data volumes empty — pipeline-manager will re-init tables on startup
+- Git: 2 commits ahead of pre-session-40 state
+
+#### Next steps (Session 41):
+1. Verify full stack startup completes (pipeline-manager submits all 3 Flink jobs)
+2. Run E2E test suite to confirm 22/23 still passes on clean data
+3. Begin thesis finalization: architecture chapter, performance benchmarks
+4. Create system diagrams for thesis document
+
+---
+
 ### 📍 Last State (Updated: 2026-05-22 — Phiên 39) ✅ 22/23 PASS — Chatbot routing fully fixed
 
 - **Agent vừa làm:** Claude (Session 39 — Fix BUG-A + BUG-B + T6.4 boundary test)
