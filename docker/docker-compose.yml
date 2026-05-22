@@ -216,32 +216,6 @@ services:
       - violence-detection-net
     restart: on-failure
 
-  # --- Producer (optional — real RTSP producer) ---
-  producer:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.producer
-    container_name: producer
-    profiles: [streaming]
-    environment:
-      MINIO_ENDPOINT: minio:9000
-      KAFKA_BROKER: kafka:9092
-    networks:
-      - violence-detection-net
-    volumes:
-      - ../scripts/streaming:/app/scripts
-      - ../data:/app/data
-      - producer-tmp:/app/tmp
-    depends_on:
-      kafka:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 256m
-          cpus: "0.50"
-    restart: on-failure
-
   # --- Mock Inference (generates test data without RTSP — fallback when streaming profile is off) ---
   # When --profile streaming is active, stop this to avoid duplicate data:
   #   docker exec inference-mock touch /app/tmp/STOP
@@ -866,7 +840,6 @@ volumes:
   grafana-storage:
   chroma_data:
   chroma_model_cache:  # Persists ONNX models (~79MB) across container restarts
-  producer-tmp:
   inference-tmp:
   rtsp-inference-tmp:
   rtsp-pusher-tmp:
