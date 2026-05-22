@@ -44,11 +44,9 @@ from .agent import (
     create_agent_graph, AgentState, set_components, LayerChoice, IntentSchema,
     QueryResult
 )
-from .components.chromadb_wrapper import ChromaDBWrapper, get_default_schemas
 from .components.trino_client import TrinoClient
 from .components.sql_generator import SQLGenerator
 from .components.evidence_service import EvidenceService
-from .components.data_ingest import DataIngestor
 
 # Initialize logger
 logger = setup_logger(__name__)
@@ -57,11 +55,9 @@ logger = setup_logger(__name__)
 agent_graph = None
 app_state = {
     "initialized": False,
-    "chromadb": None,
     "trino_client": None,
     "sql_generator": None,
     "evidence_service": None,
-    "data_ingestor": None,
 }
 
 
@@ -159,24 +155,6 @@ async def lifespan(app: FastAPI):
         validate_config()
         logger.info("✓ Configuration validated")
 
-        # Initialize ChromaDB
-        logger.info("Initializing ChromaDB...")
-        chromadb = ChromaDBWrapper(persist_dir=settings.CHROMA_DIR)
-        app_state["chromadb"] = chromadb
-
-        # Ingest schemas
-        try:
-            schemas = get_default_schemas()
-            for table_name, schema_def in schemas.items():
-                chromadb.ingest_schema(
-                    table_name=table_name,
-                    columns=schema_def["columns"],
-                    description=schema_def.get("description")
-                )
-            logger.info("✓ ChromaDB initialized with schemas")
-        except Exception as e:
-            logger.warning(f"ChromaDB ingest failed: {e}")
-
         # Initialize Trino Client
         logger.info("Initializing Trino Client...")
         trino_client = TrinoClient(
@@ -212,15 +190,8 @@ async def lifespan(app: FastAPI):
         app_state["evidence_service"] = evidence_service
         logger.info("✓ Evidence Service initialized")
 
-        # Initialize Data Ingestor
-        logger.info("Initializing Data Ingestor...")
-        data_ingestor = DataIngestor(chromadb, ingest_interval_seconds=300)
-        data_ingestor.start()
-        app_state["data_ingestor"] = data_ingestor
-        logger.info("✓ Data Ingestor started")
-
         # Set components in agent module
-        set_components(chromadb, trino_client, sql_generator, evidence_service)
+        set_components(trino_client, sql_generator, evidence_service)
 
         # Create LangGraph agent
         logger.info("Creating LangGraph agent...")
@@ -241,14 +212,6 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("🛑 Chatbot API shutting down...")
     app_state["initialized"] = False
-
-    # Stop data ingestor
-    if app_state.get("data_ingestor"):
-        try:
-            import asyncio
-            asyncio.run(app_state["data_ingestor"].stop())
-        except Exception as e:
-            logger.warning(f"Error stopping data ingestor: {e}")
 
     logger.info("✓ Shutdown complete")
 

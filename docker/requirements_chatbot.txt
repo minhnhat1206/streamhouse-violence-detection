@@ -4,7 +4,5 @@ minio
 pandas
 pyarrow
 numpy
-chromadb
-sentence-transformers
 google-generativeai
 python-dotenv

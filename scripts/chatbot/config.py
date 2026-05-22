@@ -33,20 +33,6 @@ class Settings(BaseSettings):
         description="Gemini model name"
     )
 
-    # ChromaDB Configuration
-    CHROMA_DIR: str = Field(
-        default="/data/chroma",
-        description="ChromaDB persistence directory"
-    )
-    EMBEDDING_MODEL: str = Field(
-        default="sentence-transformers/all-MiniLM-L6-v2",
-        description="Embedding model name"
-    )
-    CHROMA_COLLECTION_NAME: str = Field(
-        default="violence_detection_rag",
-        description="ChromaDB collection name"
-    )
-
     # Trino Configuration
     TRINO_HOST: str = Field(
         default="localhost",
@@ -97,20 +83,6 @@ class Settings(BaseSettings):
         description="Flink SQL Gateway port"
     )
 
-    # Data Ingest Configuration
-    ICEBERG_BUCKET: str = Field(
-        default="warehouse",
-        description="MinIO bucket for data warehouse"
-    )
-    ICEBERG_PREFIX: str = Field(
-        default="paimon",
-        description="Prefix for Paimon data"
-    )
-    INGEST_INTERVAL_SECONDS: int = Field(
-        default=300,
-        description="Background ingest loop interval"
-    )
-
     # Agent Configuration
     MAX_RETRIES: int = Field(
         default=3,
@@ -141,7 +113,7 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
         case_sensitive = True
 
-    @field_validator("API_PORT", "TRINO_PORT", "INGEST_INTERVAL_SECONDS")
+    @field_validator("API_PORT", "TRINO_PORT")
     @classmethod
     def validate_positive_int(cls, v):
         """Ensure positive integers."""
@@ -195,14 +167,6 @@ def validate_config() -> None:
 
     if not settings.MINIO_ROOT_USER or not settings.MINIO_ROOT_PASSWORD:
         errors.append("MinIO credentials (MINIO_ROOT_USER, MINIO_ROOT_PASSWORD) are required")
-
-    # Check directories
-    if not os.path.exists(settings.CHROMA_DIR):
-        try:
-            os.makedirs(settings.CHROMA_DIR, exist_ok=True)
-            print(f"✓ Created ChromaDB directory: {settings.CHROMA_DIR}")
-        except Exception as e:
-            errors.append(f"Cannot create CHROMA_DIR: {e}")
 
     # Raise all errors at once
     if errors:

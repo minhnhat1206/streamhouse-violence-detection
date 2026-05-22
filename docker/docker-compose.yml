@@ -730,11 +730,6 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_MODEL=gemini-2.5-flash
 
-      # ChromaDB Configuration
-      - CHROMA_DIR=/data/chroma
-      - EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
-      - CHROMA_COLLECTION_NAME=violence_detection_rag
-
       # Trino Configuration
       - TRINO_HOST=trino-coordinator
       - TRINO_PORT=8080
@@ -754,19 +749,12 @@ services:
       # Public URL for evidence frames (host-accessible, port 9000)
       - MINIO_PUBLIC_URL=${MINIO_PUBLIC_URL:-http://localhost:9000}
 
-      # Data Ingest Configuration
-      - ICEBERG_BUCKET=${ICEBERG_BUCKET}
-      - ICEBERG_PREFIX=${ICEBERG_PREFIX}
-      - INGEST_INTERVAL_SECONDS=300
-
       # Agent Configuration
       - MAX_RETRIES=3
       - QUERY_TIMEOUT_SECONDS=30
       - RESPONSE_TIMEOUT_SECONDS=60
 
     volumes:
-      - chroma_data:/data/chroma
-      - chroma_model_cache:/root/.cache/chroma  # Cache ONNX models — avoids 79MB re-download on restart
       - frame-extractor-tmp:/app/tmp
 
     ports:
@@ -809,8 +797,6 @@ volumes:
   minio_data:
   mysql-data:
   grafana-storage:
-  chroma_data:
-  chroma_model_cache:  # Persists ONNX models (~79MB) across container restarts
   rtsp-inference-tmp:
   rtsp-pusher-tmp:
   frame-extractor-tmp:
