@@ -1,10 +1,13 @@
 apiVersion: 1
 providers:
-  - name: 'Spark Pipeline Dashboards'
+  - name: 'Streamhouse Security Dashboards'
     orgId: 1
-    folder: ''
+    folder: 'Streamhouse'
+    folderUid: 'streamhouse-folder'
     type: file
     disableDeletion: false
     editable: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
     options:
       path: /etc/grafana/provisioning/dashboards

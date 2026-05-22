@@ -11,19 +11,23 @@ scrape_configs:
     static_configs:
       - targets: ['node-exporter:9100']
 
-  # Flink JobManager — job overview via JSON (không có Prometheus reporter, dùng node rules)
-  # Flink mặc định không expose /metrics Prometheus format; skip để tránh scrape error
-  # - job_name: 'flink'
-  #   static_configs:
-  #     - targets: ['jobmanager:8081']
+  # Flink JobManager — Prometheus reporter (port 9249, enabled via FLINK_PROPERTIES)
+  - job_name: 'flink-jobmanager'
+    static_configs:
+      - targets: ['jobmanager:9249']
+    metrics_path: /
+    scrape_timeout: 10s
 
-  # Trino coordinator JMX metrics (nếu cần thêm sau)
-  # - job_name: 'trino'
-  #   static_configs:
-  #     - targets: ['trino-coordinator:8082']
+  # Flink TaskManager — Prometheus reporter (port 9250)
+  - job_name: 'flink-taskmanager'
+    static_configs:
+      - targets: ['taskmanager:9250']
+    metrics_path: /
+    scrape_timeout: 10s
 
   # Chatbot API — query duration histogram by layer (HOT/WARM/COLD)
   - job_name: 'chatbot'
     static_configs:
       - targets: ['chatbot:5002']
     metrics_path: /metrics
+    scrape_timeout: 10s

@@ -1,0 +1,596 @@
+{
+  "__inputs": [],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0"},
+    {"type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0"}
+  ],
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 100,
+      "title": "HOT Layer — Apache Fluss (<100ms Real-Time)",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"fixedColor": "red", "mode": "fixed"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]},
+          "unit": "short",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 1},
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "flink_jobmanager_numRunningJobs",
+          "legendFormat": "Running Jobs",
+          "refId": "A"
+        }
+      ],
+      "title": "Flink Running Jobs",
+      "type": "stat"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"fixedColor": "orange", "mode": "fixed"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "yellow", "value": 1}, {"color": "green", "value": 3}]},
+          "unit": "short",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 1},
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "sum(rate(flink_taskmanager_job_task_numRecordsIn[1m]))",
+          "legendFormat": "Records/s",
+          "refId": "A"
+        }
+      ],
+      "title": "Flink Records In/sec",
+      "type": "stat"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 70}, {"color": "red", "value": 90}]},
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "noValue": "N/A"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 1},
+      "id": 3,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "minVizHeight": 75,
+        "minVizWidth": 75
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "100 * (1 - (flink_jobmanager_Status_JVM_Memory_Heap_Available / flink_jobmanager_Status_JVM_Memory_Heap_Max))",
+          "legendFormat": "JM Heap %",
+          "refId": "A"
+        }
+      ],
+      "title": "JobManager JVM Heap Used %",
+      "type": "gauge"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 75}, {"color": "red", "value": 90}]},
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "noValue": "N/A"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 1},
+      "id": 4,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "minVizHeight": 75,
+        "minVizWidth": 75
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "100 * (1 - (flink_taskmanager_Status_JVM_Memory_Heap_Available / flink_taskmanager_Status_JVM_Memory_Heap_Max))",
+          "legendFormat": "TM Heap %",
+          "refId": "A"
+        }
+      ],
+      "title": "TaskManager JVM Heap Used %",
+      "type": "gauge"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "pointSize": 4, "scaleDistribution": {"type": "linear"}, "showPoints": "auto", "spanNulls": true},
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "id": 5,
+      "options": {
+        "legend": {"calcs": ["mean", "max", "last"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "rate(flink_taskmanager_job_task_numRecordsIn[1m])",
+          "legendFormat": "Records In/s",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "rate(flink_taskmanager_job_task_numRecordsOut[1m])",
+          "legendFormat": "Records Out/s",
+          "refId": "B"
+        }
+      ],
+      "title": "Flink Record Throughput (1m rate)",
+      "type": "timeseries"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisPlacement": "auto", "drawStyle": "line", "fillOpacity": 20, "lineWidth": 2, "spanNulls": true},
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "id": 6,
+      "options": {
+        "legend": {"calcs": ["mean", "max", "last"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "flink_jobmanager_Status_JVM_Memory_Heap_Used",
+          "legendFormat": "JM Heap Used",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "flink_taskmanager_Status_JVM_Memory_Heap_Used",
+          "legendFormat": "TM Heap Used",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "flink_jobmanager_Status_JVM_Memory_NonHeap_Used",
+          "legendFormat": "JM Off-Heap Used",
+          "refId": "C"
+        }
+      ],
+      "title": "Flink JVM Memory Usage",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 13},
+      "id": 101,
+      "title": "Chatbot RAG — Query Performance by Layer",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisPlacement": "auto", "drawStyle": "line", "fillOpacity": 20, "lineWidth": 2, "spanNulls": true},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}, {"color": "red", "value": 5}]},
+          "unit": "s"
+        },
+        "overrides": [
+          {"matcher": {"id": "byFrameRefID", "options": "A"}, "properties": [{"id": "color", "value": {"fixedColor": "red",    "mode": "fixed"}}]},
+          {"matcher": {"id": "byFrameRefID", "options": "B"}, "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]},
+          {"matcher": {"id": "byFrameRefID", "options": "C"}, "properties": [{"id": "color", "value": {"fixedColor": "blue",   "mode": "fixed"}}]}
+        ]
+      },
+      "gridPos": {"h": 8, "w": 14, "x": 0, "y": 14},
+      "id": 7,
+      "options": {
+        "legend": {"calcs": ["mean", "max", "last"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "histogram_quantile(0.50, sum(rate(chatbot_query_duration_seconds_bucket[5m])) by (layer, le))",
+          "legendFormat": "P50 {{layer}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "histogram_quantile(0.95, sum(rate(chatbot_query_duration_seconds_bucket[5m])) by (layer, le))",
+          "legendFormat": "P95 {{layer}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "histogram_quantile(0.99, sum(rate(chatbot_query_duration_seconds_bucket[5m])) by (layer, le))",
+          "legendFormat": "P99 {{layer}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Query Latency P50/P95/P99 by Layer",
+      "type": "timeseries"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 2}, {"color": "red", "value": 10}]},
+          "unit": "s",
+          "min": 0,
+          "noValue": "N/A"
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "HOT (Fluss)"},   "properties": [{"id": "color", "value": {"fixedColor": "red",    "mode": "fixed"}}]},
+          {"matcher": {"id": "byName", "options": "WARM (Paimon)"}, "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]},
+          {"matcher": {"id": "byName", "options": "COLD (Iceberg)"},"properties": [{"id": "color", "value": {"fixedColor": "blue",   "mode": "fixed"}}]}
+        ]
+      },
+      "gridPos": {"h": 8, "w": 10, "x": 14, "y": 14},
+      "id": 8,
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "namePlacement": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "histogram_quantile(0.95, sum(rate(chatbot_query_duration_seconds_bucket{layer=\"hot\"}[5m])) by (le))",
+          "legendFormat": "HOT (Fluss)",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "histogram_quantile(0.95, sum(rate(chatbot_query_duration_seconds_bucket{layer=\"warm\"}[5m])) by (le))",
+          "legendFormat": "WARM (Paimon)",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "histogram_quantile(0.95, sum(rate(chatbot_query_duration_seconds_bucket{layer=\"cold\"}[5m])) by (le))",
+          "legendFormat": "COLD (Iceberg)",
+          "refId": "C"
+        }
+      ],
+      "title": "P95 Latency per Layer (SLA check)",
+      "type": "bargauge"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 80, "lineWidth": 1, "spanNulls": false},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 22},
+      "id": 9,
+      "options": {
+        "legend": {"calcs": ["sum"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "increase(chatbot_queries_total[10m])",
+          "legendFormat": "{{layer}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Queries per Layer (10min increments)",
+      "type": "timeseries"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.5}, {"color": "red", "value": 2}]},
+          "unit": "s",
+          "noValue": "N/A"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 22},
+      "id": 10,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "histogram_quantile(0.50, sum(rate(chatbot_query_duration_seconds_bucket[5m])) by (layer, le))",
+          "legendFormat": "P50 {{layer}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Current P50 Latency by Layer",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 29},
+      "id": 102,
+      "title": "System Resources — Node Health",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 60}, {"color": "red", "value": 80}]},
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 30},
+      "id": 11,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "minVizHeight": 75,
+        "minVizWidth": 75
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)",
+          "legendFormat": "CPU Used %",
+          "refId": "A"
+        }
+      ],
+      "title": "Host CPU Usage",
+      "type": "gauge"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 70}, {"color": "red", "value": 85}]},
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 30},
+      "id": 12,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "minVizHeight": 75,
+        "minVizWidth": 75
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "100 * (1 - ((node_memory_MemFree_bytes + node_memory_Cached_bytes + node_memory_Buffers_bytes) / node_memory_MemTotal_bytes))",
+          "legendFormat": "RAM Used %",
+          "refId": "A"
+        }
+      ],
+      "title": "Host RAM Usage",
+      "type": "gauge"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 70}, {"color": "red", "value": 85}]},
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 30},
+      "id": 13,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "minVizHeight": 75,
+        "minVizWidth": 75
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "100 - ((node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}) * 100)",
+          "legendFormat": "Disk Used %",
+          "refId": "A"
+        }
+      ],
+      "title": "Host Disk Usage",
+      "type": "gauge"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "spanNulls": true},
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 35},
+      "id": 14,
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)",
+          "legendFormat": "CPU %",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "100 * (1 - ((node_memory_MemFree_bytes + node_memory_Cached_bytes + node_memory_Buffers_bytes) / node_memory_MemTotal_bytes))",
+          "legendFormat": "RAM %",
+          "refId": "B"
+        }
+      ],
+      "title": "CPU & Memory Usage Trend",
+      "type": "timeseries"
+    },
+
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "spanNulls": true},
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 35},
+      "id": 15,
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "rate(node_network_receive_bytes_total{device!~\"lo|docker.*|br-.*\"}[1m])",
+          "legendFormat": "Rx {{device}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus_ds"},
+          "expr": "rate(node_network_transmit_bytes_total{device!~\"lo|docker.*|br-.*\"}[1m])",
+          "legendFormat": "Tx {{device}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Network I/O",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "tags": ["streamhouse", "flink", "monitoring"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Streamhouse Architecture Monitor",
+  "uid": "streamhouse-arch-001",
+  "version": 2
+}
