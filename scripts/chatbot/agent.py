@@ -689,16 +689,20 @@ async def execute_query(state: AgentState) -> AgentState:
                     ts = results[0].get("timestamp") or results[0].get("incident_date")
                     if ts:
                         fallback_date = str(ts)[:10]  # YYYY-MM-DD
+                # If no date from SQL, default to today so we don't return stale frames
+                if not fallback_date:
+                    fallback_date = datetime.utcnow().strftime("%Y-%m-%d")
                 recent_urls = _evidence_service.get_recent_frame_urls(
                     camera_id=fallback_camera,
                     date_str=fallback_date,
                     limit=20,
                     minio_public_url=minio_base,
                 )
-                # If filtered listing returns nothing, try unfiltered (all cameras/dates)
-                if not recent_urls and (fallback_camera or fallback_date):
-                    logger.info("MinIO filtered listing empty, trying unfiltered")
+                # If filtered listing returns nothing, try without camera filter (keep date)
+                if not recent_urls and fallback_camera:
+                    logger.info("MinIO camera-filtered listing empty, trying all cameras for today")
                     recent_urls = _evidence_service.get_recent_frame_urls(
+                        date_str=fallback_date,
                         limit=20,
                         minio_public_url=minio_base,
                     )
@@ -706,7 +710,7 @@ async def execute_query(state: AgentState) -> AgentState:
                     state["frame_urls"] = recent_urls
                     logger.info(f"MinIO fallback: {len(recent_urls)} frame URLs collected")
                 else:
-                    logger.warning("MinIO fallback: bucket appears empty")
+                    logger.warning("MinIO fallback: no frames found for today")
 
             logger.info(f"Query executed successfully: {row_count} rows")
 
@@ -729,7 +733,9 @@ async def execute_query(state: AgentState) -> AgentState:
         wants_evidence_check = state.get("intent") and state["intent"].wants_evidence
         if wants_evidence_check and not state.get("frame_urls") and _evidence_service:
             minio_base = os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000")
+            today = datetime.utcnow().strftime("%Y-%m-%d")
             recent_urls = _evidence_service.get_recent_frame_urls(
+                date_str=today,
                 limit=20,
                 minio_public_url=minio_base,
             )
@@ -862,14 +868,26 @@ async def generate_response(state: AgentState) -> AgentState:
             state["row_count"] = row_count
 
             if row_count == 0:
-                # Successful query but no data found
-                state["final_answer"] = (
-                    f"Không tìm thấy dữ liệu cho câu hỏi của bạn trong khoảng thời gian "
-                    f"'{state['intent'].time_period if state['intent'] else 'đã chọn'}'.\n"
-                    f"Vui lòng thử mở rộng phạm vi thời gian hoặc điều chỉnh bộ lọc.\n\n"
-                    f"Nguồn: {state['source_table']} ({state['data_layer']})"
-                )
-                state["response_confidence"] = 0.5
+                # Successful query but no data found.
+                # If evidence images were retrieved via MinIO fallback, acknowledge them
+                # instead of saying "no data" — the two sources are independent.
+                frame_urls_fallback = state.get("frame_urls") or []
+                if frame_urls_fallback:
+                    state["final_answer"] = (
+                        f"Không tìm thấy bản ghi trong {state['data_layer']} layer "
+                        f"cho khoảng thời gian '{state['intent'].time_period if state['intent'] else 'đã chọn'}'. "
+                        f"Tuy nhiên, đã tìm thấy {len(frame_urls_fallback)} ảnh bằng chứng gần nhất từ hệ thống lưu trữ.\n\n"
+                        f"Nguồn: {state['source_table']} ({state['data_layer']})"
+                    )
+                    state["response_confidence"] = 0.6
+                else:
+                    state["final_answer"] = (
+                        f"Không tìm thấy dữ liệu cho câu hỏi của bạn trong khoảng thời gian "
+                        f"'{state['intent'].time_period if state['intent'] else 'đã chọn'}'.\n"
+                        f"Vui lòng thử mở rộng phạm vi thời gian hoặc điều chỉnh bộ lọc.\n\n"
+                        f"Nguồn: {state['source_table']} ({state['data_layer']})"
+                    )
+                    state["response_confidence"] = 0.5
             else:
                 # Format data as Vietnamese text
                 # For HOT layer queries, show violent events first so Gemini sees location data
