@@ -1,3 +1,0 @@
-file '/app/data/processed/clips_for_streaming/cam_02_01_xR1o8M5o_0.avi'
-file '/app/data/processed/clips_for_streaming/cam_02_02_SCnBiAteLVI_1.avi'
-file '/app/data/processed/clips_for_streaming/cam_02_03_s83GiLts_0.avi'
