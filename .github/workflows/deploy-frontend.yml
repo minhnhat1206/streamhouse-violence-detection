@@ -1,0 +1,55 @@
+name: Deploy Frontend to Vercel
+
+on:
+  push:
+    branches: [main, devNhat]
+    paths:
+      - "Violence-Urban-Safety-UI/frontend/**"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to Vercel
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Violence-Urban-Safety-UI/frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: Violence-Urban-Safety-UI/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        env:
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
+          VITE_APP_TITLE: "Vigilance AI — Smart Security Monitoring"
+        run: npm run build
+
+      - name: Deploy to Vercel (Preview — devNhat)
+        if: github.ref == 'refs/heads/devNhat'
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          working-directory: Violence-Urban-Safety-UI/frontend
+
+      - name: Deploy to Vercel (Production — main)
+        if: github.ref == 'refs/heads/main'
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: "--prod"
+          working-directory: Violence-Urban-Safety-UI/frontend

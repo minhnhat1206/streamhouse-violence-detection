@@ -1,0 +1,54 @@
+name: Cloud Stack Health Check
+
+on:
+  schedule:
+    # Every 30 minutes
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  health-check:
+    name: Health Check Oracle Cloud
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check Chatbot API
+        id: chatbot
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
+            "${{ secrets.CLOUD_API_URL }}/health" 2>/dev/null || echo "000")
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          if [ "$STATUS" = "200" ]; then
+            echo "✅ Chatbot API: OK (HTTP $STATUS)"
+          else
+            echo "❌ Chatbot API: FAIL (HTTP $STATUS)"
+          fi
+
+      - name: Check Layer Counts
+        id: layers
+        run: |
+          RESP=$(curl -s --max-time 15 "${{ secrets.CLOUD_API_URL }}/api/layer-counts" 2>/dev/null || echo '{}')
+          echo "response=$RESP" >> $GITHUB_OUTPUT
+          echo "Layer counts: $RESP"
+
+      - name: Notify on failure
+        if: steps.chatbot.outputs.status != '200'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ steps.chatbot.outputs.status }}';
+            const layers = '${{ steps.layers.outputs.response }}';
+            core.warning(`Cloud stack degraded! Chatbot HTTP ${status}. Layers: ${layers}`);
+
+      - name: Summary
+        run: |
+          echo "### 🏥 Health Check Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Chatbot API | HTTP ${{ steps.chatbot.outputs.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Layer Counts | ${{ steps.layers.outputs.response }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Checked at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
