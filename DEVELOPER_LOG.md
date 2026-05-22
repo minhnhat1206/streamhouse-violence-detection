@@ -44,6 +44,75 @@ Xây dựng và tối ưu hóa hệ thống phát hiện bạo lực thời gian
 ## 🤝 Handover Protocol (MUST READ)
 *Mỗi khi chuyển đổi Agent (Gemini <-> Claude), Agent hiện tại PHẢI cập nhật phần "Last State" bên dưới.*
 
+### 📍 Last State (Updated: 2026-05-22 — Session 43 COMPLETE) ✅ Dashboard & Monitoring Design
+
+- **Agent vừa làm:** Claude (Session 43 — Grafana dashboards + Prometheus scraping + React UI redesign)
+- **Trạng thái:** Full monitoring stack hoạt động — Grafana 2 dashboards, Prometheus 5 scrape jobs, React 2 pages mới
+- **Nhánh git:** `devNhat` — commits: `f3470d4` (Grafana+Prometheus), `f5a3549` (React Analytics+Status)
+- **Disk:** C: drive ~134GB free
+
+#### Session 43 — What was done:
+
+**Prometheus Scraping Setup**
+- Thêm `flink-jobmanager` scrape job (jobmanager:9249) — Flink metrics qua PrometheusReporterFactory
+- Thêm `flink-taskmanager` scrape job (taskmanager:9250)
+- Thêm `chatbot` scrape job (chatbot:5002/metrics) — RAG query latency histogram
+- Verified: tất cả 5 targets UP tại `http://localhost:9090/targets`
+
+**docker-compose.yml updates**
+- Expose port 9249 trên jobmanager cho Prometheus reporter
+- Thêm `metrics.reporter.prom.factory.class: PrometheusReporterFactory` vào FLINK_PROPERTIES (JM + TM)
+- Thêm persistent volumes cho fluss-zookeeper: `fluss-zookeeper-data:/data` + `fluss-zookeeper-datalog:/datalog`
+
+**Grafana Dashboards (config/grafana/provisioning/dashboards/)**
+- `streamhouse_architecture.json` — NEW: 15 panels, 3 rows (HOT/Chatbot RAG/System Resources)
+  - Stat: Flink Running Jobs=**2**, Records/sec
+  - Gauge: CPU=**23.2%**, RAM=**82.2%** (từ node-exporter)
+  - Timeseries: Flink throughput (peak 337/s), JVM memory, CPU+RAM trend, Network I/O
+  - Bargauge: P95 latency HOT/WARM/COLD so với SLA
+- `violence_incidents_v2.json` — NEW: 12 panels dùng Trino datasource (cần plugin)
+- `dashboards.yml` — Update provider folder name
+- **Bug fix**: Gauge panels có options sai kiểu stat panel → fix `showThresholdLabels/Markers/minVizHeight/minVizWidth`
+
+**React UI (Violence-Urban-Safety-UI/frontend)**
+- `Analytics.jsx` — Complete rewrite với real Streamhouse data:
+  - KPI: 15,834 alerts từ Iceberg, Peak Risk 49.0%
+  - Streamhouse 3-Layer Health: HOT 77ms/100ms, WARM 10.4s/10s, COLD 5.7s/30s
+  - Charts: Alerts/hour AreaChart, Incident Type PieChart, Camera BarChart, Risk histogram, Top Locations
+  - Auto-refresh 30-60s intervals
+- `StreamhouseStatus.jsx` — NEW page:
+  - Flink cluster: 2 running jobs, 8 slots total, 6 available, v1.18.1
+  - Storage Layer Health với SLA badges
+  - Flink jobs list: `Data Contract Valid...` RUNNING, `insert-into-paimon...` RUNNING
+  - Service Connectivity: Chatbot API ✅, Flink JM ✅, Trino ✅
+- `SideBar.jsx` — Thêm Status nav item (Server icon)
+- `router.jsx` — Thêm route `/status`
+- `vite.config.js` — Thêm proxy `/api/layer-counts`, `/api/latency`
+
+**Documentation**
+- `docs/agent-guides/dashboard-monitoring.md` — NEW: đầy đủ guide về Grafana, Prometheus, React UI
+
+#### Stack state after session 43:
+```
+Prometheus targets:  5/5 UP (chatbot, flink-jm, flink-tm, node-exporter, prometheus)
+Grafana dashboards:  6 total (2 new + 4 existing)
+Flink jobs:          2 RUNNING (Data Contract Validator, insert-into-paimon)
+HOT layer (Fluss):   active, latency 77ms
+WARM (Paimon):       15,834 rows, latency 7.5–10.4s
+COLD (Iceberg):      15,834 rows, latency 2.0–5.7s
+Host CPU:            23.2%
+Host RAM:            82.2%
+React UI:            5 pages working (LiveStreams, Alerts, Analytics, Status, Assistant)
+```
+
+#### Next steps (Session 44):
+1. Thesis chapter: Performance benchmarks (HOT 77ms vs 100ms SLA, tiering efficiency)
+2. Thesis chapter: Architecture diagrams (Streamhouse Trio flow diagram)
+3. Demo script: Full E2E walkthrough for thesis defense
+4. Optional: Violence Incidents dashboard với Trino datasource plugin
+
+---
+
 ### 📍 Last State (Updated: 2026-05-22 — Phiên 41 COMPLETE) ✅ Chatbot Logic + Dual-Layer Routing
 
 - **Agent vừa làm:** Claude (Session 41 — Chatbot cleanup + logic fix + dual-layer routing)
