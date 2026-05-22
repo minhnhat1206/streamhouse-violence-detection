@@ -47,8 +47,8 @@ docker compose -f docker/docker-compose.yml up -d kafka minio
 # View logs
 docker compose -f docker/docker-compose.yml logs -f <service>
 
-# Run mock inference (generates test data)
-docker compose -f docker/docker-compose.yml up inference-mock
+# Run RTSP pipeline (real video frames via MediaMTX)
+docker compose -f docker/docker-compose.yml --profile streaming up -d
 
 # Kafka topics setup
 docker exec -it kafka bash /scripts/setup/create-topics.sh
@@ -94,10 +94,10 @@ Camera (RTSP) → VioMobileNet → Kafka → Flink
 - Cả hai agent đều tham chiếu `docs/agent-guides/` cho tài liệu chi tiết
 
 ## Streaming Services — Graceful Stop
-`producer` và `inference-mock` chạy **vô tận** (while True). Sau khi test, **BẮT BUỘC** dừng:
+`rtsp-inference-mock` và `rtsp_pusher` chạy **vô tận** (while True). Sau khi test, **BẮT BUỘC** dừng:
 ```bash
-docker exec inference-mock touch /app/tmp/STOP
-docker exec producer touch /app/tmp/STOP
+docker exec rtsp-inference-mock touch /app/tmp/STOP
+docker exec rtsp_pusher touch /app/tmp/STOP
 ```
 Khi restart, stop file tự xóa. Chi tiết: `docs/agent-guides/stop-mechanism.md`
 
