@@ -193,6 +193,15 @@ async def lifespan(app: FastAPI):
         # Set components in agent module
         set_components(trino_client, sql_generator, evidence_service)
 
+        # Pre-warm Flink SQL Gateway session so the first HOT query doesn't
+        # spend its entire timeout budget on DDL (CREATE CATALOG + USE + USE).
+        try:
+            logger.info("Pre-warming Fluss SQL Gateway session...")
+            trino_client._ensure_fluss_session(init_timeout=60)
+            logger.info("✓ Fluss session warmed")
+        except Exception as e:
+            logger.warning(f"Fluss session pre-warm failed (non-fatal): {e}")
+
         # Create LangGraph agent
         logger.info("Creating LangGraph agent...")
         global agent_graph
