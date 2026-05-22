@@ -44,12 +44,12 @@ Xây dựng và tối ưu hóa hệ thống phát hiện bạo lực thời gian
 ## 🤝 Handover Protocol (MUST READ)
 *Mỗi khi chuyển đổi Agent (Gemini <-> Claude), Agent hiện tại PHẢI cập nhật phần "Last State" bên dưới.*
 
-### 📍 Last State (Updated: 2026-05-22 — Phiên 40) 🧹 Cleanup + Reset + Documentation
+### 📍 Last State (Updated: 2026-05-22 — Phiên 40 COMPLETE) ✅ Full Pipeline Verified on Clean Stack
 
-- **Agent vừa làm:** Claude (Session 40 — Cleanup, Hard Reset, WSL Disk Cleanup, README)
-- **Trạng thái:** Codebase sạch, volumes reset, docs hoàn chỉnh — sẵn sàng cho thesis finalization
-- **Nhánh git:** `devNhat` — commits: `d925357` (cleanup), `2e8d525` (docs + Dockerfile fixes)
-- **Disk:** freed ~7.3GB on Windows (62GB Docker images removed; WSL VHD sparse-compacted)
+- **Agent vừa làm:** Claude (Session 40 — Cleanup + Hard Reset + Pipeline Test + Documentation)
+- **Trạng thái:** Clean stack, full pipeline verified end-to-end, all routing correct
+- **Nhánh git:** `devNhat` — commits: `d925357` (cleanup), `2e8d525` (docs + Dockerfile fixes), `74497a6` (docs complete)
+- **Disk:** C: drive ~134GB free (VHD compacted 122GB → 24.6GB)
 
 #### Session 40 — What was done:
 
@@ -60,38 +60,55 @@ Xây dựng và tối ưu hóa hệ thống phát hiện bạo lực thời gian
 - Deleted Claude worktree: `.claude/worktrees/loving-lederberg-714daa/`
 
 **Phase 2 — Hard Reset Data**
-- All Docker volumes deleted: kafka-data, minio_data, mysql-data, fluss-tablet-*, chroma_data, grafana-storage, etc.
-- All containers stopped and removed
-- Clean slate for Phase 4 restart
+- All Docker volumes deleted (clean slate)
+- `inference-mock` service REMOVED from docker-compose (RTSP pipeline is sole data source now)
 
 **Phase 3 — Disk Cleanup**
-- 62GB Docker images removed (27.73GB freed inside VHD)
-- WSL2 VHD marked sparse + compacted
-- Result: 28.5GB → 36GB free on C: drive (+7.5GB)
+- 62GB Docker images freed; WSL2 VHD compacted 122GB → 24.6GB; C: drive 36GB → 134GB
 
-**Phase 4 — Stack Restart**
-- `violence-detection-net` re-created (was deleted by system prune)
-- kafka, minio, mysql pulled fresh and started (healthy)
-- Full stack building in background (images re-pulled/rebuilt)
+**Phase 4 — Full Pipeline Test with RTSP (PASSED ✅)**
+- Images rebuilt (docker-chatbot 3.27GB, frame-extractor 10GB, etc.)
+- `violence-detection-net` recreated, full stack started with `--profile streaming`
+- `flink-sql-gateway` started (`--profile ui`) for dim_camera seeding
+- dim_camera: 15 cameras seeded via SQL Gateway (08:17:57)
+- 3 Flink streaming jobs RUNNING: Contract Validator, hot_violence_alerts, daily_incident_stats
+- RTSP pipeline active: rtsp_pusher → MediaMTX → rtsp-inference-mock → Kafka
+
+**Pipeline Test Results:**
+```
+HOT Layer:    9,624+ valid events  | latency 32ms (target <100ms) ✅
+WARM Layer:   0 rows (expected — data <2h, tiering threshold=2h) ✅
+COLD Layer:   0 rows (expected — fresh stack, archive at 02:00)   ✅
+Quarantine:   0 events (100% data passes contract validation)      ✅
+dim_camera:   15 cameras, real location names (Đường Lê Lợi etc.) ✅
+Tiering:      1st cycle completed at 08:29:55 ✅
+```
+
+**Chatbot Routing Tests (ALL PASS):**
+```
+"30 phút" → Fluss  ✅  |  "45 phút" → Fluss   ✅
+"24 giờ"  → Paimon ✅  |  "tháng trước" → Iceberg ✅
+HOT latency: 32ms ✅   |  WARM latency: 1182ms ✅
+```
 
 **Phase 5 — Documentation**
-- `README.md` — Complete rewrite: architecture, quick start, API reference, port table, troubleshooting
-- `QUICKSTART.md` — New: 5-minute setup guide for new users
-- `CONTRIBUTING.md` — New: code conventions, commit style, resource budget, testing guide
-- `docker/Dockerfile.producer` — Fixed: removed COPY of deleted `producerRTSP.py`
-- `docker/docker-compose.yml` — Fixed: removed obsolete `producer` service and `producer-tmp` volume
+- `README.md` — Complete rewrite: architecture, quick start, API reference, troubleshooting
+- `QUICKSTART.md` — New: 5-minute setup guide
+- `CONTRIBUTING.md` — New: code conventions, resource budget, testing guide
 
 #### Stack state after session 40:
-- Core services running: kafka ✅ (healthy), minio ✅ (healthy), mysql ✅ (healthy)
-- Full stack build in progress (hive-metastore, flink, fluss, trino, chatbot being pulled/built)
-- All data volumes empty — pipeline-manager will re-init tables on startup
-- Git: 2 commits ahead of pre-session-40 state
+- All 18 services healthy (chatbot, flink, fluss, kafka, minio, trino, mysql, hive, pipeline-manager...)
+- RTSP pipeline active with streaming profile
+- flink-sql-gateway active (UI profile)
+- Data accumulating in HOT layer at ~100 events/min
+- Tiering will run every 30 min (next: ~08:53 UTC)
+- Archive will run at 02:00 UTC (for data >7 days old)
 
 #### Next steps (Session 41):
-1. Verify full stack startup completes (pipeline-manager submits all 3 Flink jobs)
-2. Run E2E test suite to confirm 22/23 still passes on clean data
-3. Begin thesis finalization: architecture chapter, performance benchmarks
-4. Create system diagrams for thesis document
+1. Run full E2E test suite to confirm 22/23 still passes on clean RTSP data
+2. Begin thesis finalization: architecture chapter, performance benchmarks
+3. Create system diagrams for thesis document
+4. Optional: test COLD layer (wait for data to be >2h old, trigger tiering, then >7 days for archive)
 
 ---
 
