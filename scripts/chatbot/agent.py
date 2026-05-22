@@ -137,6 +137,10 @@ class AgentState(TypedDict):
     # Frame evidence (multi-result — evidence image queries)
     frame_urls: Optional[List[str]]
 
+    # Dual-layer query support ("hôm nay" spans HOT last-2h + WARM 2h-24h)
+    also_query_hot: bool
+    hot_query_result: Optional[QueryResult]
+
     # Metadata
     start_time: float
     duration_ms: Optional[int]
@@ -392,10 +396,14 @@ async def select_data_layer(state: AgentState) -> AgentState:
                 selected_layer = LayerChoice.ICEBERG
 
         # Step 2: Keyword patterns for non-numeric expressions
-        elif any(x in time_period_str for x in ["tháng trước", "thang truoc", "tháng qua", "thang qua",
-                                                  "tháng này", "thang nay", "month",
-                                                  "năm", "quý", "year", "quarter",
-                                                  "30 ngày", "30 ngay", ">7", "hơn 7"]):
+        elif (
+            any(x in time_period_str for x in ["tháng trước", "thang truoc", "tháng qua", "thang qua",
+                                                "tháng này", "thang nay", "month",
+                                                "năm", "nam ngoai", "quý", "year", "quarter",
+                                                "30 ngày", "30 ngay", ">7", "hơn 7"])
+            # Bare 4-digit year (e.g. Gemini returns "2025" without "năm" keyword)
+            or re.search(r'\b(20\d{2}|19\d{2})\b', time_period_str)
+        ):
             selected_layer = LayerChoice.ICEBERG  # COLD - historical
 
         elif any(x in time_period_str for x in ["hôm qua", "hom qua", "yesterday",
@@ -405,10 +413,14 @@ async def select_data_layer(state: AgentState) -> AgentState:
                                                   "hôm nay", "hom nay", "today"]):
             selected_layer = LayerChoice.PAIMON  # WARM
 
-        # HOT: only explicit "right now" / "last hour" — NOT "24 giờ qua" (that's warm)
-        elif any(x == time_period_str.strip() or
-                 x in time_period_str and not re.search(r'\d+\s*' + re.escape(x), time_period_str)
-                 for x in ["vừa rồi", "bây giờ", "real-time", "trực tiếp", "mới nhất", "now"]):
+        # HOT: explicit "right now" signals — Gemini often returns diacritical forms
+        # NOTE: NOT "24 giờ qua" (that's warm) — numeric regex above handles hours
+        elif any(x in time_period_str for x in [
+            "vừa rồi", "vua roi", "bây giờ", "bay gio", "real-time", "real time",
+            "trực tiếp", "truc tiep", "mới nhất", "moi nhat",
+            "gần đây", "gan day", "hiện tại", "hien tai",
+            "now", "ngay bây giờ", "ngay bay gio",
+        ]):
             selected_layer = LayerChoice.FLUSS  # HOT - real-time
 
         # Default: stay PAIMON (warm)
@@ -421,6 +433,27 @@ async def select_data_layer(state: AgentState) -> AgentState:
                     f"[ROUTING] Evidence query: overriding {selected_layer.value} → PAIMON (frame_url)"
                 )
                 selected_layer = LayerChoice.PAIMON
+
+        # "hôm nay" (today) spans two layers:
+        #   - Fluss HOT:  last 2h  (data not yet tiered to Paimon)
+        #   - Paimon WARM: 2h–24h (already tiered from HOT every 30min)
+        # → run PAIMON as primary, then do a supplementary HOT scan and merge.
+        # Evidence queries skip this (PAIMON already has frame_url for both windows).
+        # IMPORTANT: do NOT match "hôm qua" — use exact phrase "hôm nay" only.
+        wants_evidence = state.get("intent") and state["intent"].wants_evidence
+        state["also_query_hot"] = (
+            selected_layer == LayerChoice.PAIMON
+            and any(x in time_period_str for x in [
+                "hôm nay", "hom nay", "today", "trong ngày", "trong ngay"
+            ])
+            # "hôm qua" / "hom qua" = yesterday → fully in WARM, no HOT supplement needed
+            and not any(x in time_period_str for x in ["hôm qua", "hom qua", "yesterday"])
+            and not wants_evidence
+        )
+        if state.get("also_query_hot"):
+            logger.info(
+                "[ROUTING] 'hôm nay' → PAIMON primary + FLUSS HOT supplementary (dual-layer)"
+            )
 
         # EXPLICIT routing log (visible without JSONFormatter extension)
         logger.info(
@@ -678,6 +711,68 @@ async def execute_query(state: AgentState) -> AgentState:
                     logger.info(f"Collected {len(collected)} frame URLs from SQL results")
                 # Don't clear existing frame_urls when collected is empty
 
+            # ── Dual-layer: supplementary HOT scan for "hôm nay" queries ──────────────
+            # "today" = Paimon WARM (2h–24h old) + Fluss HOT (last 2h, not yet tiered).
+            # Run a simple HOT scan and merge results so the answer covers the full day.
+            if state.get("also_query_hot") and _trino_client:
+                try:
+                    hot_sql = (
+                        "SELECT incident_id, camera_id, timestamp, risk_score, "
+                        "is_violent, event_type, location "
+                        "FROM hot_violence_alerts "
+                        "LIMIT 50"
+                    )
+                    logger.info("[DUAL-LAYER] Running supplementary HOT scan...")
+                    hot_results = _trino_client.route_query(
+                        sql=hot_sql,
+                        layer=LayerChoice.FLUSS,
+                        timeout=45,
+                    )
+                    # Filter violent events in Python (HOT SQL can't guarantee complex WHERE)
+                    violent_hot = [
+                        r for r in (hot_results or [])
+                        if str(r.get("is_violent", "false")).lower() in ("true", "1")
+                    ]
+                    state["hot_query_result"] = QueryResult(
+                        success=True,
+                        data=violent_hot,
+                        row_count=len(violent_hot),
+                    )
+                    logger.info(f"[DUAL-LAYER] HOT supplementary: {len(violent_hot)} violent rows")
+
+                    if violent_hot and state["query_result"].success:
+                        primary_data = state["query_result"].data or []
+                        primary_ids = {r.get("incident_id") for r in primary_data}
+                        new_hot_rows = [r for r in violent_hot if r.get("incident_id") not in primary_ids]
+
+                        if (
+                            len(primary_data) == 1
+                            and "incident_count" in (primary_data[0] or {})
+                        ):
+                            # COUNT query: add HOT violent count to PAIMON count
+                            warm_count = int(primary_data[0].get("incident_count") or 0)
+                            hot_count = len(violent_hot)
+                            merged_data = [{"incident_count": warm_count + hot_count}]
+                            logger.info(
+                                f"[DUAL-LAYER] COUNT merge: WARM={warm_count} + HOT={hot_count} = {warm_count + hot_count}"
+                            )
+                        else:
+                            # LIST query: combine and deduplicate by incident_id
+                            merged_data = list(primary_data) + new_hot_rows
+                            logger.info(
+                                f"[DUAL-LAYER] LIST merge: WARM={len(primary_data)} + HOT_new={len(new_hot_rows)} = {len(merged_data)}"
+                            )
+
+                        state["query_result"] = QueryResult(
+                            success=True,
+                            data=merged_data,
+                            row_count=len(merged_data),
+                        )
+                        state["data_layer"] = "Paimon (WARM) + Fluss (HOT)"
+
+                except Exception as _hot_err:
+                    logger.warning(f"[DUAL-LAYER] HOT supplementary failed (non-fatal): {_hot_err}")
+            # ─────────────────────────────────────────────────────────────────────────
 
             logger.info(f"Query executed successfully: {row_count} rows")
 
