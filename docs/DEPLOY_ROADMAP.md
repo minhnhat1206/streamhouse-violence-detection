@@ -432,6 +432,66 @@ open https://grafana.yourdomain.com
 
 ---
 
+## 🖥️ Plan B — Split Architecture: Local Admin + Vercel Public
+
+> **Quyết định kiến trúc (2026-05-23)**: WebRTC WHEP không thể proxy qua Vercel → tách thành 2 app từ 1 codebase.
+
+### Tổng quan
+
+```
+┌──────────────────────────────────┐   ┌──────────────────────────────────┐
+│  LOCAL ADMIN (npm run dev)       │   │  VERCEL (public URL)             │
+│  VITE_APP_MODE=admin             │   │  VITE_APP_MODE=public            │
+│  localhost:5174                  │   │  vigilance-ai.vercel.app         │
+│                                  │   │                                  │
+│  ✅ /admin/streaming             │   │  ✅ /alerts                      │
+│     Pipeline control             │   │  ✅ /analytics                   │
+│     Start/Stop RTSP pipeline     │   │  ✅ /chatbot                     │
+│  ✅ / (LiveStreams)              │   │  ✅ /status                      │
+│     WebRTC WHEP live grid        │   │  ❌ / (no WebRTC)                │
+│  ✅ /status                      │   │     Placeholder thumbnails       │
+│     Kafka lag, Flink jobs        │   │     + evidence frame clips       │
+└──────────────────────────────────┘   └──────────────────────────────────┘
+         │ same network Docker                   │ HTTPS
+         └──── Chatbot API :5002 ────────────────┘
+               (local hoặc Oracle VM)
+```
+
+### Phân chia feature
+
+| Feature | Local Admin | Vercel Public |
+|---------|:-----------:|:-------------:|
+| WebRTC live streams | ✅ | ❌ |
+| Pipeline start/stop | ✅ | ❌ |
+| Kafka / Flink health | ✅ | ❌ |
+| Alerts Dashboard | ✅ | ✅ |
+| Analytics / Charts | ✅ | ✅ |
+| Chatbot RAG | ✅ | ✅ |
+| Streamhouse Status | ✅ | ✅ (read-only) |
+
+### Build config
+
+```bash
+# Local Admin (dev / build)
+npm run dev              # loads .env.admin → VITE_APP_MODE=admin
+npm run build:admin      # vite build --mode admin
+
+# Vercel Public (CI/CD auto-deploy)
+npm run build            # vite build → loads .env.production → VITE_APP_MODE=public
+```
+
+### Roadmap Plan B — 3 Phases
+
+| Phase | Mô tả | Ưu tiên | Phụ thuộc |
+|-------|-------|:-------:|-----------|
+| **Phase 1** | Local Admin — RTSP Streaming Management | 🔴 Cao | Docker running |
+| **Phase 2** | Vercel Public — mode config + placeholder LiveStreams | 🟡 Trung | Oracle VM up |
+| **Phase 3** | nginx CORS + SSL cho Vercel↔Oracle | 🟢 Thấp | Domain sẵn |
+
+> Chi tiết Phase 1: xem `docs/internal/PLAN_B_PHASE1_STREAMING_ADMIN.md`
+
+---
+
 ## 🔧 Files Trong Branch deploy/hybrid-cloud
 
 ```
