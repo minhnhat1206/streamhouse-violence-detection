@@ -1,5 +1,9 @@
 logLevel: warn
 
+# Management REST API — used by chatbot /api/streaming-status
+api: yes
+apiAddress: :9997
+
 rtsp: yes
 rtspAddress: :8554
 

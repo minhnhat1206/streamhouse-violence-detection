@@ -162,6 +162,7 @@ services:
       - "8888:8888"
       - "8889:8889"
       - "8189:8189/udp"
+      - "9997:9997"
     environment:
       RTSP_AUTH_USER: ""
       MTX_PROTOCOLS: tcp

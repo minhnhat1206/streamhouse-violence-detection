@@ -744,6 +744,44 @@ async def get_camera_status():
     return {"cameras": status_map, "window_seconds": 300}
 
 
+@app.get("/api/streaming-status")
+async def get_streaming_status():
+    """
+    Check RTSP streaming pipeline health:
+    - MediaMTX active paths (via management API at port 9997)
+    - Returns which cam_XX streams are live
+    """
+    import asyncio as _asyncio
+
+    def _check_mediamtx_sync() -> dict:
+        import requests as _req
+
+        mediamtx_api = os.getenv("MEDIAMTX_API_URL", "http://mediamtx:9997")
+        active_streams: list[str] = []
+        mediamtx_ok = False
+
+        try:
+            r = _req.get(f"{mediamtx_api}/v3/paths/list", timeout=2)
+            if r.status_code == 200:
+                data = r.json()
+                for item in data.get("items", []):
+                    if item.get("ready"):
+                        active_streams.append(item["name"])
+                mediamtx_ok = True
+        except Exception as exc:
+            logger.debug(f"MediaMTX API not reachable: {exc}")
+
+        return {
+            "mediamtx_ok": mediamtx_ok,
+            "active_streams": sorted(active_streams),
+            "stream_count": len(active_streams),
+        }
+
+    loop = _asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _check_mediamtx_sync)
+    return result
+
+
 @app.get("/metrics")
 async def metrics():
     """Prometheus metrics endpoint (chatbot_query_duration_seconds, chatbot_queries_total)."""
