@@ -9,6 +9,8 @@ Violence-Urban-Safety-UI/frontend/dist
 package-lock.json
 .env
 docker/.env
+deploy/.env.gcp
+deploy/.env.cloud
 .env.local
 .env.*.local
 .DS_Store
