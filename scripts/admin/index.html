@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="vi" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Streaming Admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: { extend: { fontFamily: { sans: ['Inter','sans-serif'], mono: ['JetBrains Mono','monospace'] } } }
+    }
+  </script>
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .mono { font-family: 'JetBrains Mono', monospace; }
+
+    @keyframes pulse-ring {
+      0%   { transform: scale(0.8); opacity: 0.8; }
+      100% { transform: scale(2.2); opacity: 0; }
+    }
+    @keyframes cam-blink {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+    @keyframes slide-in {
+      from { transform: translateY(-4px); opacity: 0; }
+      to   { transform: translateY(0);    opacity: 1; }
+    }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+    .pulse-ring { position: relative; }
+    .pulse-ring::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.5;
+      animation: pulse-ring 1.8s ease-out infinite;
+    }
+    .cam-live-dot { animation: cam-blink 2s ease-in-out infinite; }
+    .log-entry    { animation: slide-in 0.15s ease-out; }
+    .spinning     { animation: spin 0.6s linear infinite; }
+
+    ::-webkit-scrollbar        { width: 3px; height: 3px; }
+    ::-webkit-scrollbar-track  { background: transparent; }
+    ::-webkit-scrollbar-thumb  { background: #334155; border-radius: 2px; }
+  </style>
+</head>
+<body class="bg-[#06080f] text-slate-100 min-h-screen antialiased">
+
+  <!-- ─── Topbar ─────────────────────────────────────────────── -->
+  <header class="sticky top-0 z-20 border-b border-slate-800/70 bg-slate-950/90 backdrop-blur">
+    <div class="max-w-6xl mx-auto px-5 h-13 flex items-center justify-between gap-4 py-3">
+
+      <div class="flex items-center gap-3">
+        <!-- live indicator -->
+        <div class="relative w-2.5 h-2.5 flex-shrink-0">
+          <div id="hdr-dot" class="w-2.5 h-2.5 rounded-full bg-slate-600 relative z-10"></div>
+        </div>
+        <span class="font-semibold text-sm">RTSP Streaming Admin</span>
+        <span class="hidden sm:block text-slate-600 text-xs mono">localhost:5003</span>
+      </div>
+
+      <div class="flex items-center gap-3 text-xs">
+        <div class="flex items-center gap-1.5">
+          <div id="conn-dot" class="w-1.5 h-1.5 rounded-full bg-slate-700"></div>
+          <span id="conn-text" class="text-slate-500">connecting…</span>
+        </div>
+        <span class="text-slate-700">|</span>
+        <span id="last-ts" class="mono text-slate-600">—</span>
+        <button onclick="manualRefresh()"
+          class="flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition-all ml-1">
+          <svg id="refresh-icon" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>
+            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>
+          </svg>
+          <span class="hidden sm:inline">Refresh</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- countdown bar -->
+    <div class="h-[2px] bg-slate-800/40">
+      <div id="countdown-bar" class="h-full bg-emerald-500/60 transition-none" style="width:100%"></div>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-5 py-5 space-y-4">
+
+    <!-- ─── Stats Row ────────────────────────────────────────── -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+
+      <div class="bg-slate-900/50 border border-slate-800/60 rounded-xl p-4 space-y-1">
+        <div class="text-[11px] text-slate-500 uppercase tracking-wider">Live Streams</div>
+        <div id="st-streams" class="text-3xl font-bold mono text-white">—</div>
+        <div class="text-[11px] text-slate-600">out of 15 cameras</div>
+      </div>
+
+      <div class="bg-slate-900/50 border border-slate-800/60 rounded-xl p-4 space-y-1">
+        <div class="text-[11px] text-slate-500 uppercase tracking-wider">MediaMTX</div>
+        <div id="st-mediamtx" class="text-3xl font-bold mono text-slate-600">—</div>
+        <div class="text-[11px] text-slate-600">RTSP server</div>
+      </div>
+
+      <div class="bg-slate-900/50 border border-slate-800/60 rounded-xl p-4 space-y-1">
+        <div class="text-[11px] text-slate-500 uppercase tracking-wider">RTSP Pusher</div>
+        <div id="st-pusher" class="text-3xl font-bold mono text-slate-600">—</div>
+        <div class="text-[11px] text-slate-600">frame producer</div>
+      </div>
+
+      <div class="bg-slate-900/50 border border-slate-800/60 rounded-xl p-4 space-y-1">
+        <div class="text-[11px] text-slate-500 uppercase tracking-wider">Inference Mock</div>
+        <div id="st-inference" class="text-3xl font-bold mono text-slate-600">—</div>
+        <div class="text-[11px] text-slate-600">AI pipeline</div>
+      </div>
+
+    </div>
+
+    <!-- ─── Middle Row ───────────────────────────────────────── -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+      <!-- Pipeline Control -->
+      <div class="bg-slate-900/50 border border-slate-800/60 rounded-xl flex flex-col">
+        <div class="px-4 py-3.5 border-b border-slate-800/60 flex items-center justify-between">
+          <span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Pipeline Control</span>
+          <div id="overall-dot" class="w-2 h-2 rounded-full bg-slate-700"></div>
+        </div>
+
+        <div class="p-4 flex flex-col gap-4 flex-1">
+
+          <!-- Container status -->
+          <div id="container-list" class="space-y-2">
+            <div class="text-slate-600 text-sm italic">Loading…</div>
+          </div>
+
+          <!-- Action buttons -->
+          <div class="space-y-2">
+            <button onclick="doAction('start')" id="btn-start"
+              class="w-full py-2.5 rounded-lg border text-sm font-medium transition-all flex items-center justify-center gap-2
+                     bg-emerald-600/15 border-emerald-600/30 text-emerald-400
+                     hover:bg-emerald-600/25 hover:border-emerald-500/50 hover:text-emerald-300
+                     disabled:opacity-40 disabled:cursor-not-allowed">
+              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+              Start Pipeline
+            </button>
+            <button onclick="doAction('stop')" id="btn-stop"
+              class="w-full py-2.5 rounded-lg border text-sm font-medium transition-all flex items-center justify-center gap-2
+                     bg-red-600/15 border-red-600/30 text-red-400
+                     hover:bg-red-600/25 hover:border-red-500/50 hover:text-red-300
+                     disabled:opacity-40 disabled:cursor-not-allowed">
+              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+              Stop Pipeline
+            </button>
+          </div>
+
+          <!-- Graceful stop reference -->
+          <div class="mt-auto space-y-1.5">
+            <div class="text-[10px] text-slate-600 uppercase tracking-wider">Graceful stop</div>
+            <div class="space-y-1">
+              <div class="mono text-[10px] bg-slate-800/60 border border-slate-700/40 rounded-md px-2.5 py-1.5 text-slate-400
+                          cursor-pointer hover:text-emerald-400 hover:border-slate-600 transition-colors select-all"
+                   onclick="copyText(this)" title="Click to copy">docker exec rtsp_pusher touch /app/tmp/STOP</div>
+              <div class="mono text-[10px] bg-slate-800/60 border border-slate-700/40 rounded-md px-2.5 py-1.5 text-slate-400
+                          cursor-pointer hover:text-emerald-400 hover:border-slate-600 transition-colors select-all"
+                   onclick="copyText(this)" title="Click to copy">docker exec rtsp-inference-mock touch /app/tmp/STOP</div>
+            </div>
+            <div class="text-[10px] text-slate-700">Click to copy · auto-deleted on restart</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Camera Grid -->
+      <div class="lg:col-span-2 bg-slate-900/50 border border-slate-800/60 rounded-xl flex flex-col">
+        <div class="px-4 py-3.5 border-b border-slate-800/60 flex items-center justify-between">
+          <span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Camera Grid — 15 Cameras</span>
+          <span id="cam-summary" class="mono text-[11px] text-slate-500">0 / 15 live</span>
+        </div>
+
+        <div class="p-4">
+          <div id="camera-grid" class="grid grid-cols-5 gap-2">
+            <!-- js-rendered -->
+          </div>
+        </div>
+
+        <!-- Active paths -->
+        <div class="px-4 pb-4 border-t border-slate-800/40 pt-3">
+          <div class="text-[10px] text-slate-600 uppercase tracking-wider mb-2">Active RTSP Paths</div>
+          <div id="stream-badges" class="flex flex-wrap gap-1.5 min-h-5">
+            <span class="text-[11px] text-slate-700 italic">none</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ─── Action Log ──────────────────────────────────────── -->
+    <div class="bg-slate-900/50 border border-slate-800/60 rounded-xl overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-800/60 flex items-center justify-between">
+        <span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Action Log</span>
+        <button onclick="clearLog()" class="text-[11px] text-slate-600 hover:text-slate-400 transition-colors">Clear</button>
+      </div>
+      <div id="log" class="mono text-[11px] text-slate-400 max-h-36 overflow-y-auto p-3.5 space-y-0.5">
+        <span class="text-slate-700 italic">Session started.</span>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    // ── Config ─────────────────────────────────────────────────
+    const POLL_MS = 5000;
+    let _pollTimer = null;
+    let _countdownTimer = null;
+
+    // ── Log ────────────────────────────────────────────────────
+    function addLog(msg, type = 'info') {
+      const el = document.getElementById('log');
+      const placeholder = el.querySelector('.italic');
+      if (placeholder) placeholder.remove();
+
+      const c = { info: 'text-slate-400', success: 'text-emerald-400', error: 'text-red-400', warn: 'text-amber-400' };
+      const p = { info: '·', success: '✓', error: '✗', warn: '⚠' };
+      const div = document.createElement('div');
+      div.className = `log-entry flex gap-2 leading-relaxed ${c[type]}`;
+      const t = new Date().toLocaleTimeString('vi-VN', { hour12: false });
+      div.innerHTML = `<span class="text-slate-600 select-none flex-shrink-0">${t}</span><span class="text-slate-700 flex-shrink-0">${p[type]}</span><span class="break-all">${msg}</span>`;
+      el.prepend(div);
+      while (el.children.length > 60) el.lastChild.remove();
+    }
+
+    function clearLog() {
+      document.getElementById('log').innerHTML = '<span class="text-slate-700 italic">Cleared.</span>';
+    }
+
+    // ── Connection state ───────────────────────────────────────
+    function setConnected(ok) {
+      document.getElementById('conn-dot').className  = `w-1.5 h-1.5 rounded-full ${ok ? 'bg-emerald-400' : 'bg-red-500'}`;
+      document.getElementById('conn-text').textContent = ok ? 'connected' : 'disconnected';
+      const hdr = document.getElementById('hdr-dot');
+      hdr.className = `w-2.5 h-2.5 rounded-full ${ok ? 'bg-emerald-400 pulse-ring text-emerald-400' : 'bg-red-500'} relative z-10`;
+    }
+
+    // ── Countdown bar ─────────────────────────────────────────
+    function startCountdown() {
+      clearInterval(_countdownTimer);
+      const bar = document.getElementById('countdown-bar');
+      bar.style.transition = 'none';
+      bar.style.width = '100%';
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          bar.style.transition = `width ${POLL_MS}ms linear`;
+          bar.style.width = '0%';
+        });
+      });
+    }
+
+    // ── Status helpers ─────────────────────────────────────────
+    function dotCls(s) {
+      return s === 'running' ? 'bg-emerald-400' : s === 'exited' ? 'bg-red-500' : s === 'not_found' ? 'bg-slate-700' : 'bg-amber-400';
+    }
+    function textCls(s) {
+      return s === 'running' ? 'text-emerald-400' : s === 'exited' ? 'text-red-400' : s === 'not_found' ? 'text-slate-600' : 'text-amber-400';
+    }
+    function bigStat(s) {
+      if (s === 'running')   return { t: 'UP',   c: 'text-emerald-400' };
+      if (s === 'exited')    return { t: 'DOWN', c: 'text-red-400' };
+      if (s === 'not_found') return { t: 'N/A',  c: 'text-slate-600' };
+      return { t: (s || '?').toUpperCase(), c: 'text-amber-400' };
+    }
+
+    // ── Render containers ──────────────────────────────────────
+    function renderContainers(ct) {
+      const rows = [
+        { k: 'mediamtx',            label: 'MediaMTX',       stat: 'st-mediamtx' },
+        { k: 'rtsp_pusher',         label: 'RTSP Pusher',    stat: 'st-pusher'   },
+        { k: 'rtsp-inference-mock', label: 'Inference Mock', stat: 'st-inference'},
+      ];
+
+      document.getElementById('container-list').innerHTML = rows.map(({ k, label }) => {
+        const s = ct[k] ?? 'unknown';
+        return `<div class="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-800/40 border border-slate-700/30">
+          <div class="flex items-center gap-2.5">
+            <div class="w-2 h-2 rounded-full flex-shrink-0 ${dotCls(s)}"></div>
+            <span class="text-sm text-slate-300">${label}</span>
+          </div>
+          <span class="mono text-xs ${textCls(s)}">${s === 'not_found' ? 'not found' : s}</span>
+        </div>`;
+      }).join('');
+
+      rows.forEach(({ k, stat }) => {
+        const el = document.getElementById(stat);
+        if (!el) return;
+        const { t, c } = bigStat(ct[k]);
+        el.textContent = t;
+        el.className = `text-3xl font-bold mono ${c}`;
+      });
+
+      const streaming = ['rtsp_pusher', 'rtsp-inference-mock'];
+      const all = streaming.every(k => ct[k] === 'running');
+      const any = streaming.some(k => ct[k] === 'running');
+      document.getElementById('overall-dot').className =
+        `w-2 h-2 rounded-full ${all ? 'bg-emerald-400' : any ? 'bg-amber-400' : 'bg-red-500'}`;
+    }
+
+    // ── Render streams ─────────────────────────────────────────
+    function renderStreams(st) {
+      const active = st.active ?? [];
+      const count  = active.length;
+
+      document.getElementById('st-streams').textContent  = count;
+      document.getElementById('cam-summary').textContent = `${count} / 15 live`;
+
+      // Badges
+      const badgesEl = document.getElementById('stream-badges');
+      badgesEl.innerHTML = active.length
+        ? active.map(s => `<span class="px-2 py-0.5 rounded mono text-[10px] bg-emerald-900/25 text-emerald-300 border border-emerald-700/30">${s}</span>`).join('')
+        : '<span class="text-[11px] text-slate-700 italic">none</span>';
+
+      // Camera grid
+      const cams = Array.from({ length: 15 }, (_, i) => `cam_${String(i+1).padStart(2,'0')}`);
+      document.getElementById('camera-grid').innerHTML = cams.map(cam => {
+        const live = active.includes(cam);
+        const num  = cam.replace('cam_', '');
+        return `<div class="rounded-lg border p-2.5 text-center relative overflow-hidden transition-all duration-300
+          ${live ? 'bg-emerald-500/10 border-emerald-500/25 shadow-[0_0_10px_rgba(16,185,129,0.07)]'
+                 : 'bg-slate-800/40 border-slate-700/30 hover:border-slate-600/50'}">
+          ${live ? '<div class="absolute inset-0 bg-gradient-to-b from-emerald-500/5 to-transparent pointer-events-none"></div>' : ''}
+          <div class="relative z-10">
+            <div class="mono text-sm font-semibold leading-none ${live ? 'text-emerald-300' : 'text-slate-500'}">${num}</div>
+            <div class="flex items-center justify-center gap-1 mt-1.5">
+              <div class="w-1.5 h-1.5 rounded-full flex-shrink-0 ${live ? 'bg-emerald-400 cam-live-dot' : 'bg-slate-700'}"></div>
+              <span class="text-[9px] font-medium ${live ? 'text-emerald-500' : 'text-slate-700'}">${live ? 'LIVE' : 'OFF'}</span>
+            </div>
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    // ── Refresh ────────────────────────────────────────────────
+    async function refresh() {
+      try {
+        const data = await fetch('/api/pipeline-status').then(r => r.json());
+        setConnected(true);
+        renderContainers(data.containers ?? {});
+        renderStreams(data.streams ?? {});
+        document.getElementById('last-ts').textContent = new Date().toLocaleTimeString('vi-VN', { hour12: false });
+        startCountdown();
+      } catch (e) {
+        setConnected(false);
+        addLog(`Refresh failed: ${e.message}`, 'error');
+      }
+    }
+
+    function manualRefresh() {
+      const icon = document.getElementById('refresh-icon');
+      icon.classList.add('spinning');
+      setTimeout(() => icon.classList.remove('spinning'), 600);
+      clearTimeout(_pollTimer);
+      refresh().finally(() => {
+        _pollTimer = setTimeout(pollLoop, POLL_MS);
+      });
+    }
+
+    function pollLoop() {
+      refresh().finally(() => {
+        _pollTimer = setTimeout(pollLoop, POLL_MS);
+      });
+    }
+
+    // ── Actions ────────────────────────────────────────────────
+    async function doAction(action) {
+      const btn  = document.getElementById(`btn-${action}`);
+      const msgs = { start: 'Starting pipeline…', stop: 'Stopping pipeline…' };
+      addLog(msgs[action], 'info');
+      btn.disabled = true;
+
+      try {
+        const res = await fetch(`/api/${action}`, { method: 'POST' }).then(r => r.json());
+        if (res.ok === false) {
+          addLog(`${action} failed: ${res.error}`, 'error');
+        } else {
+          const parts = Object.entries(res.results ?? {}).map(([k, v]) => `${k}=${v}`).join(', ');
+          addLog(`${action} → ${parts}`, 'success');
+          setTimeout(() => { clearTimeout(_pollTimer); refresh().finally(() => { _pollTimer = setTimeout(pollLoop, POLL_MS); }); }, 1200);
+        }
+      } catch (e) {
+        addLog(`${action} error: ${e.message}`, 'error');
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // ── Copy util ──────────────────────────────────────────────
+    function copyText(el) {
+      navigator.clipboard.writeText(el.textContent.trim()).then(() => {
+        const orig = el.textContent;
+        el.textContent = '✓ copied!';
+        el.classList.add('text-emerald-400');
+        setTimeout(() => { el.textContent = orig; el.classList.remove('text-emerald-400'); }, 1500);
+      });
+    }
+
+    // ── Init ───────────────────────────────────────────────────
+    addLog('Admin panel loaded.', 'info');
+    renderContainers({});
+    renderStreams({ active: [], count: 0 });
+    pollLoop();
+  </script>
+</body>
+</html>

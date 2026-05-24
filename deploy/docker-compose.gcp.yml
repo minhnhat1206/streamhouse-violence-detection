@@ -1,0 +1,593 @@
+# =============================================================================
+# Docker Compose — GCP Deployment (e2-standard-4, 4 vCPU, 16GB RAM, x86_64)
+# Instance: instance-20260524-104630, Region: asia-southeast1-b
+# Usage: cd deploy && docker compose -f docker-compose.gcp.yml --env-file .env.gcp up -d
+# =============================================================================
+# NOTE: Streaming profile (rtsp_pusher, mediamtx, rtsp-inference-mock) requires
+#       the RWF-2000 dataset uploaded to ~/streamhouse/data/raw/RWF-2000/ on VM.
+# =============================================================================
+
+services:
+
+  # ─── KAFKA (KRaft mode) ──────────────────────────────────────────────────
+  kafka:
+    container_name: kafka
+    image: apache/kafka:4.0.1-rc2
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://${GCP_VM_EXTERNAL_IP}:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9094
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_LOG_RETENTION_HOURS: 6
+      KAFKA_LOG_SEGMENT_BYTES: 104857600
+    ports:
+      - "9092:9092"
+      - "9093:9093"    # External (VioMoViNet on remote machine)
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+      - ../scripts/setup:/scripts/setup:ro
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --version || exit 1"]
+      interval: 15s
+      timeout: 30s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.00"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  # ─── MINIO ───────────────────────────────────────────────────────────────
+  minio:
+    container_name: minio
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.50"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  minio_client:
+    container_name: minio_client
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    entrypoint: >
+      /bin/sh -c "
+        sleep 5 &&
+        mc alias set minio http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+        mc mb minio/inference-results || true &&
+        mc mb minio/checkpoint || true &&
+        mc mb minio/evidence-frames || true &&
+        mc mb minio/warehouse || true &&
+        mc mb minio/paimon || true &&
+        mc anonymous set download minio/inference-results || true &&
+        mc anonymous set download minio/evidence-frames || true &&
+        echo 'MinIO buckets initialized'
+      "
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+          cpus: "0.10"
+    networks:
+      - violence-detection-net
+    restart: no
+
+  # ─── MYSQL (Hive Metastore) ──────────────────────────────────────────────
+  mysql:
+    container_name: mysql
+    image: mysql:8.4.5
+    environment:
+      MYSQL_ROOT_PASSWORD: ${METASTORE_DB_PASSWORD}
+      MYSQL_DATABASE: ${METASTORE_DB_NAME}
+      MYSQL_USER: ${METASTORE_DB_USER}
+      MYSQL_PASSWORD: ${METASTORE_DB_PASSWORD}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${METASTORE_DB_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.50"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  # ─── HIVE METASTORE ──────────────────────────────────────────────────────
+  hive-metastore:
+    container_name: hive-metastore
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.hive
+    env_file:
+      - .env.gcp
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9083 || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.25"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  # ─── FLUSS (HOT Layer) ───────────────────────────────────────────────────
+  fluss-zookeeper:
+    container_name: fluss-zookeeper
+    image: zookeeper:3.9.2
+    volumes:
+      - fluss-zookeeper-data:/data
+      - fluss-zookeeper-datalog:/datalog
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.25"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  fluss-coordinator:
+    container_name: fluss-coordinator
+    image: apache/fluss:0.9.0-incubating
+    command: coordinatorServer
+    depends_on:
+      fluss-zookeeper:
+        condition: service_healthy
+    environment:
+      - |
+        FLUSS_PROPERTIES=
+        zookeeper.address: fluss-zookeeper:2181
+        coordinator.host: fluss-coordinator
+        remote.data.dir: s3://paimon/fluss
+        fs.s3.endpoint: http://minio:9000
+        fs.s3.access-key: ${MINIO_ROOT_USER}
+        fs.s3.secret-key: ${MINIO_ROOT_PASSWORD}
+        fs.s3.path.style.access: true
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.50"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  fluss-tablet:
+    container_name: fluss-tablet
+    image: apache/fluss:0.9.0-incubating
+    command: tabletServer
+    depends_on:
+      fluss-coordinator:
+        condition: service_started
+    environment:
+      - |
+        FLUSS_PROPERTIES=
+        zookeeper.address: fluss-zookeeper:2181
+        tablet-server.host: fluss-tablet
+        remote.data.dir: s3://paimon/fluss
+        fs.s3.endpoint: http://minio:9000
+        fs.s3.access-key: ${MINIO_ROOT_USER}
+        fs.s3.secret-key: ${MINIO_ROOT_PASSWORD}
+        fs.s3.path.style.access: true
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.50"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  # ─── FLINK (Compute) ─────────────────────────────────────────────────────
+  jobmanager:
+    container_name: jobmanager
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.flink
+    command: jobmanager
+    ports:
+      - "8081:8081"
+      - "9249:9249"
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        state.backend: rocksdb
+        state.checkpoints.dir: s3://paimon/flink-checkpoints
+        s3.endpoint: http://minio:9000
+        s3.access-key: ${MINIO_ROOT_USER}
+        s3.secret-key: ${MINIO_ROOT_PASSWORD}
+        s3.path.style.access: true
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
+    env_file:
+      - .env.gcp
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/overview || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "0.50"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  taskmanager:
+    container_name: taskmanager
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.flink
+    command: taskmanager
+    ports:
+      - "9250:9250"
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        taskmanager.memory.process.size: 2048m
+        state.backend: rocksdb
+        state.checkpoints.dir: s3://paimon/flink-checkpoints
+        s3.endpoint: http://minio:9000
+        s3.access-key: ${MINIO_ROOT_USER}
+        s3.secret-key: ${MINIO_ROOT_PASSWORD}
+        s3.path.style.access: true
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9250
+    env_file:
+      - .env.gcp
+    volumes:
+      - ../scripts/transform:/opt/flink/scripts
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2500m
+          cpus: "2.00"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  # ─── PIPELINE MANAGER ────────────────────────────────────────────────────
+  pipeline-manager:
+    container_name: pipeline-manager
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.flink
+    command: ["python3", "/opt/flink/scripts/pipeline_manager.py"]
+    environment:
+      FLINK_JOBMANAGER_URL: http://jobmanager:8081
+      FLINK_SQL_GATEWAY_URL: http://flink-sql-gateway:8083
+    env_file:
+      - .env.gcp
+    volumes:
+      - ../scripts/transform:/opt/flink/scripts
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.25"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  # ─── FLINK SQL GATEWAY ───────────────────────────────────────────────────
+  flink-sql-gateway:
+    container_name: flink-sql-gateway
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.flink
+    command: ["bin/sql-gateway.sh", "start-foreground"]
+    ports:
+      - "8083:8083"
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        sql-gateway.endpoint.rest.address: 0.0.0.0
+        sql-gateway.endpoint.rest.port: 8083
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "0.25"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  # ─── TRINO ───────────────────────────────────────────────────────────────
+  # Uses trinodb/trino:440 directly — Paimon catalog is disabled (.disabled suffix),
+  # Iceberg plugin is built-in to the official image. No custom build needed.
+  trino-coordinator:
+    container_name: trino-coordinator
+    image: trinodb/trino:440
+    ports:
+      - "8082:8080"
+    volumes:
+      - ../config/trino/coordinator/etc:/etc/trino
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/v1/info || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "1.00"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  # ─── CHATBOT API ─────────────────────────────────────────────────────────
+  chatbot:
+    container_name: chatbot
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.chatbot
+    ports:
+      - "5002:5002"
+    env_file:
+      - .env.gcp
+    volumes:
+      - chatbot-chroma:/app/chroma_db
+    depends_on:
+      trino-coordinator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5002/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "1.00"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  # ─── ADMIN API (local pipeline control) ──────────────────────────────────
+  admin-api:
+    container_name: admin-api
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.admin
+    profiles: [admin]
+    ports:
+      - "5003:5003"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      MEDIAMTX_API_URL: http://mediamtx:9997
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  # ─── STREAMING (profile — requires RWF-2000 dataset on VM) ──────────────
+  mediamtx:
+    container_name: mediamtx
+    image: bluenviron/mediamtx:latest
+    profiles: [streaming]
+    ports:
+      - "8554:8554"
+      - "8888:8888"
+      - "8889:8889"
+      - "9997:9997"
+    environment:
+      MTX_PROTOCOLS: tcp
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  rtsp_pusher:
+    container_name: rtsp_pusher
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.rtsp-pusher
+    profiles: [streaming]
+    environment:
+      MEDIAMTX_HOST: mediamtx
+      MAX_CAMERAS: "5"
+      CLIPS_PER_CAM: "6"
+      STOP_FILE: /app/tmp/STOP
+    volumes:
+      - ../scripts/streaming/rtsp_pusher.py:/app/rtsp_pusher.py:ro
+      - ../data/raw/RWF-2000:/app/data/raw/RWF-2000:ro
+      - ../data/metadata:/app/data/metadata:ro
+      - rtsp-pusher-tmp:/app/tmp
+    depends_on:
+      mediamtx:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+          cpus: "1.00"
+    networks:
+      - violence-detection-net
+    restart: on-failure
+
+  rtsp-inference-mock:
+    container_name: rtsp-inference-mock
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.producer
+    profiles: [streaming]
+    command: python /app/scripts/rtsp_inference_mock.py
+    environment:
+      KAFKA_BROKER: kafka:9092
+      KAFKA_TOPIC: urban-safety-alerts
+      METADATA_FILE: /app/data/metadata/camera_registry.csv
+      STOP_FILE: /app/tmp/STOP
+      RTSP_FPS: "1"
+      RTSP_TIMEOUT_S: "5"
+      RECONNECT_DELAY_S: "2"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../scripts/streaming:/app/scripts
+      - ../data:/app/data
+      - rtsp-inference-tmp:/app/tmp
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mediamtx:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.00"
+    networks:
+      - violence-detection-net
+    restart: on-failure
+
+  # ─── MONITORING (optional profile) ───────────────────────────────────────
+  prometheus:
+    container_name: prometheus
+    image: prom/prometheus:latest
+    profiles: [monitoring]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus/prometheus.cloud.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.25"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+  grafana:
+    container_name: grafana
+    image: grafana/grafana:latest
+    profiles: [monitoring]
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+    volumes:
+      - grafana-storage:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.25"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
+# ─── VOLUMES ─────────────────────────────────────────────────────────────────
+volumes:
+  kafka-data:
+  minio_data:
+  mysql-data:
+  grafana-storage:
+  prometheus-data:
+  chatbot-chroma:
+  fluss-zookeeper-data:
+  fluss-zookeeper-datalog:
+  rtsp-pusher-tmp:
+  rtsp-inference-tmp:
+
+# ─── NETWORKS ────────────────────────────────────────────────────────────────
+networks:
+  violence-detection-net:
+    external: true
+    name: violence-detection-net
