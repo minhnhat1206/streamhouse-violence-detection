@@ -113,8 +113,6 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: ${METASTORE_DB_PASSWORD}
       MYSQL_DATABASE: ${METASTORE_DB_NAME}
-      MYSQL_USER: ${METASTORE_DB_USER}
-      MYSQL_PASSWORD: ${METASTORE_DB_PASSWORD}
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
@@ -162,6 +160,8 @@ services:
   fluss-zookeeper:
     container_name: fluss-zookeeper
     image: zookeeper:3.9.2
+    environment:
+      ZOO_4LW_COMMANDS_WHITELIST: "srvr,ruok,mntr"
     volumes:
       - fluss-zookeeper-data:/data
       - fluss-zookeeper-datalog:/datalog
