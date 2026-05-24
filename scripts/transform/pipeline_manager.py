@@ -132,10 +132,21 @@ def _run_flink(args: list[str], timeout: int = 180) -> tuple[bool, str]:
     """
     Chạy lệnh /opt/flink/bin/flink với các args cho trước.
     Trả (success, stderr_snippet).
-    Không dùng -D flags trước subcommand vì bị parse là JVM args.
-    FLINK_PROPERTIES env var đã set rest.address + jobmanager.rpc.address.
+    -D flags sau subcommand override flink-conf.yaml (which may have 0.0.0.0 defaults).
     """
-    cmd = ["/opt/flink/bin/flink"] + args
+    jm_host = os.getenv("FLINK_JM_ADDRESS", "jobmanager")
+    # Explicit -D overrides take precedence over any duplicate keys in flink-conf.yaml
+    override_flags = [
+        f"-Drest.address={jm_host}",
+        "-Drest.port=8081",
+        f"-Djobmanager.rpc.address={jm_host}",
+        "-Djobmanager.rpc.port=6123",
+    ]
+    # -D flags must come after the subcommand (e.g. "run") but before jar/script
+    if args and args[0] in ("run", "cancel", "list", "stop"):
+        cmd = ["/opt/flink/bin/flink", args[0]] + override_flags + args[1:]
+    else:
+        cmd = ["/opt/flink/bin/flink"] + args
 
     log.debug("CMD: %s", " ".join(cmd))
 
