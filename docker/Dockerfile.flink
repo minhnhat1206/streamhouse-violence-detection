@@ -49,3 +49,8 @@ RUN wget -q -O /opt/flink/lib/flink-sql-connector-hive-3.1.3_2.12-1.18.1.jar \
 # Tải Iceberg AWS Bundle (chứa AWS SDK v2 cho S3FileIO — cần thiết cho MinIO)
 RUN wget -q -O /opt/flink/lib/iceberg-aws-bundle-1.5.2.jar \
     https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws-bundle/1.5.2/iceberg-aws-bundle-1.5.2.jar
+
+# Enable S3 filesystem plugin for state.checkpoints.dir s3:// paths (MinIO-compatible)
+# Plugin must be in its own subdirectory under /opt/flink/plugins/
+RUN mkdir -p /opt/flink/plugins/s3-fs-hadoop && \
+    cp /opt/flink/opt/flink-s3-fs-hadoop-1.18.1.jar /opt/flink/plugins/s3-fs-hadoop/
