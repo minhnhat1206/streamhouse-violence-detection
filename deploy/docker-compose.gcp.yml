@@ -198,18 +198,11 @@ services:
       fluss-zookeeper:
         condition: service_healthy
     environment:
-      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
-      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
-      - AWS_REGION=us-east-1
       - |
         FLUSS_PROPERTIES=
         zookeeper.address: fluss-zookeeper:2181
         coordinator.host: fluss-coordinator
-        remote.data.dir: s3://paimon/fluss
-        fs.s3.endpoint: http://minio:9000
-        fs.s3.access-key: ${MINIO_ROOT_USER}
-        fs.s3.secret-key: ${MINIO_ROOT_PASSWORD}
-        fs.s3.path.style.access: true
+        remote.data.dir: file:///tmp/fluss-remote
     deploy:
       resources:
         limits:
@@ -227,18 +220,11 @@ services:
       fluss-coordinator:
         condition: service_started
     environment:
-      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
-      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
-      - AWS_REGION=us-east-1
       - |
         FLUSS_PROPERTIES=
         zookeeper.address: fluss-zookeeper:2181
         tablet-server.host: fluss-tablet
-        remote.data.dir: s3://paimon/fluss
-        fs.s3.endpoint: http://minio:9000
-        fs.s3.access-key: ${MINIO_ROOT_USER}
-        fs.s3.secret-key: ${MINIO_ROOT_PASSWORD}
-        fs.s3.path.style.access: true
+        remote.data.dir: file:///tmp/fluss-remote
     deploy:
       resources:
         limits:
