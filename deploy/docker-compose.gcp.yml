@@ -324,6 +324,15 @@ services:
     environment:
       FLINK_JOBMANAGER_URL: http://jobmanager:8081
       FLINK_SQL_GATEWAY_URL: http://flink-sql-gateway:8083
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        jobmanager.rpc.port: 6123
+        rest.address: jobmanager
+        rest.port: 8081
+        s3.endpoint: http://minio:9000
+        s3.access-key: ${MINIO_ROOT_USER}
+        s3.secret-key: ${MINIO_ROOT_PASSWORD}
+        s3.path.style.access: true
     env_file:
       - .env.gcp
     volumes:
