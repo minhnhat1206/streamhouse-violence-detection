@@ -135,8 +135,19 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.hive
-    env_file:
-      - .env.gcp
+    environment:
+      - HIVE_SCHEMA_ACTION=init
+      - WAIT_FOR_HOST=mysql
+      - WAIT_FOR_PORT=3306
+      - WAIT_TIMEOUT=120
+      - HIVE_HOME=/opt/hive
+      - METASTORE_DB_USER=${METASTORE_DB_USER}
+      - METASTORE_DB_PASSWORD=${METASTORE_DB_PASSWORD}
+      - METASTORE_DB_NAME=${METASTORE_DB_NAME}
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ../config/hive_metastore/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
     depends_on:
       mysql:
         condition: service_healthy
