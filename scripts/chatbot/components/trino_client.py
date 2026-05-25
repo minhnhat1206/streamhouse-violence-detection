@@ -373,6 +373,9 @@ class TrinoClient:
         result = result.replace("fluss.", "")
         result = result.replace("historical_violence_incidents", "hot_violence_alerts")
         result = result.replace('"timestamp"', '`timestamp`')
+        # Strip DISTINCT — causes streaming log scan (misses historical data).
+        # KV snapshot scan (plain SELECT) returns all existing records; Python deduplicates.
+        result = re.sub(r'\bSELECT\s+DISTINCT\b', 'SELECT', result, flags=re.IGNORECASE)
         # Map non-existent column aliases that Gemini tends to generate
         # hot_violence_alerts schema (enriched): incident_id, camera_id, timestamp,
         #   risk_score, confidence, is_violent, event_type, location, ward_id, district
