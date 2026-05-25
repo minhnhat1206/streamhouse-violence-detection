@@ -1,8 +1,18 @@
 logLevel: warn
 
-# Management REST API — used by chatbot /api/streaming-status
+# Management REST API
 api: yes
 apiAddress: :9997
+
+# Allow unauthenticated access to the management API (internal network only)
+authInternalUsers:
+- user: any
+  pass:
+  ips: []
+  permissions:
+  - action: api
+  - action: read
+  - action: publish
 
 rtsp: yes
 rtspAddress: :8554

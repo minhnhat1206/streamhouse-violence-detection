@@ -797,6 +797,34 @@ services:
       - "com.example.description=Chatbot API - LangGraph Agentic RAG"
       - "com.example.version=2.0.0"
 
+  # ---- Admin API (local only — RTSP pipeline management) -----
+  admin-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.admin
+    container_name: admin-api
+    profiles: [admin]
+    ports:
+      - "5003:5003"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - MEDIAMTX_API_URL=http://mediamtx:9997
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5003/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
+    networks:
+      - violence-detection-net
+    restart: unless-stopped
+
 networks:
   violence-detection-net:
     name: violence-detection-net
