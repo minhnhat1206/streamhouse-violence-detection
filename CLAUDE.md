@@ -112,6 +112,76 @@ Khi restart, stop file tự xóa. Chi tiết: `docs/agent-guides/stop-mechanism.
 - [Stop Mechanism](docs/agent-guides/stop-mechanism.md) — Graceful stop cho streaming services
 - [Roadmap](docs/agent-guides/roadmap.md) — 8-week plan, checklist, demo script
 
+## GCP Cloud VM — Access & Management
+
+### VM Info
+```
+Instance : instance-20260524-104630
+Zone     : asia-southeast1-b
+IP (ext) : 136.110.16.108
+Username : user   ← KHÔNG phải ubuntu
+Project  : project-65c40e4a-6eda-4c02-87a
+```
+
+### gcloud CLI Location (Windows)
+```
+PowerShell / cmd : C:\Users\user\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd
+Bash (Git Bash)  : /c/Users/user/AppData/Local/Google/Cloud SDK/google-cloud-sdk/bin/gcloud
+```
+Không dùng `oracle-streamhouse.key` cho GCP — key đó dành cho Oracle Cloud (project cũ).
+
+### SSH vào VM (Bash)
+```bash
+GCLOUD="/c/Users/user/AppData/Local/Google/Cloud SDK/google-cloud-sdk/bin/gcloud"
+"$GCLOUD" compute ssh instance-20260524-104630 --zone=asia-southeast1-b
+```
+
+### Chạy lệnh từ xa (không cần SSH shell)
+```bash
+GCLOUD="/c/Users/user/AppData/Local/Google/Cloud SDK/google-cloud-sdk/bin/gcloud"
+"$GCLOUD" compute ssh instance-20260524-104630 --zone=asia-southeast1-b \
+  --command='docker ps'
+```
+
+### Copy file lên VM
+```bash
+GCLOUD="/c/Users/user/AppData/Local/Google/Cloud SDK/google-cloud-sdk/bin/gcloud"
+"$GCLOUD" compute scp deploy/docker-compose.gcp.yml \
+  instance-20260524-104630:~/streamhouse/deploy/ --zone=asia-southeast1-b
+```
+
+### Start / Stop VM (tiết kiệm chi phí)
+```bash
+GCLOUD="/c/Users/user/AppData/Local/Google/Cloud SDK/google-cloud-sdk/bin/gcloud"
+
+# Dừng VM (giữ nguyên disk, không tính phí CPU)
+"$GCLOUD" compute instances stop instance-20260524-104630 --zone=asia-southeast1-b
+
+# Khởi động lại VM
+"$GCLOUD" compute instances start instance-20260524-104630 --zone=asia-southeast1-b
+
+# Kiểm tra trạng thái
+"$GCLOUD" compute instances list
+```
+
+### Sau khi start VM lại — Khởi động services
+```bash
+# SSH vào VM
+"$GCLOUD" compute ssh instance-20260524-104630 --zone=asia-southeast1-b --command='
+  cd ~/streamhouse
+  docker compose -f deploy/docker-compose.gcp.yml --env-file deploy/.env.gcp up -d
+'
+```
+**LƯU Ý:** Sau khi start lại VM, pipeline-manager tự khởi động lại tất cả Flink jobs.
+Chờ ~5 phút để dim_camera được seed và các jobs ổn định.
+
+### Gửi test events từ local lên GCP Kafka
+```bash
+# GCP Kafka external port: 9093
+# Xem send_test_events.py trong project root
+python3 send_test_events.py
+```
+
 ## Key Ports
 | Service | Port |
 |---------|------|

@@ -359,11 +359,20 @@ services:
     ports:
       - "8083:8083"
     environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
+        jobmanager.rpc.port: 6123
+        rest.address: jobmanager
+        rest.port: 8081
         sql-gateway.endpoint.rest.address: 0.0.0.0
         sql-gateway.endpoint.rest.port: 8083
+        s3.endpoint: http://minio:9000
+        s3.access-key: ${MINIO_ROOT_USER}
+        s3.secret-key: ${MINIO_ROOT_PASSWORD}
+        s3.path.style.access: true
     depends_on:
       jobmanager:
         condition: service_healthy
@@ -416,6 +425,9 @@ services:
       - "5002:5002"
     env_file:
       - .env.gcp
+    environment:
+      FLINK_GATEWAY_HOST: flink-sql-gateway
+      FLINK_GATEWAY_PORT: "8083"
     volumes:
       - chatbot-chroma:/app/chroma_db
     depends_on:

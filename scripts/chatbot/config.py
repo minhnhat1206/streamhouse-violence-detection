@@ -75,7 +75,7 @@ class Settings(BaseSettings):
 
     # Flink SQL Gateway Configuration (HOT layer Fluss queries)
     FLINK_GATEWAY_HOST: str = Field(
-        default="jobmanager",
+        default="flink-sql-gateway",
         description="Flink SQL Gateway hostname"
     )
     FLINK_GATEWAY_PORT: int = Field(
