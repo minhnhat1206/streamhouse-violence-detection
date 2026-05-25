@@ -16,5 +16,13 @@
       "autoPort": false,
       "cwd": "C:/Users/user/Desktop/Khoa_Luan/realtime-violence-detection/Violence-Urban-Safety-UI/frontend"
     }
+    ,
+    {
+      "name": "admin-ui-preview",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "5303"],
+      "port": 5303,
+      "cwd": "scripts/admin"
+    }
   ]
 }
