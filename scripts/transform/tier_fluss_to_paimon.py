@@ -15,13 +15,13 @@ Phase 2 — DELETE (best-effort):
   If Fluss DELETE is unsupported by the connector version, logs a warning
   and exits cleanly (Phase 1 data is still committed to Paimon WARM).
   Aged records in Fluss will not be returned by HOT queries anyway, because
-  the chatbot routes queries by time_period: <1 hour → Fluss, else → Paimon.
+  the chatbot routes queries by time_period: <1 hour → Fluss, ≥1 hour → Paimon.
 
 Run by pipeline_manager.py every TIERING_INTERVAL_MINS minutes (blocking).
     flink run -py /opt/flink/scripts/tier_fluss_to_paimon.py
 
 Environment variables:
-  TIERING_HOURS              - Minimum age before tiering (default: 2)
+  TIERING_HOURS              - Minimum age before tiering (default: 1)
   TIERING_PHASE1_WAIT_SECS   - Seconds to wait for Paimon checkpoints (default: 120)
   TIERING_PHASE2_WAIT_SECS   - Timeout for Fluss DELETE phase (default: 60)
   FLUSS_COORDINATOR          - Fluss coordinator address (default: fluss-coordinator:9123)
@@ -35,7 +35,7 @@ from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.table import StreamTableEnvironment
 from pyflink.table.statement_set import StatementSet
 
-TIERING_HOURS    = int(os.getenv("TIERING_HOURS",            "2"))
+TIERING_HOURS    = int(os.getenv("TIERING_HOURS",            "1"))
 PHASE1_WAIT_SECS = int(os.getenv("TIERING_PHASE1_WAIT_SECS", "120"))
 PHASE2_WAIT_SECS = int(os.getenv("TIERING_PHASE2_WAIT_SECS",  "60"))
 
