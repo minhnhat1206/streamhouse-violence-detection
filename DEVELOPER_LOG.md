@@ -13,16 +13,46 @@ Xây dựng hệ thống phát hiện bạo lực thời gian thực (**Streamho
 
 ---
 
-### 🗺️ Plan Session 46 — Local RTSP Stream + Vercel HLS Display
+### 🗺️ Plan Session 46 — Local RTSP → GCP Kafka (rtsp_inference_mock thay AI model)
 
-> **Mục tiêu:** Start RTSP pipeline local, expose HLS qua ngrok → Vercel dashboard.
+> **Mục tiêu chính:** Chạy RTSP pipeline local (`rtsp_pusher` + `rtsp-inference-mock`) để gửi
+> events lên GCP Kafka — thay cho `send_test_events.py` (fake hoàn toàn).
+> `rtsp_inference_mock` capture frame thật từ RWF-2000 clips, tạo mock AI scores, gửi lên Kafka.
+> AI model thật sẽ thay thế mock sau khi model training hoàn tất.
 
-#### Deferred (Session 46+) — Vercel HLS Display
+#### Bước 1 — Start local RTSP stack
+```bash
+# Tất cả images đã build sẵn (kiểm tra: docker-rtsp_pusher:latest, docker-rtsp-inference-mock:latest)
+docker compose -f docker/docker-compose.local-stream.yml up -d
+
+# Theo dõi:
+docker logs rtsp-inference-mock -f
+# Expected: [cam_01] VIOLENCE | score=0.92x hoặc Normal | score=0.0xx
+
+# Stop sau khi test:
+docker exec rtsp-inference-mock touch /app/tmp/STOP
+docker exec rtsp_pusher touch /app/tmp/STOP
+```
+
+#### Bước 2 — Verify events lên GCP Kafka và HOT layer
+```bash
+# Sau ~2 phút, query chatbot:
+curl -X POST http://34.21.199.109:5002/chat \
+  -H "Content-Type: application/json" \
+  -d '{"query":"camera nao co canh bao trong 30 phut qua?"}'
+# Expected: layer=Fluss, danh sách cameras với violence alerts thật từ RTSP
+```
+
+#### Bước 3 (tùy chọn) — Vercel HLS Display
 - ngrok expose port 8888 → public HTTPS URL
 - React Camera Grid: thêm `hls.js` player, đọc `https://<ngrok>/cam_XX/index.m3u8`
 - Config: env var `VITE_HLS_BASE_URL` cho ngrok URL
-- Local RTSP: `docker compose -f docker/docker-compose.local-stream.yml up -d`
-- Stop: `docker exec rtsp-inference-mock touch /app/tmp/STOP && docker exec rtsp_pusher touch /app/tmp/STOP`
+
+#### Lưu ý QUAN TRỌNG
+- `send_test_events.py` là **fake hoàn toàn** (random, không có RTSP frame) — KHÔNG dùng để demo
+- `rtsp_inference_mock.py` là **mock AI** nhưng có RTSP frame thật từ RWF-2000 dataset
+- GCP VM IP có thể thay đổi sau mỗi lần restart — kiểm tra `gcloud compute instances list`
+- GCP VM cần được start trước: `gcloud compute instances start instance-20260524-104630 --zone=asia-southeast1-b`
 
 ---
 
