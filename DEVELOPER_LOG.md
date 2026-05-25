@@ -13,46 +13,61 @@ Xây dựng hệ thống phát hiện bạo lực thời gian thực (**Streamho
 
 ---
 
-### 🗺️ Plan Session 46 — Local RTSP → GCP Kafka (rtsp_inference_mock thay AI model)
+### 🗺️ Plan Session 46 — Local RTSP → GCP Kafka ✅ COMPLETED
 
-> **Mục tiêu chính:** Chạy RTSP pipeline local (`rtsp_pusher` + `rtsp-inference-mock`) để gửi
-> events lên GCP Kafka — thay cho `send_test_events.py` (fake hoàn toàn).
-> `rtsp_inference_mock` capture frame thật từ RWF-2000 clips, tạo mock AI scores, gửi lên Kafka.
-> AI model thật sẽ thay thế mock sau khi model training hoàn tất.
+> **Kết quả:** Toàn bộ P0–P3 hoàn thành. RTSP pipeline local verified E2E.
+> HLS player trên Vercel ready (chỉ cần ngrok để dùng).
 
-#### Bước 1 — Start local RTSP stack
+---
+
+### 🗺️ Plan Session 47 — Vercel HLS Live Demo + Thesis
+
+> **Mục tiêu:** Demo đầy đủ với live video trên Vercel, viết báo cáo thesis.
+
+#### Bước 1 — Bật ngrok expose HLS
 ```bash
-# Tất cả images đã build sẵn (kiểm tra: docker-rtsp_pusher:latest, docker-rtsp-inference-mock:latest)
+# Cài ngrok nếu chưa có: https://ngrok.com/download
+# Expose local MediaMTX HLS port:
+ngrok http 8888
+
+# Copy HTTPS URL (e.g., https://xxxx.ngrok-free.app)
+# Vào Vercel app → Settings page → dán URL → Save
+```
+
+#### Bước 2 — Start local RTSP + ngrok
+```bash
+# Start local RTSP stack
 docker compose -f docker/docker-compose.local-stream.yml up -d
 
-# Theo dõi:
-docker logs rtsp-inference-mock -f
-# Expected: [cam_01] VIOLENCE | score=0.92x hoặc Normal | score=0.0xx
+# Start ngrok (cửa sổ riêng)
+ngrok http 8888
 
-# Stop sau khi test:
+# Mở Vercel app, vào Settings, paste ngrok URL, Save
+# Live Streams page sẽ tự load HLS streams
+```
+
+#### Bước 3 — Verify E2E demo
+```bash
+# Query GCP chatbot
+curl -X POST http://34.21.199.109:5002/chat \
+  -H "Content-Type: application/json" \
+  -d '{"query":"camera nao co canh bao trong 30 phut qua?"}'
+
+# Stop sau demo:
 docker exec rtsp-inference-mock touch /app/tmp/STOP
 docker exec rtsp_pusher touch /app/tmp/STOP
 ```
 
-#### Bước 2 — Verify events lên GCP Kafka và HOT layer
-```bash
-# Sau ~2 phút, query chatbot:
-curl -X POST http://34.21.199.109:5002/chat \
-  -H "Content-Type: application/json" \
-  -d '{"query":"camera nao co canh bao trong 30 phut qua?"}'
-# Expected: layer=Fluss, danh sách cameras với violence alerts thật từ RTSP
-```
-
-#### Bước 3 (tùy chọn) — Vercel HLS Display
-- ngrok expose port 8888 → public HTTPS URL
-- React Camera Grid: thêm `hls.js` player, đọc `https://<ngrok>/cam_XX/index.m3u8`
-- Config: env var `VITE_HLS_BASE_URL` cho ngrok URL
+#### Bước 4 — Thesis work (P4)
+- Benchmark: GCP vs local latency (HOT <100ms target)
+- Architecture diagrams (Streamhouse Trio flow)
+- Performance metrics section
 
 #### Lưu ý QUAN TRỌNG
-- `send_test_events.py` là **fake hoàn toàn** (random, không có RTSP frame) — KHÔNG dùng để demo
-- `rtsp_inference_mock.py` là **mock AI** nhưng có RTSP frame thật từ RWF-2000 dataset
-- GCP VM IP có thể thay đổi sau mỗi lần restart — kiểm tra `gcloud compute instances list`
-- GCP VM cần được start trước: `gcloud compute instances start instance-20260524-104630 --zone=asia-southeast1-b`
+- ngrok URL thay đổi mỗi lần restart → cần update lại trong Settings page
+- GCP VM IP: `34.21.199.109` (có thể thay đổi sau VM restart)
+- Local RTSP stack: `docker compose -f docker/docker-compose.local-stream.yml up -d`
+- KHÔNG dùng `send_test_events.py` để demo (fake data)
 
 ---
 
@@ -140,53 +155,42 @@ curl -X POST http://136.110.16.108:5002/chat \
 
 ---
 
-### 📍 Last State (Updated: 2026-05-25 — Session 45) ✅ HOT Pipeline + Chatbot VERIFIED
+### 📍 Last State (Updated: 2026-05-25 — Session 46) ✅ RTSP E2E + HLS Player VERIFIED
 
-- **Agent vừa làm:** Claude (Session 45 — Local stream compose, GCP VM restart, chatbot E2E verify)
-- **Trạng thái:** HOT pipeline WORKING ✅, chatbot Fluss routing + data VERIFIED ✅
-- **Nhánh git:** `deploy/hybrid-cloud`
+- **Agent vừa làm:** Claude (Session 46 — Git sync, GCP rebuild, RTSP E2E test, HLS player)
+- **Trạng thái:** Full pipeline WORKING ✅, HLS player on Vercel READY (cần ngrok) ✅
+- **Nhánh git:** `deploy/hybrid-cloud` (commit `144736e`)
 - **GCP VM:** `instance-20260524-104630` — **ĐANG CHẠY** (IP: `34.21.199.109`)
 
 ---
 
-#### ✅ Đã hoàn thành (session 43–45, verified end-to-end)
+#### ✅ Đã hoàn thành (session 43–46)
 
 | Hạng mục | Chi tiết |
 |----------|---------|
 | Kafka external port 9093 | Local → GCP Kafka hoạt động ✅ |
 | Contract Validator | Valid events → `hot-violence-alerts-valid` ✅ |
-| HOT job Fluss | `insert-into_fluss.security.hot_violence_alerts` — 60 rows với enriched location ✅ |
-| dim_camera seeding | 15 cameras, Quận 1 HCM, temporal join hoạt động ✅ |
-| flink-sql-gateway | `rest.address: jobmanager` fixed, FLINK_GATEWAY_HOST fixed ✅ |
-| S3 plugin (exec-fix) | JAR copied vào tất cả Flink containers ✅ |
-| Chatbot Fluss routing | "30 phut qua" → Fluss → **15 rows real data** ✅ |
-| DISTINCT bug fix | `_adapt_sql_for_flink_hot` now strips SELECT DISTINCT → SELECT ✅ |
-| `docker-compose.local-stream.yml` | Created for local RTSP → GCP Kafka (no local Kafka needed) |
+| HOT job Fluss | Enriched location, 15 cameras ✅ |
+| dim_camera seeding | 15 cameras, Quận 1 HCM, temporal join ✅ |
+| flink-sql-gateway | rest.address + FLINK_GATEWAY_HOST fixed ✅ |
+| S3 plugin — PERMANENT | Baked into `docker/Dockerfile.flink` (commit `431c60b`), GCP rebuilt ✅ |
+| Chatbot | "30 phut qua" → Fluss → 15 camera locations, layer=Fluss ✅ |
+| RTSP E2E test | `docker compose -f docker/docker-compose.local-stream.yml up -d` → 15 cameras → GCP Kafka → Fluss → chatbot 15 rows ✅ |
+| GCP VM git sync | `git pull` + `docker compose build jobmanager chatbot` + containers restarted ✅ |
+| HLS player (Vercel) | `HLSPlayer.jsx` (hls.js), Settings page ngrok URL input, localStorage persist ✅ |
+| Admin API | Standalone `admin-api` service (port 5003, profile admin) for RTSP start/stop ✅ |
 
-**Pipeline test PASS:**
-- 60 events gửi từ local `send_test_events.py` → GCP Kafka → Contract Validator → Fluss HOT (60 rows)
-- Chatbot query: "camera nao co canh bao trong 30 phut qua?" → Layer=Fluss, 15 camera locations ✅
+**RTSP E2E test PASS (session 46):**
+- `docker compose -f docker/docker-compose.local-stream.yml up -d` → 15 cameras live
+- Violence events generated by rtsp-inference-mock → GCP Kafka
+- Chatbot: "camera nao co canh bao trong 30 phut qua?" → **15 rows, layer=Fluss** ✅
 
 ---
 
-#### ❌ Bugs còn tồn đọng
+#### ⚠️ Trạng thái local
 
-**1. S3 plugin sẽ mất khi container RECREATE:**
-- Docker images build TRƯỚC khi có S3 plugin fix trong Dockerfile
-- Nếu container bị recreate → `UnsupportedFileSystemSchemeException: scheme 's3'`
-- **Temporary fix** (chạy sau khi start containers):
-  ```bash
-  for C in jobmanager taskmanager flink-sql-gateway pipeline-manager; do
-    docker exec $C bash -c 'mkdir -p /opt/flink/plugins/s3-fs-hadoop && cp /opt/flink/opt/flink-s3-fs-hadoop-1.18.1.jar /opt/flink/plugins/s3-fs-hadoop/' 2>/dev/null
-  done
-  docker restart jobmanager taskmanager flink-sql-gateway pipeline-manager
-  ```
-- **Permanent fix:** rebuild images từ `docker/Dockerfile.flink` (đã có RUN cp S3 jar)
-
-**2. RTSP pipeline local chưa test end-to-end với GCP:**
-- `docker/docker-compose.local-stream.yml` đã tạo nhưng chưa chạy end-to-end test
-- `docker-rtsp_pusher:latest` image cần build trước (local image)
-- Stop: `docker exec rtsp-inference-mock touch /app/tmp/STOP && docker exec rtsp_pusher touch /app/tmp/STOP`
+- **Local RTSP stack**: `mediamtx + rtsp_pusher + rtsp-inference-mock` đang chạy (session 46 test)
+- **Stop khi xong**: `docker exec rtsp-inference-mock touch /app/tmp/STOP && docker exec rtsp_pusher touch /app/tmp/STOP`
 
 ---
 
@@ -200,41 +204,32 @@ GCLOUD="/c/Users/user/AppData/Local/Google/Cloud SDK/google-cloud-sdk/bin/gcloud
 
 # 2. Chờ ~30s rồi SSH
 "$GCLOUD" compute ssh instance-20260524-104630 --zone=asia-southeast1-b --strict-host-key-checking=no --command='
-  cd ~/streamhouse
-  docker compose -f deploy/docker-compose.gcp.yml --env-file deploy/.env.gcp up -d
+  cd ~/streamhouse/deploy
+  docker compose -f docker-compose.gcp.yml --env-file .env.gcp up -d
 '
+# NOTE: S3 plugin đã baked trong image — KHÔNG cần exec-fix nữa
+# Chờ ~5 phút để pipeline-manager seed dim_camera và submit Flink jobs
 
-# 3. Fix S3 plugin (quan trọng nếu containers bị recreate)
-"$GCLOUD" compute ssh instance-20260524-104630 --zone=asia-southeast1-b --strict-host-key-checking=no --command='
-  for C in jobmanager taskmanager flink-sql-gateway pipeline-manager; do
-    docker exec $C bash -c "mkdir -p /opt/flink/plugins/s3-fs-hadoop && cp /opt/flink/opt/flink-s3-fs-hadoop-1.18.1.jar /opt/flink/plugins/s3-fs-hadoop/" 2>/dev/null
-  done
-  docker restart jobmanager taskmanager flink-sql-gateway pipeline-manager
-'
-
-# 4. Chờ ~5 phút để pipeline-manager seed dim_camera và submit Flink jobs
-
-# 5. Gửi test events từ local
-python3 send_test_events.py   # GCP IP đã được cập nhật (34.21.199.109)
-
-# 6. Verify chatbot (sau ~60s)
+# 3. Verify chatbot (sau ~5 phút)
 curl -X POST http://34.21.199.109:5002/chat \
   -H "Content-Type: application/json" \
   -d '{"query":"camera nao co canh bao trong 30 phut qua?"}'
-# Expected: "layer": "Fluss", 15+ cameras/locations
 ```
 
 ---
 
-#### 📂 Files đã thay đổi (session 45, cần commit)
+#### 📂 Files đã thay đổi (session 46, đã commit)
 
 | File | Thay đổi |
 |------|---------|
-| `docker/docker-compose.local-stream.yml` | MỚI — lightweight local RTSP → GCP Kafka compose |
-| `send_test_events.py` | Update GCP IP: `136.110.16.108` → `34.21.199.109` |
-| `scripts/chatbot/components/trino_client.py` | Fix SELECT DISTINCT bug (streaming vs KV scan) |
-| `deploy/docker-compose.gcp.yml` | Fix sql-gateway FLINK_PROPERTIES + chatbot FLINK_GATEWAY_HOST |
-| `scripts/chatbot/config.py` | `FLINK_GATEWAY_HOST` default `"jobmanager"` → `"flink-sql-gateway"` |
+| `scripts/admin/main.py` + `index.html` | MỚI — admin-api service |
+| `docker/Dockerfile.admin` | MỚI — admin-api Docker image |
+| `docker/docker-compose.yml` | Thêm admin-api service (profile admin) |
+| `config/mediamtx/mediamtx.yml` | Auth config cho internal API access |
+| `scripts/chatbot/main.py` | Xóa `/api/streaming-status` (moved to admin-api) |
+| `Violence-Urban-Safety-UI/frontend/src/common/HLSPlayer.jsx` | MỚI — hls.js player |
+| `Violence-Urban-Safety-UI/frontend/src/pages/LiveStreams.jsx` | Replace WebRTC → HLS, fix streaming-status |
+| `Violence-Urban-Safety-UI/frontend/src/pages/Settings.jsx` | Add HLS URL config section |
 
 ---
 
@@ -266,5 +261,6 @@ Chatbot:          WORKING — Fluss routing verified (15 camera locations return
 > **Lịch sử sessions cũ (Session 1–43):** Xem trong git history hoặc file `.claude/projects/.../memory/`.  
 > Tóm tắt: Toàn bộ local stack hoàn thiện qua Sessions 18–43.  
 > Session 43: Grafana/Prometheus setup, React UI (Analytics + StreamhouseStatus pages), 22/23 E2E tests PASS.  
-> Session 40: Hard reset, RTSP pipeline sole data source, 9624+ HOT events, chatbot routing 100% correct.
+> Session 40: Hard reset, RTSP pipeline sole data source, 9624+ HOT events, chatbot routing 100% correct.  
+> Session 46: RTSP E2E verified (local → GCP → Fluss → chatbot). HLS player deployed to Vercel (hls.js + ngrok URL). S3 plugin baked permanently in Dockerfile.flink.
 
