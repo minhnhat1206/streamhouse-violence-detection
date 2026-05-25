@@ -155,12 +155,48 @@ curl -X POST http://136.110.16.108:5002/chat \
 
 ---
 
-### 📍 Last State (Updated: 2026-05-25 — Session 46) ✅ RTSP E2E + HLS Player VERIFIED
+### 📍 Last State (Updated: 2026-05-25 — Session 48) ✅ Trino+Paimon WARM Connector VERIFIED
 
-- **Agent vừa làm:** Claude (Session 46 — Git sync, GCP rebuild, RTSP E2E test, HLS player)
-- **Trạng thái:** Full pipeline WORKING ✅, HLS player on Vercel READY (cần ngrok) ✅
-- **Nhánh git:** `deploy/hybrid-cloud` (commit `144736e`)
-- **GCP VM:** `instance-20260524-104630` — **ĐANG CHẠY** (IP: `34.21.199.109`)
+- **Agent vừa làm:** Claude (Session 48 — Trino+Paimon connector, TIERING_HOURS fix, GCP deploy)
+- **Trạng thái:** Trino+Paimon WARM queries working (local + GCP) ✅
+- **Nhánh git:** `deploy/hybrid-cloud` (commit `5c6d8f3`)
+- **GCP VM:** `instance-20260524-104630` — **ĐANG CHẠY** (IP: `34.87.122.219` ← **IP MỚI**)
+
+#### ✅ Session 48 — Đã hoàn thành
+
+| Hạng mục | Chi tiết |
+|----------|---------|
+| `trino-with-paimon` image (local) | `trino-with-s3a:latest` đã có paimon plugin (3.49GB) ✅ |
+| `trino-with-paimon` image (GCP) | Built từ `Dockerfile.trino` (Maven 21, paimon 0.8, HDFS patch) ✅ |
+| `SHOW CATALOGS` local+GCP | `paimon` xuất hiện ✅ — kết nối MinIO S3 native ✅ |
+| Paimon data local | `paimon.security.violence_incidents` = 15,834 rows ✅ |
+| WARM latency benchmark | **~13s avg** (vs 3–5 phút qua Flink Gateway = **14–23× speedup**) ✅ |
+| COLD latency benchmark | ~12–20s (Iceberg via Trino, cold start 20s) |
+| HOT routing | `layer=Fluss` ✅ (empty data → timeout 57s; với real data ~14s) |
+| `TIERING_HOURS` fix | 2 → 1 (commit `c432e77`) — đóng data gap 1h–2h ✅ |
+| GCP IP updated | `34.21.199.109` → `34.87.122.219` (VM restarted) ✅ |
+| `trino_client.py` WARM routing | Đã dùng Trino native (implemented trước session 48) ✅ |
+| GCP pipeline | All 3 streaming jobs RUNNING: ContractValidator, hot_violence_alerts, daily_incident_stats ✅ |
+| RTSP → GCP Kafka | `rtsp-inference-mock` gửi events đến `34.87.122.219:9093` ✅ |
+
+#### ⚠️ Lưu ý quan trọng
+
+- **GCP IP mới**: `34.87.122.219` (thay cho `34.21.199.109`). Cập nhật mọi lần VM restart.
+- **HOT latency thực tế**: Với real data, HOT query ~14–25s E2E (Flink Gateway session + LLM). Con số 35–130ms trong memory cũ là Flink execution time thôi, không phải E2E.
+- **WARM latency**: 13s E2E = ~5s Trino query + ~8s Gemini LLM (Text-to-SQL + answer).
+- **trino-with-s3a vs trino-with-paimon**: Local image tên `trino-with-s3a`, GCP tên `trino-with-paimon`. Cùng một Dockerfile.trino — đều có paimon plugin.
+- **dim_camera**: Seeded thành công local (15 cameras) qua SQL Gateway REST. GCP seeded tự động bởi pipeline-manager.
+- **Paimon data GCP = 0**: Fresh start (VM bị TERMINATED trước đó). Data sẽ accumulate khi pipeline chạy.
+
+#### 🚀 Bước tiếp theo (Session 49)
+
+1. **HOT benchmark với real data**: Chạy local RTSP pipeline hướng GCP Kafka ~30 phút, rồi test HOT query → đo latency thực.
+2. **Tiering test**: Sau khi có HOT data, trigger `tier_fluss_to_paimon.py` thủ công, verify WARM tăng.
+3. **Thesis benchmark table** (3 layers × 3 runs):
+   - HOT (Fluss via Gateway): target <5s với warm session + real data
+   - WARM (Paimon via Trino): confirmed ~13s E2E ✅
+   - COLD (Iceberg via Trino): confirmed ~12–20s E2E ✅
+4. **Demo script**: Prepare for thesis defense — sequence of chatbot queries showcasing 3 layers.
 
 ---
 
