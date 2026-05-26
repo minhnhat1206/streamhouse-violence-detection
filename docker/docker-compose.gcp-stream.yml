@@ -1,0 +1,4 @@
+services:
+  rtsp-inference-mock:
+    environment:
+      KAFKA_BROKER: "34.87.122.219:9093"
