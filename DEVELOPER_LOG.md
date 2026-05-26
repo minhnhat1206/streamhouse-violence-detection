@@ -155,48 +155,140 @@ curl -X POST http://136.110.16.108:5002/chat \
 
 ---
 
-### 📍 Last State (Updated: 2026-05-25 — Session 48) ✅ Trino+Paimon WARM Connector VERIFIED
+### 📍 Last State (Updated: 2026-05-26 — Session 51) ✅ GCP Tiering VERIFIED + Commit DONE
 
-- **Agent vừa làm:** Claude (Session 48 — Trino+Paimon connector, TIERING_HOURS fix, GCP deploy)
-- **Trạng thái:** Trino+Paimon WARM queries working (local + GCP) ✅
-- **Nhánh git:** `deploy/hybrid-cloud` (commit `5c6d8f3`)
-- **GCP VM:** `instance-20260524-104630` — **ĐANG CHẠY** (IP: `34.87.122.219` ← **IP MỚI**)
+- **Agent vừa làm:** Claude (Session 51 — verify GCP tiering fix, Paimon data confirmed, taskmanager rebuilt)
+- **Trạng thái:** GCP pipeline STABLE. Tất cả 3 Flink jobs RUNNING. Paimon có 10,226 rows. Commit `c37fa4b` pushed.
+- **Nhánh git:** `deploy/hybrid-cloud` (clean — đã commit `deploy/docker-compose.gcp.yml`)
+- **GCP VM:** `instance-20260524-104630` — **ĐANG CHẠY** (IP: `34.87.122.219`)
 
-#### ✅ Session 48 — Đã hoàn thành
+---
+
+#### ✅ Session 51 — Đã hoàn thành
 
 | Hạng mục | Chi tiết |
 |----------|---------|
-| `trino-with-paimon` image (local) | `trino-with-s3a:latest` đã có paimon plugin (3.49GB) ✅ |
-| `trino-with-paimon` image (GCP) | Built từ `Dockerfile.trino` (Maven 21, paimon 0.8, HDFS patch) ✅ |
-| `SHOW CATALOGS` local+GCP | `paimon` xuất hiện ✅ — kết nối MinIO S3 native ✅ |
-| Paimon data local | `paimon.security.violence_incidents` = 15,834 rows ✅ |
-| WARM latency benchmark | **~13s avg** (vs 3–5 phút qua Flink Gateway = **14–23× speedup**) ✅ |
-| COLD latency benchmark | ~12–20s (Iceberg via Trino, cold start 20s) |
-| HOT routing | `layer=Fluss` ✅ (empty data → timeout 57s; với real data ~14s) |
-| `TIERING_HOURS` fix | 2 → 1 (commit `c432e77`) — đóng data gap 1h–2h ✅ |
-| GCP IP updated | `34.21.199.109` → `34.87.122.219` (VM restarted) ✅ |
-| `trino_client.py` WARM routing | Đã dùng Trino native (implemented trước session 48) ✅ |
-| GCP pipeline | All 3 streaming jobs RUNNING: ContractValidator, hot_violence_alerts, daily_incident_stats ✅ |
-| RTSP → GCP Kafka | `rtsp-inference-mock` gửi events đến `34.87.122.219:9093` ✅ |
+| Tiering verified ✅ | `✓ Tiering job completed successfully.` @ 03:41:42 UTC (4 phút sau trigger 03:37:55) |
+| Paimon data verified ✅ | `SELECT COUNT(*) FROM violence_incidents` = **10,226 rows** |
+| Taskmanager image rebuild ✅ | `deploy-taskmanager:latest` built successfully — S3 plugin baked in |
+| Taskmanager recreated ✅ | `docker compose up -d --force-recreate taskmanager` — new image active |
+| 3 Flink jobs RUNNING ✅ | Contract Validator + hot_violence_alerts (Fluss) + daily_incident_stats (Paimon) |
+| Git commit ✅ | `c37fa4b` — `fix(gcp): add shared fluss-remote-data volume for tiering coordinator-tablet-taskmanager` |
 
-#### ⚠️ Lưu ý quan trọng
+#### ✅ Session 50 — Đã hoàn thành
+
+| Hạng mục | Chi tiết |
+|----------|---------|
+| Root cause GCP tiering fail | `_METADATA` files ở coordinator `/tmp/fluss-remote`; taskmanager đọc từ TMP riêng (không shared) ✅ Đã xác định |
+| Fix: Shared Docker volume | Thêm `fluss-remote-data` vào `deploy/docker-compose.gcp.yml` — coordinator + tablet + taskmanager mount cùng `/var/fluss/remote-data` ✅ |
+| `_METADATA` files verified | `/var/fluss/remote-data/kv/security/hot_violence_alerts-14/*/snap-0/_METADATA` — tất cả 3 buckets ✅ |
+| Secondary: S3 plugin missing | `deploy-taskmanager` image (built 2026-05-24) thiếu S3 plugin trong `/opt/flink/plugins/`. Quick-fix: copy jar + restart taskmanager ✅ |
+| Taskmanager rebuild | Completed in Session 51 ✅ |
+| 3 Flink jobs RUNNING | Contract Validator + sink_to_fluss_enriched + aggregate_paimon ✅ |
+| Tiering triggered | Completed in Session 51 ✅ — 10,226 rows in Paimon |
+
+#### 🔍 Session kế — VIỆC CẦN LÀM TIẾP THEO
+
+> **Tất cả checklist Session 50 đã hoàn thành trong Session 51.** GCP pipeline stable.
+
+**[P1] Thesis writeup — Performance Evaluation chapter:**
+- Dùng benchmark table từ Session 49 (bên dưới)
+- HOT 100ms native ✅, WARM 5.9s ✅, COLD 9.5s ✅
+- Ghi rõ: Chatbot E2E = Gemini intent (~8s) + ChromaDB (~1s) + query + Gemini answer (~8s)
+
+**[P2] Demo script cho buổi bảo vệ:**
+```
+Q1: "Camera nào có cảnh báo bạo lực trong 30 phút qua?" → HOT (Fluss)
+Q2: "Thống kê bạo lực trong 3 giờ qua?" → WARM (Paimon)
+Q3: "Dữ liệu tháng trước?" → COLD (Iceberg)
+```
+
+**[P3] GCP quy trình khởi động lại (nếu VM bị stop):**
+```bash
+GCLOUD="/c/Users/user/AppData/Local/Google/Cloud SDK/google-cloud-sdk/bin/gcloud"
+"$GCLOUD" compute instances start instance-20260524-104630 --zone=asia-southeast1-b
+# Chờ 30s rồi:
+"$GCLOUD" compute ssh instance-20260524-104630 --zone=asia-southeast1-b --strict-host-key-checking=no --command='
+  cd ~/streamhouse/deploy
+  docker compose -f docker-compose.gcp.yml --env-file .env.gcp up -d
+'
+# Chờ ~5 phút cho dim_camera seed + Flink jobs start
+```
+
+#### ⚠️ Root Cause Analysis (quan trọng — đọc nếu troubleshoot tiếp)
+
+**GCP Fluss KvSnapshotNotExistException (đã fix):**
+- `_METADATA` file path: `file:///tmp/fluss-remote/kv/security/hot_violence_alerts-12/0/snap-4/_METADATA`
+- Lý do fail: `coordinator` write `_METADATA` vào `/tmp/fluss-remote` của CONTAINER MÌNH; `taskmanager` (Flink) đọc từ `/tmp/fluss-remote` của CONTAINER MÌNH — hai container có `/tmp` riêng biệt, không shared!
+- Tại sao local OK: Local dùng named Docker volume `fluss-tablet-remote` mounted tại `/var/fluss/remote-data` cho CẢ coordinator + tablet + taskmanager → share cùng 1 filesystem.
+- Fix đã apply: Thêm `fluss-remote-data` named volume vào `deploy/docker-compose.gcp.yml` với mount tại `/var/fluss/remote-data` cho cả 3 containers; đổi `remote.data.dir` từ `file:///tmp/fluss-remote` → `/var/fluss/remote-data`.
+
+**GCP S3 plugin thiếu (ĐÃ FIX PERMANENT — Session 51):**
+- `deploy-taskmanager` image rebuilt + recreated trong Session 51 — S3 plugin baked in ✅
+- Không cần manual patch nữa
+
+#### 📊 GCP State khi kết thúc Session 51 (UTC ~04:10)
+
+| Component | State |
+|-----------|-------|
+| GCP VM IP | `34.87.122.219` |
+| Kafka topics | `hot-violence-alerts-valid`: growing (continuous) |
+| Contract Validator | RUNNING ✅ |
+| sink_to_fluss_enriched | RUNNING ✅ |
+| aggregate_paimon | RUNNING ✅ |
+| Fluss HOT | `_METADATA` files on shared volume ✅ |
+| Paimon WARM | **10,226 rows** — verified Session 51 ✅ |
+| Taskmanager image rebuild | **deploy-taskmanager:latest** built + recreated — Session 51 ✅ |
+
+#### ✅ Session 49 — Đã hoàn thành
+
+| Hạng mục | Chi tiết |
+|----------|---------|
+| HOT real data | Fluss `hot_violence_alerts` = **4,995 rows** (sink_to_fluss_enriched đang chạy) ✅ |
+| HOT benchmark (chatbot) | warm session: **32–44s** E2E; cold/no-data: ~60s timeout ✅ |
+| HOT pipeline verified | rtsp-inference-mock → kafka:9092 → ContractValidator → Fluss ✅ |
+| WARM benchmark (Trino direct) | warm: **11–13s**; first call: ~16s ✅ |
+| COLD benchmark (Trino direct) | warm: **8–11s**; first call: ~10.5s ✅ |
+| `/api/latency` truth | HOT native=**100ms**, WARM=**5.9s**, COLD=**9.5s** ✅ |
+| `/api/layer-counts` | HOT=4,995 / WARM=15,834 / COLD=15,834 (duration=7.4s) ✅ |
+| Tiering test | Pipeline-manager auto-tiered @ 15:24 (6 min), completed ✅. WARM count = 15,834 (unchanged — same incident_ids, deduplicate upsert — ĐÚNG) |
+| GCP pipeline | Kafka rebuilt (KRaft cleared), all 7 topics OK, 3 Flink jobs RUNNING ✅ |
+| GCP topics | urban-safety-alerts, hot-violence-alerts-valid, và 5 topic khác ✅ |
+
+#### 📊 Thesis Benchmark Table (Session 49 — final numbers)
+
+| Layer | Công nghệ | Storage Latency (API) | Direct Query (Trino/Gateway) | Chatbot E2E (warm) |
+|-------|-----------|----------------------|-----------------------------|--------------------|
+| HOT | Fluss | **100ms** | ~8s (SQL Gateway LIMIT scan) | **32–44s** |
+| WARM | Paimon + Trino | **5.9s** | 11–16s (cold→warm) | **35–41s** |
+| COLD | Iceberg + Trino | **9.5s** | 8–11s | **31–35s** |
+
+> **Ghi chú cho thesis:**
+> - "Storage Latency" = thời gian query thuần (không có LLM), đo từ `/api/latency`
+> - HOT native 100ms là target thiết kế của Fluss được đạt ✅
+> - Chatbot E2E gồm: Gemini intent (~8s) + ChromaDB retrieval (~1s) + query + Gemini answer (~8s)
+> - WARM 14–23× faster hơn Flink Gateway cũ (3–5 phút → 6s)
+
+#### ⚠️ Lưu ý quan trọng (Session 48–49)
 
 - **GCP IP mới**: `34.87.122.219` (thay cho `34.21.199.109`). Cập nhật mọi lần VM restart.
-- **HOT latency thực tế**: Với real data, HOT query ~14–25s E2E (Flink Gateway session + LLM). Con số 35–130ms trong memory cũ là Flink execution time thôi, không phải E2E.
-- **WARM latency**: 13s E2E = ~5s Trino query + ~8s Gemini LLM (Text-to-SQL + answer).
-- **trino-with-s3a vs trino-with-paimon**: Local image tên `trino-with-s3a`, GCP tên `trino-with-paimon`. Cùng một Dockerfile.trino — đều có paimon plugin.
-- **dim_camera**: Seeded thành công local (15 cameras) qua SQL Gateway REST. GCP seeded tự động bởi pipeline-manager.
-- **Paimon data GCP = 0**: Fresh start (VM bị TERMINATED trước đó). Data sẽ accumulate khi pipeline chạy.
+- **HOT data issue**: rtsp-inference-mock trỏ về `kafka:9092` (local). Old data trong Kafka có timestamp cũ → chatbot filter "30 phút" sẽ thấy data chỉ khi rtsp mới chạy đủ lâu.
+- **WARM latency**: 6s (API level) = ~5s Trino + ~1s overhead. Chatbot E2E 35s = thêm 2× Gemini (8+8s) + ChromaDB.
+- **GCP Kafka KRaft issue**: Sau `TERMINATED`, `listTopics` timeout → fix bằng cách clear `/tmp/kafka-logs/` và restart kafka container.
+- **dim_camera local**: Seeded 15 cameras qua SQL Gateway REST. GCP seeded tự động bởi pipeline-manager.
+- **Paimon data (local)**: 15,834 rows từ Session 38–39. GCP Paimon bắt đầu accumulate sau khi pipeline chạy đủ lâu.
 
-#### 🚀 Bước tiếp theo (Session 49)
+#### 🚀 Bước tiếp theo (Session 50)
 
-1. **HOT benchmark với real data**: Chạy local RTSP pipeline hướng GCP Kafka ~30 phút, rồi test HOT query → đo latency thực.
-2. **Tiering test**: Sau khi có HOT data, trigger `tier_fluss_to_paimon.py` thủ công, verify WARM tăng.
-3. **Thesis benchmark table** (3 layers × 3 runs):
-   - HOT (Fluss via Gateway): target <5s với warm session + real data
-   - WARM (Paimon via Trino): confirmed ~13s E2E ✅
-   - COLD (Iceberg via Trino): confirmed ~12–20s E2E ✅
-4. **Demo script**: Prepare for thesis defense — sequence of chatbot queries showcasing 3 layers.
+1. **Thesis writeup**: Dùng benchmark table bên trên cho chapter Performance Evaluation.
+2. **Demo script cho bảo vệ**:
+   ```
+   Q1: "Camera nào có cảnh báo bạo lực trong 30 phút qua?" → HOT (Fluss)
+   Q2: "Thống kê bạo lực trong 3 giờ qua?" → WARM (Paimon)
+   Q3: "Dữ liệu tháng trước?" → COLD (Iceberg)
+   ```
+3. **GCP WARM data**: Để pipeline GCP chạy 1–2 ngày để accumulate Paimon data → verify tiering GCP.
+4. **Architecture diagram**: Cập nhật diagram với Trino+Paimon native connector (thay Flink Gateway cho WARM).
 
 ---
 
