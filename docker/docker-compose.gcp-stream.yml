@@ -1,0 +1,4 @@
+services:
+  rtsp-inference-mock:
+    environment:
+      KAFKA_BROKER: "<REDACTED_IP>:9093"
