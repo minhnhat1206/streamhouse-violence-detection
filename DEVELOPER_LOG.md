@@ -203,11 +203,24 @@ Q2: "Thống kê bạo lực trong 3 giờ qua?" → WARM (Paimon)
 Q3: "Dữ liệu tháng trước?" → COLD (Iceberg)
 ```
 
-**[P3] GCP quy trình khởi động lại (nếu VM bị stop):**
+**[P3] HLS Live Streams — chạy local, chiếu màn hình (CHỐT):**
+```bash
+# Terminal 1: Start RTSP → GCP Kafka
+docker compose \
+  -f docker/docker-compose.local-stream.yml \
+  -f docker/docker-compose.gcp-stream.yml \
+  up -d
+
+# Terminal 2: Chạy frontend local
+cd Violence-Urban-Safety-UI/frontend && npm run dev
+# Mở http://localhost:5173 → Settings → HLS URL = http://localhost:8888 → Save
+```
+> Không dùng Vercel/ngrok. Chiếu màn hình laptop lên projector. Chi tiết: `docs/DEMO_SCRIPT.md`
+
+**[GCP restart] Quy trình nếu VM bị stop:**
 ```bash
 GCLOUD="/c/Users/user/AppData/Local/Google/Cloud SDK/google-cloud-sdk/bin/gcloud"
 "$GCLOUD" compute instances start instance-20260524-104630 --zone=asia-southeast1-b
-# Chờ 30s rồi:
 "$GCLOUD" compute ssh instance-20260524-104630 --zone=asia-southeast1-b --strict-host-key-checking=no --command='
   cd ~/streamhouse/deploy
   docker compose -f docker-compose.gcp.yml --env-file .env.gcp up -d

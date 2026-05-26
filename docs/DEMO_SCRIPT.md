@@ -188,45 +188,46 @@ curl -s http://34.87.122.219:5002/api/latency | python3 -m json.tool
 
 ---
 
-## P3 — HLS Live Camera Streams (nếu muốn demo video thật)
+## P3 — HLS Live Camera Streams (chạy local, chiếu màn hình)
 
-### Yêu cầu
-- ngrok đã cài: https://ngrok.com/download
-- Docker local đang chạy
-
-### Các bước
+### Setup (1 lần trước buổi bảo vệ)
 
 ```bash
-# 1. Start local RTSP → GCP Kafka
+# Cài dependencies frontend (nếu chưa có)
+cd Violence-Urban-Safety-UI/frontend
+npm install
+```
+
+### Ngày demo — thứ tự khởi động
+
+```bash
+# Terminal 1: Start local RTSP stack → gửi events lên GCP Kafka
 docker compose \
   -f docker/docker-compose.local-stream.yml \
   -f docker/docker-compose.gcp-stream.yml \
   up -d
 
-# 2. Verify HLS streams có tín hiệu
+# Verify streams có tín hiệu (sau ~10s)
 curl http://localhost:8888/cam_01/index.m3u8 | head -3
 # Expected: #EXTM3U
 
-# 3. Expose HLS qua ngrok
-ngrok http 8888
-# Copy URL dạng: https://xxxx.ngrok-free.app
-
-# 4. Chạy frontend local (không bị mixed-content issue)
-cd Violence-Urban-Safety-UI/frontend && npm run dev
-# Mở http://localhost:5173 → Settings → paste ngrok URL → Save
-# → Live Streams page: 15 camera cards load HLS, badge LIVE xuất hiện
+# Terminal 2: Chạy frontend local
+cd Violence-Urban-Safety-UI/frontend
+npm run dev
+# → Mở http://localhost:5173
 ```
 
-### Lưu ý khi dùng Vercel thay vì local frontend
+### Cấu hình HLS (1 lần, lưu localStorage)
 
-Vercel dùng HTTPS → không gọi được GCP HTTP API (mixed-content).
-Cần expose thêm chatbot port qua ngrok:
-```bash
-ngrok http 5002   # Terminal khác
-# Vào Vercel Project Settings → Environment Variables:
-#   VITE_API_BASE_URL = https://yyyy.ngrok-free.app
-# Redeploy → dùng Preview URL
 ```
+Mở http://localhost:5173 → Settings
+→ "Live Stream Configuration"
+→ Nhập: http://localhost:8888
+→ Save
+→ Vào Live Streams → 15 camera cards load HLS, badge LIVE xuất hiện
+```
+
+> **Lưu ý:** `http://localhost:8888` lưu trong localStorage — chỉ cần set 1 lần, không mất sau khi refresh.
 
 ---
 
