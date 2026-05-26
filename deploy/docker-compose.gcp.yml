@@ -202,7 +202,9 @@ services:
         FLUSS_PROPERTIES=
         zookeeper.address: fluss-zookeeper:2181
         coordinator.host: fluss-coordinator
-        remote.data.dir: file:///tmp/fluss-remote
+        remote.data.dir: /var/fluss/remote-data
+    volumes:
+      - fluss-remote-data:/var/fluss/remote-data
     deploy:
       resources:
         limits:
@@ -224,7 +226,9 @@ services:
         FLUSS_PROPERTIES=
         zookeeper.address: fluss-zookeeper:2181
         tablet-server.host: fluss-tablet
-        remote.data.dir: file:///tmp/fluss-remote
+        remote.data.dir: /var/fluss/remote-data
+    volumes:
+      - fluss-remote-data:/var/fluss/remote-data
     deploy:
       resources:
         limits:
@@ -302,6 +306,7 @@ services:
       - .env.gcp
     volumes:
       - ../scripts/transform:/opt/flink/scripts
+      - fluss-remote-data:/var/fluss/remote-data
     depends_on:
       jobmanager:
         condition: service_healthy
@@ -614,6 +619,7 @@ volumes:
   chatbot-chroma:
   fluss-zookeeper-data:
   fluss-zookeeper-datalog:
+  fluss-remote-data:
   rtsp-pusher-tmp:
   rtsp-inference-tmp:
 
