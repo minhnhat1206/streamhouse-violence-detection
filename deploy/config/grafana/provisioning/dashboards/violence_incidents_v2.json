@@ -1,0 +1,432 @@
+{
+  "__inputs": [],
+  "__requires": [
+    {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "9.0.0"}
+  ],
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 200,
+      "title": "📊 KPI Overview — Violence Incident Statistics",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "trino-datasource", "uid": "trino_security_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"fixedColor": "red", "mode": "fixed"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 1},
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "pluginVersion": "12.3.1",
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS value FROM iceberg.security.historical_violence_incidents WHERE is_violent = true AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '24' HOUR",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "title": "🚨 Violent Incidents (24h)",
+      "type": "stat"
+    },
+
+    {
+      "datasource": {"type": "trino-datasource", "uid": "trino_security_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"fixedColor": "orange", "mode": "fixed"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 1},
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS value FROM iceberg.security.historical_violence_incidents WHERE is_violent = true AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '7' DAY",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "title": "📅 Violent Incidents (7 days)",
+      "type": "stat"
+    },
+
+    {
+      "datasource": {"type": "trino-datasource", "uid": "trino_security_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"fixedColor": "yellow", "mode": "fixed"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 10}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 1},
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(DISTINCT camera_id) AS value FROM iceberg.security.historical_violence_incidents WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '24' HOUR",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "title": "📷 Active Cameras (24h)",
+      "type": "stat"
+    },
+
+    {
+      "datasource": {"type": "trino-datasource", "uid": "trino_security_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"fixedColor": "blue", "mode": "fixed"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "blue", "value": 0.5}]},
+          "unit": "percentunit",
+          "min": 0, "max": 1,
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 1},
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT AVG(risk_score) AS value FROM iceberg.security.historical_violence_incidents WHERE is_violent = true AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '24' HOUR",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "title": "⚠️ Avg Risk Score (24h)",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "id": 201,
+      "title": "📈 Incident Trends & Distribution",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "trino-datasource", "uid": "trino_security_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisPlacement": "auto", "drawStyle": "line", "fillOpacity": 30, "lineWidth": 2, "spanNulls": false},
+          "unit": "short"
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "violent"}, "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]},
+          {"matcher": {"id": "byName", "options": "total"},   "properties": [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}}]}
+        ]
+      },
+      "gridPos": {"h": 9, "w": 14, "x": 0, "y": 6},
+      "id": 5,
+      "options": {
+        "legend": {"calcs": ["sum", "max", "last"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT date_trunc('hour', timestamp) AS time, COUNT(*) AS total, SUM(CASE WHEN is_violent = true THEN 1 ELSE 0 END) AS violent FROM iceberg.security.historical_violence_incidents WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '48' HOUR GROUP BY 1 ORDER BY 1",
+          "refId": "A",
+          "format": "time_series"
+        }
+      ],
+      "title": "📊 Incidents per Hour — Total vs Violent (48h)",
+      "type": "timeseries"
+    },
+
+    {
+      "datasource": {"type": "trino-datasource", "uid": "trino_security_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"hideFrom": {"legend": false, "tooltip": false, "viz": false}},
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 10, "x": 14, "y": 6},
+      "id": 6,
+      "options": {
+        "displayLabels": ["name", "percent"],
+        "legend": {"displayMode": "table", "placement": "right", "values": ["value", "percent"]},
+        "pieType": "donut",
+        "tooltip": {"mode": "single"}
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT event_type AS name, COUNT(*) AS value FROM iceberg.security.historical_violence_incidents WHERE is_violent = true AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '30' DAY GROUP BY 1 ORDER BY 2 DESC LIMIT 8",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "title": "🥧 Incident Type Distribution (30d)",
+      "type": "piechart"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 15},
+      "id": 202,
+      "title": "📍 Camera & Location Hotspot Analysis",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "trino-datasource", "uid": "trino_security_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "continuous-RdYlGn"},
+          "custom": {
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "spanNulls": false
+          },
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 500}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 16},
+      "id": 7,
+      "options": {
+        "legend": {"calcs": ["sum"], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "single"}
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT camera_id AS metric, COUNT(*) AS value FROM iceberg.security.historical_violence_incidents WHERE is_violent = true AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '7' DAY GROUP BY 1 ORDER BY 2 DESC LIMIT 15",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "title": "📷 Top Cameras by Incident Count (7d)",
+      "type": "barchart"
+    },
+
+    {
+      "datasource": {"type": "trino-datasource", "uid": "trino_security_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "continuous-YlRd"},
+          "custom": {
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "spanNulls": false
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 16},
+      "id": 8,
+      "options": {
+        "legend": {"calcs": ["sum"], "displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "single"}
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(location, 'Unknown') AS metric, COUNT(*) AS value FROM iceberg.security.historical_violence_incidents WHERE is_violent = true AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '7' DAY GROUP BY 1 ORDER BY 2 DESC LIMIT 10",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "title": "📍 Top Locations by Incident Count (7d)",
+      "type": "barchart"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 25},
+      "id": 203,
+      "title": "⚡ Risk Score Analysis",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "trino-datasource", "uid": "trino_security_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "spanNulls": false},
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
+      "id": 9,
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT camera_id, AVG(risk_score) AS avg_risk, MAX(risk_score) AS max_risk, COUNT(*) AS total FROM iceberg.security.historical_violence_incidents WHERE is_violent = true AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '24' HOUR GROUP BY camera_id ORDER BY avg_risk DESC LIMIT 10",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "title": "🎯 Risk Score by Camera (24h) — Avg & Peak",
+      "type": "table",
+      "options": {
+        "sortBy": [{"displayName": "avg_risk", "desc": true}],
+        "footer": {"show": false}
+      }
+    },
+
+    {
+      "datasource": {"type": "trino-datasource", "uid": "trino_security_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 0.5},
+            {"color": "orange", "value": 0.75},
+            {"color": "red", "value": 0.9}
+          ]},
+          "unit": "percentunit",
+          "min": 0, "max": 1
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
+      "id": 10,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": true},
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT camera_id, AVG(risk_score) AS avg_risk FROM iceberg.security.historical_violence_incidents WHERE is_violent = true AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '24' HOUR GROUP BY camera_id ORDER BY avg_risk DESC LIMIT 10",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "title": "⚠️ Camera Risk Score Gauge (24h)",
+      "type": "bargauge"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 34},
+      "id": 204,
+      "title": "📋 Recent High-Risk Incidents Table",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "trino-datasource", "uid": "trino_security_ds"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 0.5},
+            {"color": "red", "value": 0.9}
+          ]},
+          "mappings": []
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "risk_score"}, "properties": [
+            {"id": "custom.displayMode", "value": "color-background"},
+            {"id": "unit", "value": "percentunit"}
+          ]},
+          {"matcher": {"id": "byName", "options": "timestamp"}, "properties": [
+            {"id": "unit", "value": "dateTimeFromNow"}
+          ]}
+        ]
+      },
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 35},
+      "id": 11,
+      "options": {
+        "sortBy": [{"displayName": "timestamp", "desc": true}],
+        "footer": {"show": false}
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT incident_id, camera_id, COALESCE(location, 'Unknown') AS location, event_type, risk_score, confidence, timestamp FROM iceberg.security.historical_violence_incidents WHERE is_violent = true AND risk_score >= 0.75 ORDER BY timestamp DESC LIMIT 50",
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "title": "🚨 High-Risk Incidents (risk ≥ 0.75) — Latest 50",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "tags": ["violence", "incidents", "analytics", "iceberg"],
+  "templating": {"list": []},
+  "time": {"from": "now-24h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "🔍 Violence Incidents Analytics",
+  "uid": "violence-incidents-v2",
+  "version": 1
+}

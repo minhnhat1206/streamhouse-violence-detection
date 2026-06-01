@@ -155,7 +155,7 @@ class AgentState(TypedDict):
 # they appear as substrings in unrelated words, e.g. "canh" in "cảnh báo".
 # Use _EVIDENCE_WORD_TOKENS + word-boundary regex for those.
 _EVIDENCE_KEYWORDS = (
-    "ảnh", "hình", "hinh", "ảnh bằng chứng", "bang chung",
+    "ảnh bằng chứng", "bang chung",
     "bằng chứng", "xem ảnh", "xem hinh", "ảnh chụp", "screenshot",
     "frame", "clip", "video", "chứng cứ", "chung cu", "hình ảnh",
     "cho xem", "xem được không", "có ảnh không", "có hình không",
@@ -163,7 +163,7 @@ _EVIDENCE_KEYWORDS = (
 
 # Short tokens that need whole-word matching to avoid false-positives:
 # "anh" alone means "photo" (without diacritic) but appears inside "canh" (cảnh/canh).
-_EVIDENCE_WORD_TOKENS = ("anh",)
+_EVIDENCE_WORD_TOKENS = ("anh", "ảnh", "hình",)
 
 
 def _detect_evidence_intent(query: str) -> bool:
@@ -358,7 +358,7 @@ async def select_data_layer(state: AgentState) -> AgentState:
 
     try:
         intent = state["intent"]
-        time_period_str = intent.time_period.lower()
+        import unicodedata as _ud; time_period_str = _ud.normalize("NFC", intent.time_period.lower())
 
         # Parse time period to determine layer.
         # Routing: <1hr → Fluss, 1hr-7d → Paimon, >7d → Iceberg
@@ -386,7 +386,7 @@ async def select_data_layer(state: AgentState) -> AgentState:
                 days = num * 30
             else:
                 days = 1  # fallback to warm
-            if days < 1 / 24:  # < 1 hour → HOT (Fluss)
+            if days <= 1 / 24:  # <= 1 hour → HOT (Fluss)
                 selected_layer = LayerChoice.FLUSS
             elif days < 1:  # 1hr–1day → WARM (Paimon)
                 selected_layer = LayerChoice.PAIMON
@@ -419,7 +419,7 @@ async def select_data_layer(state: AgentState) -> AgentState:
             "vừa rồi", "vua roi", "bây giờ", "bay gio", "real-time", "real time",
             "trực tiếp", "truc tiep", "mới nhất", "moi nhat",
             "gần đây", "gan day", "hiện tại", "hien tai",
-            "now", "ngay bây giờ", "ngay bay gio",
+            "now", "ngay bây giờ", "ngay bay gio", "realtime", "vừa", "vua", "hiện giờ", "hien gio",
         ]):
             selected_layer = LayerChoice.FLUSS  # HOT - real-time
 
@@ -454,6 +454,18 @@ async def select_data_layer(state: AgentState) -> AgentState:
             logger.info(
                 "[ROUTING] 'hôm nay' → PAIMON primary + FLUSS HOT supplementary (dual-layer)"
             )
+
+        # Post-routing override: raw query HOT signals take priority over Gemini time_period
+        # (Gemini may return inconsistent time_period strings for realtime queries)
+        import unicodedata as _ud2
+        _uq = state["user_query"] if "user_query" in state else (state.user_query if hasattr(state, "user_query") else "")
+        _raw_q = _ud2.normalize("NFC", _uq.lower())
+        logger.info(f"[HOT_RAW_CHECK] user_query={repr(_uq[:30])}, raw_q={repr(_raw_q[:30])}")
+        _HOT_RAW = ["vừa", "vua", "bây giờ", "bay gio", "ngay bây giờ",
+                    "ngay bay gio", "trực tiếp", "hiện tại", "hien tai"]
+        if any(_sig in _raw_q for _sig in _HOT_RAW) and not (state.get("intent") and state["intent"].wants_evidence):
+            selected_layer = LayerChoice.FLUSS
+            state["also_query_hot"] = False  # clear hom-nay dual-layer flag if HOT override fires
 
         # EXPLICIT routing log (visible without JSONFormatter extension)
         logger.info(
