@@ -595,8 +595,9 @@ async def get_recent_incidents(limit: int = 50):
         CAST(timestamp AS VARCHAR) AS timestamp,
         risk_score, event_type, location,
         is_violent,
-        CAST(incident_date AS VARCHAR) AS incident_date
-    FROM iceberg.security.historical_violence_incidents
+        CAST(timestamp AS VARCHAR) AS incident_date
+    FROM paimon.security.violence_incidents
+    WHERE is_violent = TRUE
     ORDER BY timestamp DESC
     LIMIT {limit}
     """
@@ -631,28 +632,31 @@ async def get_stats():
     """Aggregated analytics from Iceberg for the dashboard."""
     hours_sql = """
     SELECT
-        date_format(date_trunc('hour', timestamp), '%H:00') AS hour_label,
+        CAST(CAST(timestamp AS DATE) AS VARCHAR) AS hour_label,
         COUNT(*) AS alert_count
-    FROM iceberg.security.historical_violence_incidents
-    WHERE timestamp >= NOW() - INTERVAL '24' HOUR
-    GROUP BY date_trunc('hour', timestamp)
-    ORDER BY date_trunc('hour', timestamp)
+    FROM paimon.security.violence_incidents
+    WHERE is_violent = TRUE AND timestamp >= NOW() - INTERVAL '7' DAY
+    GROUP BY CAST(timestamp AS DATE)
+    ORDER BY CAST(timestamp AS DATE)
     """
     loc_sql = """
     SELECT location, COUNT(*) AS cnt
-    FROM iceberg.security.historical_violence_incidents
+    FROM paimon.security.violence_incidents
+    WHERE is_violent = TRUE
     GROUP BY location ORDER BY cnt DESC LIMIT 5
     """
     type_sql = """
     SELECT event_type, COUNT(*) AS cnt
-    FROM iceberg.security.historical_violence_incidents
+    FROM paimon.security.violence_incidents
+    WHERE is_violent = TRUE
     GROUP BY event_type
     """
     score_sql = """
     SELECT
         date_format(CAST(timestamp AS DATE), '%b %d') AS day_label,
         AVG(risk_score) AS avg_score
-    FROM iceberg.security.historical_violence_incidents
+    FROM paimon.security.violence_incidents
+    WHERE is_violent = TRUE
     GROUP BY CAST(timestamp AS DATE)
     ORDER BY CAST(timestamp AS DATE)
     """
@@ -664,9 +668,16 @@ async def get_stats():
     )
     def safe(r): return r if isinstance(r, list) else []
 
+
+    def _parse_loc(loc):
+        try:
+            d = __import__("json").loads(loc)
+            return d.get("street") or d.get("ward") or str(loc)[:30]
+        except Exception:
+            return (loc or "Unknown")[:40]
     return {
         "alertsPerHour": [{"name": r[0], "alerts": int(r[1])} for r in safe(results[0])],
-        "topLocations":  [{"name": r[0] or "Unknown", "alerts": int(r[1])} for r in safe(results[1])],
+        "topLocations":  [{"name": _parse_loc(r[0]), "alerts": int(r[1])} for r in safe(results[1])],
         "alertTypes":    [{"name": r[0] or "Unknown", "value": int(r[1])} for r in safe(results[2])],
         "avgScore":      [{"name": r[0], "score": round(float(r[1]), 3) if r[1] else 0} for r in safe(results[3])],
     }
