@@ -46,6 +46,9 @@ STOP_FILE = os.getenv("STOP_FILE", "/app/tmp/STOP")
 CAPTURE_FPS = float(os.getenv("RTSP_FPS", "1"))       # frames/sec per camera
 RTSP_TIMEOUT_S = int(os.getenv("RTSP_TIMEOUT_S", "10"))
 RECONNECT_DELAY_S = int(os.getenv("RECONNECT_DELAY_S", "5"))
+# Comma-separated list of active camera IDs. If unset, all cameras are used.
+_active_env = os.getenv("ACTIVE_CAMERAS", "").strip()
+ACTIVE_CAMERAS = set(_active_env.split(",")) if _active_env else None
 
 HEARTBEAT_INTERVAL = 5.0
 ALERT_INTERVAL = 0.5
@@ -309,6 +312,10 @@ def main():
     if not registry:
         print("No cameras loaded. Exiting.")
         sys.exit(1)
+
+    if ACTIVE_CAMERAS:
+        registry = {k: v for k, v in registry.items() if k in ACTIVE_CAMERAS}
+        print(f"Filtered to {len(registry)} active cameras: {sorted(registry.keys())}")
 
     producer = None
     for attempt in range(1, 6):

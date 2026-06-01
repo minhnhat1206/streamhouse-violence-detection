@@ -43,6 +43,10 @@ MEDIAMTX_HOST    = os.getenv("MEDIAMTX_HOST",    "mediamtx")
 MAX_CAMERAS      = int(os.getenv("MAX_CAMERAS",  "4"))   # keep CPU manageable
 CLIPS_PER_CAM    = int(os.getenv("CLIPS_PER_CAM","6"))
 STOP_FILE        = os.getenv("STOP_FILE",        "/app/tmp/STOP")
+# Comma-separated list of active camera IDs (e.g. "cam_01,cam_03,cam_07").
+# If unset, all cameras from registry are used (up to MAX_CAMERAS).
+_active_env      = os.getenv("ACTIVE_CAMERAS", "").strip()
+ACTIVE_CAMERAS   = set(_active_env.split(",")) if _active_env else None
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -202,6 +206,7 @@ def main():
     print(f"  Fight dir: {FIGHT_DIR}", flush=True)
     print(f"  NonFight : {NON_FIGHT_DIR}", flush=True)
     print(f"  Max cams : {MAX_CAMERAS}", flush=True)
+    print(f"  Active   : {','.join(sorted(ACTIVE_CAMERAS)) if ACTIVE_CAMERAS else 'all (from registry)'}", flush=True)
     print(f"  Stop file: {STOP_FILE}", flush=True)
     print("=" * 56, flush=True)
 
@@ -233,7 +238,10 @@ def main():
     with open(METADATA_FILE, newline="", encoding="utf-8") as f:
         cameras = list(csv.DictReader(f))
 
-    # Limit number of cameras pushed (CPU budget)
+    # Filter by ACTIVE_CAMERAS list if provided, then apply MAX_CAMERAS CPU budget
+    if ACTIVE_CAMERAS:
+        cameras = [c for c in cameras if c["camera_id"] in ACTIVE_CAMERAS]
+        print(f"[INFO] Filtered to {len(cameras)} cameras by ACTIVE_CAMERAS.", flush=True)
     selected = cameras[:MAX_CAMERAS]
     print(
         f"[INFO] Pushing {len(selected)} of {len(cameras)} cameras "

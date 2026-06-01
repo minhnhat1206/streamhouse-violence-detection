@@ -513,6 +513,7 @@ services:
       MAX_CAMERAS: "5"
       CLIPS_PER_CAM: "6"
       STOP_FILE: /app/tmp/STOP
+      ACTIVE_CAMERAS: "${ACTIVE_CAMERAS:-}"
     volumes:
       - ../scripts/streaming/rtsp_pusher.py:/app/rtsp_pusher.py:ro
       - ../data/raw/RWF-2000:/app/data/raw/RWF-2000:ro
@@ -546,6 +547,7 @@ services:
       RTSP_TIMEOUT_S: "5"
       RECONNECT_DELAY_S: "2"
       PYTHONUNBUFFERED: "1"
+      ACTIVE_CAMERAS: "${ACTIVE_CAMERAS:-}"
     volumes:
       - ../scripts/streaming:/app/scripts
       - ../data:/app/data
