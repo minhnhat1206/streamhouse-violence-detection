@@ -427,7 +427,7 @@ async def select_data_layer(state: AgentState) -> AgentState:
 
         # Evidence queries MUST use PAIMON — only layer with frame_url column.
         # Fluss (HOT) and Iceberg (COLD) have no frame_url; override if needed.
-        if state.get("intent") and state["intent"].wants_evidence:
+        if _detect_evidence_intent(state.get("user_query", "")):
             if selected_layer != LayerChoice.PAIMON:
                 logger.info(
                     f"[ROUTING] Evidence query: overriding {selected_layer.value} → PAIMON (frame_url)"
