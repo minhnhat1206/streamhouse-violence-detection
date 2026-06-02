@@ -4,7 +4,7 @@ import json, uuid, time, random
 from datetime import datetime, timezone
 from kafka import KafkaProducer
 
-GCP_KAFKA = "34.21.199.109:9093"
+GCP_KAFKA = "34.124.131.144:9093"
 TOPIC = "urban-safety-alerts"
 
 cameras = [f"cam_{i:02d}" for i in range(1, 16)]

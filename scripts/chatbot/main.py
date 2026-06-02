@@ -858,6 +858,63 @@ async def get_layer_counts():
     }
 
 
+@app.get("/api/grafana/stats")
+async def grafana_stats():
+    """Grafana Infinity-compatible endpoint — returns array of stats for dashboard panels.
+    Wraps layer-counts + violence stats into [{...}] array format required by Infinity datasource.
+    """
+    import asyncio as _asyncio
+
+    async def _violence_counts():
+        try:
+            rows_24h = await _trino_query(
+                "SELECT COUNT(*) FROM paimon.security.violence_incidents "
+                "WHERE is_violent = TRUE AND timestamp >= NOW() - INTERVAL '1' DAY",
+                timeout=15.0,
+            )
+            rows_7d = await _trino_query(
+                "SELECT COUNT(*) FROM paimon.security.violence_incidents "
+                "WHERE is_violent = TRUE AND timestamp >= NOW() - INTERVAL '7' DAY",
+                timeout=15.0,
+            )
+            cameras = await _trino_query(
+                "SELECT COUNT(DISTINCT camera_id) FROM paimon.security.violence_incidents "
+                "WHERE timestamp >= NOW() - INTERVAL '1' DAY",
+                timeout=15.0,
+            )
+            avg_score = await _trino_query(
+                "SELECT ROUND(AVG(risk_score), 3) FROM paimon.security.violence_incidents "
+                "WHERE is_violent = TRUE AND timestamp >= NOW() - INTERVAL '1' DAY",
+                timeout=15.0,
+            )
+            return {
+                "violent_24h": int(rows_24h[0][0]) if rows_24h and rows_24h[0][0] else 0,
+                "violent_7d":  int(rows_7d[0][0])  if rows_7d  and rows_7d[0][0]  else 0,
+                "cameras_24h": int(cameras[0][0])   if cameras   and cameras[0][0]   else 0,
+                "avg_risk_score": float(avg_score[0][0]) if avg_score and avg_score[0][0] else 0.0,
+            }
+        except Exception as e:
+            logger.warning("grafana_stats violence counts failed: %s", e)
+            return {"violent_24h": 0, "violent_7d": 0, "cameras_24h": 0, "avg_risk_score": 0.0}
+
+    # Get layer counts
+    layer_task = get_layer_counts()
+    violence_task = _violence_counts()
+    layers, violence = await _asyncio.gather(layer_task, violence_task)
+
+    # Return as array (Infinity datasource requires array at root)
+    return [{
+        "hot_rows":       layers.get("hot") or 0,
+        "warm_rows":      layers.get("warm") or 0,
+        "cold_rows":      layers.get("cold") or 0,
+        "query_latency_ms": layers.get("duration_ms") or 0,
+        "violent_24h":    violence["violent_24h"],
+        "violent_7d":     violence["violent_7d"],
+        "cameras_active": violence["cameras_24h"],
+        "avg_risk_score": violence["avg_risk_score"],
+    }]
+
+
 @app.get("/api/latency")
 async def get_latency():
     """Measure round-trip query latency for each Streamhouse storage layer."""

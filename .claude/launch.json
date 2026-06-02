@@ -2,27 +2,11 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "e2e-dashboard",
+      "name": "ui",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
-      "port": 5173,
-      "cwd": "e2e-test-dashboard"
-    },
-    {
-      "name": "violence-ui",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "5299", "--strictPort"],
-      "port": 5299,
-      "autoPort": false,
-      "cwd": "C:/Users/user/Desktop/Khoa_Luan/realtime-violence-detection/Violence-Urban-Safety-UI/frontend"
-    }
-    ,
-    {
-      "name": "admin-ui-preview",
-      "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "http.server", "5303"],
-      "port": 5303,
-      "cwd": "scripts/admin"
+      "runtimeArgs": ["run", "dev", "--", "--port", "5173"],
+      "cwd": "Violence-Urban-Safety-UI/frontend",
+      "port": 5173
     }
   ]
 }

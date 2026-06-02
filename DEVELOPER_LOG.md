@@ -49,7 +49,7 @@ ngrok http 8888
 #### Bước 3 — Verify E2E demo
 ```bash
 # Query GCP chatbot
-curl -X POST http://34.21.199.109:5002/chat \
+curl -X POST http://34.124.131.144:5002/chat \
   -H "Content-Type: application/json" \
   -d '{"query":"camera nao co canh bao trong 30 phut qua?"}'
 
@@ -65,7 +65,7 @@ docker exec rtsp_pusher touch /app/tmp/STOP
 
 #### Lưu ý QUAN TRỌNG
 - ngrok URL thay đổi mỗi lần restart → cần update lại trong Settings page
-- GCP VM IP: `34.21.199.109` (có thể thay đổi sau VM restart)
+- GCP VM IP: `34.124.131.144` (có thể thay đổi sau VM restart)
 - Local RTSP stack: `docker compose -f docker/docker-compose.local-stream.yml up -d`
 - KHÔNG dùng `send_test_events.py` để demo (fake data)
 
@@ -160,7 +160,7 @@ curl -X POST http://136.110.16.108:5002/chat \
 - **Agent vừa làm:** Claude (Session 51 — verify GCP tiering fix, Paimon data confirmed, taskmanager rebuilt)
 - **Trạng thái:** GCP pipeline STABLE. Tất cả 3 Flink jobs RUNNING. Paimon có 10,226 rows. Commit `c37fa4b` pushed.
 - **Nhánh git:** `deploy/hybrid-cloud` (clean — đã commit `deploy/docker-compose.gcp.yml`)
-- **GCP VM:** `instance-20260524-104630` — **ĐANG CHẠY** (IP: `34.87.122.219`)
+- **GCP VM:** `instance-20260524-104630` — **ĐANG CHẠY** (IP: `34.124.131.144`)
 
 ---
 
@@ -244,7 +244,7 @@ GCLOUD="/c/Users/user/AppData/Local/Google/Cloud SDK/google-cloud-sdk/bin/gcloud
 
 | Component | State |
 |-----------|-------|
-| GCP VM IP | `34.87.122.219` |
+| GCP VM IP | `34.124.131.144` |
 | Kafka topics | `hot-violence-alerts-valid`: growing (continuous) |
 | Contract Validator | RUNNING ✅ |
 | sink_to_fluss_enriched | RUNNING ✅ |
@@ -284,7 +284,7 @@ GCLOUD="/c/Users/user/AppData/Local/Google/Cloud SDK/google-cloud-sdk/bin/gcloud
 
 #### ⚠️ Lưu ý quan trọng (Session 48–49)
 
-- **GCP IP mới**: `34.87.122.219` (thay cho `34.21.199.109`). Cập nhật mọi lần VM restart.
+- **GCP IP mới**: `34.124.131.144` (thay cho `34.124.131.144`). Cập nhật mọi lần VM restart.
 - **HOT data issue**: rtsp-inference-mock trỏ về `kafka:9092` (local). Old data trong Kafka có timestamp cũ → chatbot filter "30 phút" sẽ thấy data chỉ khi rtsp mới chạy đủ lâu.
 - **WARM latency**: 6s (API level) = ~5s Trino + ~1s overhead. Chatbot E2E 35s = thêm 2× Gemini (8+8s) + ChromaDB.
 - **GCP Kafka KRaft issue**: Sau `TERMINATED`, `listTopics` timeout → fix bằng cách clear `/tmp/kafka-logs/` và restart kafka container.
@@ -352,7 +352,7 @@ GCLOUD="/c/Users/user/AppData/Local/Google/Cloud SDK/google-cloud-sdk/bin/gcloud
 # Chờ ~5 phút để pipeline-manager seed dim_camera và submit Flink jobs
 
 # 3. Verify chatbot (sau ~5 phút)
-curl -X POST http://34.21.199.109:5002/chat \
+curl -X POST http://34.124.131.144:5002/chat \
   -H "Content-Type: application/json" \
   -d '{"query":"camera nao co canh bao trong 30 phut qua?"}'
 ```
@@ -388,7 +388,7 @@ curl -X POST http://34.21.199.109:5002/chat \
 #### 📊 Stack state (cuối session 45 — VM ĐANG CHẠY)
 
 ```
-GCP VM:           RUNNING (instance-20260524-104630, asia-southeast1-b, IP: 34.21.199.109)
+GCP VM:           RUNNING (instance-20260524-104630, asia-southeast1-b, IP: 34.124.131.144)
 HOT layer (Fluss): 60+ rows verified (session 45 test events)
 WARM layer (Paimon): chưa có data (cần ~2h data để tier từ Fluss)
 COLD layer (Iceberg): chưa có data (archive chỉ chạy 2:00 UTC)
