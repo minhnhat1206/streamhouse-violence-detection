@@ -602,7 +602,9 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_SECURITY_ALLOW_EMBEDDING: "true"
-      GF_SERVER_ROOT_URL: "http://34.158.32.82:3001"
+      GF_SECURITY_COOKIE_SAMESITE: "disabled"
+      GF_SECURITY_COOKIE_SECURE: "false"
+      GF_SERVER_ROOT_URL: "http://${GCP_VM_EXTERNAL_IP}:3001"
     volumes:
       - grafana-storage:/var/lib/grafana
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
