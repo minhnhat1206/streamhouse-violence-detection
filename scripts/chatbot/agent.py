@@ -727,54 +727,44 @@ async def execute_query(state: AgentState) -> AgentState:
                     logger.info(f"Collected {len(collected)} frame URLs from SQL results")
 
             # --- Evidence fallback: gọi /api/recent-incidents với filter từ context ---
-            # Không dùng blind listing — filter theo location/camera nếu user đề cập
             if wants_evidence and not state.get("frame_urls"):
                 try:
                     import re as _re
                     import urllib.request as _urq
+                    import urllib.parse as _up
                     import json as _json
 
                     q_lower = (state.get("user_query") or "").lower()
 
-                    # Trích count limit từ query ("1 ảnh" → 1, default=10)
-                    count_match = _re.search(r'(\d+)\s*(ảnh|hình|frame|image)', q_lower)
-                    limit = min(int(count_match.group(1)) if count_match else 10, 20)
+                    # Count limit ("1 ảnh" → 1, default=10)
+                    count_m = _re.search(r'(\d+)\s*(ảnh|hình|frame|image)', q_lower)
+                    limit = min(int(count_m.group(1)) if count_m else 10, 20)
 
-                    # Xây dựng query params
-                    params = [f"limit={limit}"]
-                    # Lọc location
-                    loc_match = _re.search(
-                        r'(?:đường|phường|quận)\s+([\w\s]+?)(?:\s*(?:,|và|trong|ở|tại|$))',
+                    # Trích location từ query (Vietnamese with diacritics)
+                    loc_m = _re.search(
+                        r'(?:đường|phường|quận)\s+([^\s,]+(?:\s+[^\s,]+){0,3})',
                         q_lower
                     )
-                    if loc_match:
-                        loc = loc_match.group(1).strip()
-                        params.append(f"location={urllib.parse.quote(loc)}")
+                    loc_param = ""
+                    if loc_m:
+                        loc_param = "&location=" + _up.quote(loc_m.group(1).strip())
 
-                    api_url = f"http://localhost:5002/api/recent-incidents?{'&'.join(params)}"
-                    logger.info("[EVIDENCE FALLBACK] Calling: %s", api_url)
+                    api_url = f"http://localhost:5002/api/recent-incidents?limit={limit}{loc_param}"
+                    logger.info("[EVIDENCE FALLBACK] Calling %s", api_url)
 
-                    import urllib.parse
-                    # Rebuild URL with proper encoding
-                    base_params = [f"limit={limit}"]
-                    if loc_match:
-                        loc = loc_match.group(1).strip()
-                        base_params.append(f"location={urllib.parse.quote(loc)}")
-                    api_url = f"http://localhost:5002/api/recent-incidents?{'&'.join(base_params)}"
-
-                    req = _urq.Request(api_url)
-                    resp = _urq.urlopen(req, timeout=15)
+                    resp = _urq.urlopen(_urq.Request(api_url), timeout=15)
                     incidents = _json.loads(resp.read())
 
                     urls = [i["frame_url"] for i in (incidents or []) if i.get("frame_url")]
                     if urls:
-                        state["frame_urls"] = urls[:limit]
-                        state["row_count"] = len(urls[:limit])
-                        logger.info("[EVIDENCE FALLBACK] Found %d frames via /api/recent-incidents", len(urls[:limit]))
+                        state["frame_urls"] = urls
+                        state["row_count"] = len(urls)
+                        logger.info("[EVIDENCE FALLBACK] Got %d frames (loc=%s)", len(urls),
+                                    loc_m.group(1) if loc_m else "any")
                     else:
-                        logger.info("[EVIDENCE FALLBACK] No frames from /api/recent-incidents")
+                        logger.info("[EVIDENCE FALLBACK] No frames returned")
                 except Exception as ev_err:
-                    logger.warning("[EVIDENCE FALLBACK] Failed: %s", ev_err)
+                    logger.warning("[EVIDENCE FALLBACK] Failed: %s", ev_err, exc_info=True)
 
             # ── Dual-layer: supplementary HOT scan for "hôm nay" queries ──────────────
             # "today" = Paimon WARM (2h–24h old) + Fluss HOT (last 2h, not yet tiered).
