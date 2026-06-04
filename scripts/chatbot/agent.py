@@ -954,7 +954,19 @@ async def generate_response(state: AgentState) -> AgentState:
             row_count = len(results)
             state["row_count"] = row_count
 
-            if row_count == 0:
+            # Nếu có frame_urls từ evidence fallback → không báo "no data"
+            frame_urls_from_fallback = state.get("frame_urls") or []
+            if row_count == 0 and frame_urls_from_fallback:
+                # Evidence đã được collect qua MinIO fallback — tạo answer thông báo
+                n = len(frame_urls_from_fallback)
+                state["final_answer"] = (
+                    f"Đã tìm thấy {n} hình ảnh bằng chứng gần đây từ hệ thống camera.\n"
+                    f"Các ảnh được thu thập từ MinIO evidence storage ({state['data_layer']}).\n\n"
+                    f"Nguồn: evidence-frames (MinIO), {n} ảnh"
+                )
+                state["response_confidence"] = 0.9
+                row_count = n  # Update để gallery rendering hoạt động
+            elif row_count == 0:
                 state["final_answer"] = (
                     f"Không tìm thấy dữ liệu cho câu hỏi của bạn trong khoảng thời gian "
                     f"'{state['intent'].time_period if state['intent'] else 'đã chọn'}'.\n"
