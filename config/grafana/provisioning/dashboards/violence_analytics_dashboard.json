@@ -1,502 +1,613 @@
 {
+  "__inputs": [],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "9.0.0"
+    }
+  ],
   "annotations": {
-    "list": [
-      {
-        "builtIn": 1,
-        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
-        "enable": true,
-        "hide": true,
-        "iconColor": "rgba(0, 211, 255, 1)",
-        "name": "Annotations & Alerts",
-        "type": "dashboard"
-      }
-    ]
+    "list": []
   },
   "editable": true,
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
   "id": null,
   "links": [],
   "panels": [
     {
-      "datasource": { "type": "trino", "uid": "trino_security_ds" },
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 200,
+      "title": "KPI Overview (7 days)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 10 },
-              { "color": "red", "value": 50 }
-            ]
+          "color": {
+            "fixedColor": "red",
+            "mode": "fixed"
           },
+          "mappings": [],
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
       "id": 1,
       "options": {
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
-      "pluginVersion": "10.0.0",
       "targets": [
         {
-          "rawSql": "SELECT COUNT(DISTINCT incident_id) FROM iceberg.security.historical_violence_incidents WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '30' DAY",
           "refId": "A",
-          "format": "table"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "violence_incidents_7d_total",
+          "instant": true
         }
       ],
-      "title": "Total Incidents (30d)",
+      "title": "Total Incidents (7d)",
       "type": "stat"
     },
     {
-      "datasource": { "type": "trino", "uid": "trino_security_ds" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 3 },
-              { "color": "red", "value": 10 }
-            ]
+          "color": {
+            "fixedColor": "orange",
+            "mode": "fixed"
           },
+          "mappings": [],
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
       "id": 2,
       "options": {
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "textMode": "auto"
-      },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "rawSql": "SELECT COUNT(DISTINCT incident_id) FROM iceberg.security.historical_violence_incidents WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '30' DAY AND is_violent = true",
-          "refId": "A",
-          "format": "table"
-        }
-      ],
-      "title": "Violent Incidents (30d)",
-      "type": "stat"
-    },
-    {
-      "datasource": { "type": "trino", "uid": "trino_security_ds" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 0.5 },
-              { "color": "red", "value": 0.8 }
-            ]
-          },
-          "unit": "percentunit",
-          "decimals": 2
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-      "id": 8,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "textMode": "auto"
       },
-      "pluginVersion": "10.0.0",
       "targets": [
         {
-          "rawSql": "SELECT AVG(risk_score) FROM iceberg.security.historical_violence_incidents WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '30' DAY",
           "refId": "A",
-          "format": "table"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "violence_incidents_7d_total",
+          "instant": true
         }
       ],
-      "title": "Avg Risk Score (30d)",
+      "title": "Violent Incidents (7d)",
       "type": "stat"
     },
     {
-      "datasource": { "type": "trino", "uid": "trino_security_ds" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
-            ]
+          "color": {
+            "fixedColor": "yellow",
+            "mode": "fixed"
           },
+          "mappings": [],
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-      "id": 9,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "textMode": "auto"
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
       },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "rawSql": "SELECT COUNT(DISTINCT camera_id) FROM iceberg.security.historical_violence_incidents WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '30' DAY",
-          "refId": "A",
-          "format": "table"
-        }
-      ],
-      "title": "Active Cameras (30d)",
-      "type": "stat"
-    },
-    {
-      "datasource": { "type": "trino", "uid": "trino_security_ds" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": {
-            "hideFrom": { "tooltip": false, "viz": false, "legend": false }
-          },
-          "mappings": []
-        },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 10, "x": 0, "y": 4 },
       "id": 3,
       "options": {
-        "legend": {
-          "calcs": ["value"],
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": true
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "pieType": "pie",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": true },
-        "tooltip": { "mode": "single" }
+        "textMode": "auto"
       },
-      "pluginVersion": "10.0.0",
       "targets": [
         {
-          "rawSql": "SELECT location, COUNT(*) as violent_count FROM iceberg.security.historical_violence_incidents WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '30' DAY AND is_violent = true GROUP BY location ORDER BY violent_count DESC",
           "refId": "A",
-          "format": "table"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "violence_avg_risk_score",
+          "instant": true
         }
       ],
-      "title": "Violent Incidents by Location (30d)",
-      "type": "piechart"
+      "title": "Avg Risk Score",
+      "type": "stat"
     },
     {
-      "datasource": { "type": "trino", "uid": "trino_security_ds" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": {
-            "hideFrom": { "tooltip": false, "viz": false, "legend": false }
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
           },
-          "mappings": []
+          "mappings": [],
+          "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 10, "x": 10, "y": 4 },
-      "id": 10,
-      "options": {
-        "legend": {
-          "calcs": ["value"],
-          "displayMode": "table",
-          "placement": "right",
-          "showLegend": true
-        },
-        "pieType": "donut",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": true },
-        "tooltip": { "mode": "single" }
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
       },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "rawSql": "SELECT event_type, COUNT(*) as count FROM iceberg.security.historical_violence_incidents WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '30' DAY AND is_violent = true GROUP BY event_type ORDER BY count DESC",
-          "refId": "A",
-          "format": "table"
-        }
-      ],
-      "title": "Violence Type Distribution (30d)",
-      "type": "piechart"
-    },
-    {
-      "datasource": { "type": "trino", "uid": "trino_security_ds" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "value" },
-          "custom": {
-            "align": "auto",
-            "cellOptions": { "type": "auto" },
-            "inspect": false
-          },
-          "mappings": []
-        },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "avg_risk" },
-            "properties": [
-              {
-                "id": "custom.cellOptions",
-                "value": { "mode": "gradient", "type": "color-background" }
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    { "color": "green", "value": null },
-                    { "color": "yellow", "value": 0.5 },
-                    { "color": "red", "value": 0.8 }
-                  ]
-                }
-              },
-              { "id": "unit", "value": "percentunit" },
-              { "id": "decimals", "value": 2 }
-            ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "total" },
-            "properties": [
-              { "id": "displayName", "value": "Total" }
-            ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "violent" },
-            "properties": [
-              { "id": "displayName", "value": "Violent" },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    { "color": "green", "value": null },
-                    { "color": "red", "value": 1 }
-                  ]
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
       "id": 4,
       "options": {
-        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
-        "showHeader": true,
-        "sortBy": [{ "desc": true, "displayName": "avg_risk" }]
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
       },
-      "pluginVersion": "10.0.0",
       "targets": [
         {
-          "rawSql": "SELECT location, COUNT(*) as total, SUM(CASE WHEN is_violent=true THEN 1 ELSE 0 END) as violent, ROUND(AVG(risk_score), 3) as avg_risk, ROUND(MAX(risk_score), 3) as max_risk FROM iceberg.security.historical_violence_incidents WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '30' DAY GROUP BY location ORDER BY avg_risk DESC",
           "refId": "A",
-          "format": "table"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "violence_cameras_active",
+          "instant": true
         }
       ],
-      "title": "Risk Score & Incidents by Location (30d)",
-      "type": "table"
+      "title": "Active Cameras",
+      "type": "stat"
     },
     {
-      "datasource": { "type": "trino", "uid": "trino_security_ds" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": {
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "Count",
-            "axisPlacement": "auto",
-            "fillOpacity": 80,
-            "gradientMode": "none",
-            "hideFrom": { "tooltip": false, "viz": false, "legend": false },
-            "lineWidth": 1,
-            "scaleDistribution": { "type": "linear" },
-            "thresholdsStyle": { "mode": "off" }
+          "color": {
+            "fixedColor": "red",
+            "mode": "fixed"
           },
           "mappings": [],
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "gridPos": {
+        "h": 3,
+        "w": 8,
+        "x": 0,
+        "y": 5
+      },
       "id": 5,
       "options": {
-        "barRadius": 0.1,
-        "barWidth": 0.7,
-        "fullHighlight": false,
-        "groupWidth": 0.7,
-        "legend": {
-          "calcs": ["sum"],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
         "orientation": "auto",
-        "tooltip": { "mode": "single" },
-        "xTickLabelRotation": -45,
-        "xTickLabelSpacing": 100
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
       },
-      "pluginVersion": "10.0.0",
       "targets": [
         {
-          "rawSql": "SELECT location, COUNT(*) as incident_count FROM iceberg.security.historical_violence_incidents WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '30' DAY GROUP BY location ORDER BY incident_count DESC LIMIT 10",
           "refId": "A",
-          "format": "table"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "streamhouse_hot_rows_total",
+          "instant": true
         }
       ],
-      "title": "Incident Count by Location (Top 10, 30d)",
-      "type": "barchart"
+      "title": "HOT Rows (Fluss)",
+      "type": "stat"
     },
     {
-      "datasource": { "type": "trino", "uid": "trino_security_ds" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": {
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "Count",
-            "axisPlacement": "auto",
-            "fillOpacity": 80,
-            "gradientMode": "none",
-            "hideFrom": { "tooltip": false, "viz": false, "legend": false },
-            "lineWidth": 1,
-            "scaleDistribution": { "type": "linear" },
-            "thresholdsStyle": { "mode": "off" }
+          "color": {
+            "fixedColor": "orange",
+            "mode": "fixed"
           },
           "mappings": [],
           "unit": "short"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
-      "id": 7,
-      "options": {
-        "barRadius": 0.1,
-        "barWidth": 0.7,
-        "fullHighlight": false,
-        "groupWidth": 0.7,
-        "legend": {
-          "calcs": ["sum"],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "orientation": "auto",
-        "tooltip": { "mode": "single" },
-        "xTickLabelRotation": 0,
-        "xTickLabelSpacing": 100
+      "gridPos": {
+        "h": 3,
+        "w": 8,
+        "x": 8,
+        "y": 5
       },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "rawSql": "SELECT camera_id, COUNT(*) as incident_count FROM iceberg.security.historical_violence_incidents WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '30' DAY GROUP BY camera_id ORDER BY incident_count DESC LIMIT 10",
-          "refId": "A",
-          "format": "table"
-        }
-      ],
-      "title": "Top Active Cameras (30d)",
-      "type": "barchart"
-    },
-    {
-      "datasource": { "type": "trino", "uid": "trino_security_ds" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": {
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "Incidents",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "gradientMode": "none",
-            "hideFrom": { "tooltip": false, "viz": false, "legend": false },
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 6,
-            "scaleDistribution": { "type": "linear" },
-            "showPoints": "always",
-            "spanNulls": true,
-            "stacking": { "group": "A", "mode": "none" },
-            "thresholdsStyle": { "mode": "off" }
-          },
-          "mappings": [],
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
       "id": 6,
       "options": {
-        "legend": {
-          "calcs": ["sum", "max"],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "tooltip": { "mode": "multi" }
+        "textMode": "auto"
       },
-      "pluginVersion": "10.0.0",
       "targets": [
         {
-          "rawSql": "SELECT date_format(timestamp, '%Y-%m-%d') as day, COUNT(*) as total_incidents, SUM(CASE WHEN is_violent=true THEN 1 ELSE 0 END) as violent_incidents FROM iceberg.security.historical_violence_incidents WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '30' DAY GROUP BY date_format(timestamp, '%Y-%m-%d') ORDER BY day ASC",
           "refId": "A",
-          "format": "table"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "streamhouse_warm_rows_total",
+          "instant": true
         }
       ],
-      "title": "Daily Incident Trend (30 days)",
-      "type": "timeseries",
-      "transformations": [
+      "title": "WARM Rows (Paimon)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
         {
-          "id": "convertFieldType",
-          "options": {
-            "conversions": [
-              { "fieldName": "day", "destinationType": "time", "dateFormat": "YYYY-MM-DD" }
-            ]
-          }
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "streamhouse_cold_rows_total",
+          "instant": true
         }
-      ]
+      ],
+      "title": "COLD Rows (Iceberg)",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "id": 201,
+      "title": "Distribution Analysis",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 9
+      },
+      "id": 10,
+      "options": {
+        "pieType": "donut",
+        "legend": {
+          "displayMode": "table",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "violence_incidents_by_type",
+          "instant": true
+        }
+      ],
+      "title": "Event Type Distribution",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 9
+      },
+      "id": 11,
+      "options": {
+        "orientation": "horizontal",
+        "barRadius": 0.05,
+        "tooltip": {
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "topk(10, violence_incidents_by_camera)",
+          "instant": true,
+          "legendFormat": "{{camera_id}}"
+        }
+      ],
+      "title": "Top Cameras (7d)",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 9
+      },
+      "id": 12,
+      "options": {
+        "orientation": "horizontal",
+        "barRadius": 0.05,
+        "tooltip": {
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "topk(10, violence_incidents_by_location)",
+          "instant": true,
+          "legendFormat": "{{location}}"
+        }
+      ],
+      "title": "Top Locations",
+      "type": "barchart"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 202,
+      "title": "Trend Over Time",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "id": 13,
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "violence_incidents_24h_total",
+          "legendFormat": "Violent Incidents (24h)"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "streamhouse_warm_rows_total",
+          "legendFormat": "WARM Layer Total"
+        }
+      ],
+      "title": "Streamhouse Metrics Trend",
+      "type": "timeseries"
     }
   ],
   "refresh": "1m",
-  "schemaVersion": 38,
-  "style": "dark",
-  "tags": ["violence-detection", "analytics", "security", "iceberg"],
-  "templating": { "list": [] },
-  "time": { "from": "now-30d", "to": "now" },
-  "timepicker": {},
-  "timezone": "browser",
+  "schemaVersion": 36,
+  "tags": [
+    "streamhouse",
+    "analytics"
+  ],
   "title": "Violence Analytics Dashboard",
   "uid": "violence_analytics",
-  "version": 2,
-  "weekStart": ""
+  "version": 2
 }

@@ -1,92 +1,36 @@
 {
+  "__inputs": [],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "9.0.0"
+    }
+  ],
   "annotations": {
-    "list": [
-      {
-        "builtIn": 1,
-        "datasource": {
-          "type": "grafana",
-          "uid": "-- Grafana --"
-        },
-        "enable": true,
-        "hide": true,
-        "iconColor": "rgba(0, 211, 255, 1)",
-        "name": "Annotations & Alerts",
-        "type": "dashboard"
-      }
-    ]
+    "list": []
   },
   "editable": true,
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
-  "id": 2,
+  "id": null,
   "links": [],
   "panels": [
     {
-      "datasource": {
-        "type": "trino-datasource",
-        "uid": "trino_security_ds"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "orange",
-            "mode": "fixed"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
+      "collapsed": false,
       "gridPos": {
-        "h": 4,
-        "w": 8,
+        "h": 1,
+        "w": 24,
         "x": 0,
         "y": 0
       },
-      "id": 1,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "12.3.1",
-      "targets": [
-        {
-          "rawSql": "SELECT count(*) AS value FROM iceberg.default.fact_camera_monitoring WHERE is_violent_window = true AND window_start >= now() - interval '24' hour",
-          "refId": "A"
-        }
-      ],
-      "title": "SỰ KIỆN BẠO LỰC (24 GIỜ QUA)",
-      "type": "stat"
+      "id": 100,
+      "title": "KPI — Violence Statistics",
+      "type": "row"
     },
     {
       "datasource": {
-        "type": "trino-datasource",
-        "uid": "trino_security_ds"
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
       },
       "fieldConfig": {
         "defaults": {
@@ -95,35 +39,22 @@
             "mode": "fixed"
           },
           "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
+          "unit": "short"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
-        "x": 8,
-        "y": 0
+        "w": 6,
+        "x": 0,
+        "y": 1
       },
-      "id": 2,
+      "id": 1,
       "options": {
-        "colorMode": "value",
-        "graphMode": "area",
+        "colorMode": "background",
+        "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
-        "percentChangeColorMode": "standard",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -131,237 +62,240 @@
           "fields": "",
           "values": false
         },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
+        "textMode": "auto"
       },
-      "pluginVersion": "12.3.1",
       "targets": [
         {
-          "rawSql": "SELECT count(*) AS value FROM iceberg.default.fact_camera_monitoring WHERE is_violent_window = true AND window_start >= now() - interval '7' day",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "violence_incidents_24h_total",
+          "instant": true
         }
       ],
-      "title": "TỔNG SỰ KIỆN BẠO LỰC (7 NGÀY QUA)",
+      "title": "SU KIEN BAO LUC (24H)",
       "type": "stat"
     },
     {
       "datasource": {
-        "type": "trino-datasource",
-        "uid": "trino_security_ds"
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
       },
       "fieldConfig": {
         "defaults": {
           "color": {
-            "fixedColor": "blue",
+            "fixedColor": "orange",
             "mode": "fixed"
           },
           "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "ms"
+          "unit": "short"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
-        "x": 16,
-        "y": 0
+        "w": 6,
+        "x": 6,
+        "y": 1
       },
-      "id": 10,
+      "id": 2,
       "options": {
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
-        "percentChangeColorMode": "standard",
         "reduceOptions": {
           "calcs": [
-            "mean"
+            "lastNotNull"
           ],
           "fields": "",
           "values": false
         },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
+        "textMode": "auto"
       },
-      "pluginVersion": "12.3.1",
       "targets": [
         {
-          "rawSql": "SELECT avg(avg_latency_ms) AS value FROM iceberg.default.fact_camera_monitoring WHERE window_start >= now() - interval '7' day",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "violence_incidents_7d_total",
+          "instant": true
         }
       ],
-      "title": "ĐỘ TRỄ HỆ THỐNG TB (7 NGÀY)",
+      "title": "SU KIEN BAO LUC (7 NGAY)",
       "type": "stat"
     },
     {
       "datasource": {
-        "type": "trino-datasource",
-        "uid": "trino_security_ds"
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            }
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
           },
           "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
+          "unit": "short"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 18,
-        "w": 12,
-        "x": 0,
-        "y": 4
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
       },
-      "id": 5,
+      "id": 3,
       "options": {
-        "basemap": {
-          "config": {
-            "server": "streets"
-          },
-          "name": "Layer 0",
-          "noRepeat": false,
-          "type": "default"
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "controls": {
-          "mouseWheelZoom": true,
-          "showAttribution": true,
-          "showDebug": false,
-          "showMeasure": false,
-          "showScale": false,
-          "showZoom": true
-        },
-        "layers": [
-          {
-            "config": {
-              "style": {
-                "color": {
-                  "fixed": "red"
-                },
-                "opacity": 0.8,
-                "size": {
-                  "field": "value",
-                  "fixed": 5,
-                  "max": 50,
-                  "min": 1
-                }
-              }
-            },
-            "name": "Layer 1",
-            "type": "markers"
-          }
-        ],
-        "tooltip": {
-          "mode": "details"
-        },
-        "view": {
-          "allLayers": true,
-          "id": "fit",
-          "lat": 0,
-          "lon": 0,
-          "noRepeat": false,
-          "zoom": 18
-        }
+        "textMode": "auto"
       },
-      "pluginVersion": "12.3.1",
       "targets": [
         {
-          "rawSql": "SELECT min(fact.window_start) AS time, loc.latitude, loc.longitude, count(*) AS value FROM iceberg.default.fact_camera_monitoring fact JOIN iceberg.default.dim_location loc ON fact.location_key = loc.location_key WHERE fact.is_violent_window = true AND $__timeFilter(fact.window_start) GROUP BY loc.latitude, loc.longitude",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "violence_cameras_active",
+          "instant": true
         }
       ],
-      "title": "BẢN ĐỒ ĐIỂM NÓNG BẠO LỰC (7 NGÀY)",
-      "type": "geomap"
+      "title": "CAMERA HOAT DONG",
+      "type": "stat"
     },
     {
       "datasource": {
-        "type": "trino-datasource",
-        "uid": "trino_security_ds"
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "yellow",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "violence_avg_risk_score",
+          "instant": true
+        }
+      ],
+      "title": "DIEM RUI RO TB",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 101,
+      "title": "Phan tich theo loai & camera",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
       },
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "id": 5,
+      "options": {
+        "pieType": "pie",
+        "legend": {
+          "displayMode": "table",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
           },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
+          "expr": "violence_incidents_by_type{job='chatbot'}",
+          "instant": true
+        }
+      ],
+      "title": "Phan phoi loai su kien",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
           }
         },
         "overrides": []
@@ -370,148 +304,101 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 4
+        "y": 6
       },
-      "id": 11,
+      "id": 6,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
+        "orientation": "horizontal",
+        "barRadius": 0.05,
         "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "desc"
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
         }
       },
-      "pluginVersion": "12.3.1",
       "targets": [
         {
-          "rawSql": "SELECT window_start AS time, max_risk_score * 100 as risk FROM iceberg.default.fact_camera_monitoring WHERE is_violent_window = true AND $__timeFilter(window_start) ORDER BY time ASC",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "topk(10, violence_incidents_by_camera)",
+          "instant": true,
+          "legendFormat": "{{camera_id}}"
         }
       ],
-      "title": "BIỂU ĐỒ XU HƯỚNG RỦI RO CHI TIẾT (7 NGÀY)",
-      "type": "timeseries"
+      "title": "Top Cameras by Incident Count (7d)",
+      "type": "barchart"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 102,
+      "title": "Diem nong theo dia diem",
+      "type": "row"
     },
     {
       "datasource": {
-        "type": "trino-datasource",
-        "uid": "trino_security_ds"
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
       },
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "fillOpacity": 80,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "lineWidth": 1,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
           }
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 10,
-        "w": 12,
-        "x": 12,
-        "y": 12
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 15
       },
-      "id": 6,
+      "id": 7,
       "options": {
-        "barRadius": 0,
-        "barWidth": 0.97,
-        "fullHighlight": false,
-        "groupWidth": 0.7,
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
         "orientation": "horizontal",
-        "showValue": "auto",
-        "stacking": "none",
+        "barRadius": 0.05,
         "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
+          "mode": "single"
         },
-        "xTickLabelRotation": 0,
-        "xTickLabelSpacing": 0
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
       },
-      "pluginVersion": "12.3.1",
       "targets": [
         {
-          "rawSql": "SELECT loc.ward AS ward, count(*) AS total_events FROM iceberg.default.fact_camera_monitoring fact JOIN iceberg.default.dim_location loc ON fact.location_key = loc.location_key WHERE fact.is_violent_window = true AND fact.window_start >= now() - interval '7' day GROUP BY loc.ward ORDER BY total_events DESC",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "expr": "topk(10, violence_incidents_by_location)",
+          "instant": true,
+          "legendFormat": "{{location}}"
         }
       ],
-      "title": "TOP KHU VỰC NGUY HIỂM THEO PHƯỜNG (7 NGÀY)",
+      "title": "Top Locations by Incident Count",
       "type": "barchart"
     }
   ],
-  "preload": false,
-  "refresh": "5m",
-  "schemaVersion": 42,
-  "tags": [],
-  "templating": {
-    "list": [
-      {
-        "datasource": {
-          "type": "trino-datasource",
-          "uid": "trino_security_ds"
-        },
-        "includeAll": true,
-        "multi": true,
-        "name": "camera_id",
-        "options": [],
-        "query": "SELECT DISTINCT camera_id FROM iceberg.default.violence_incidents ORDER BY camera_id",
-        "refresh": 1,
-        "type": "query"
-      }
-    ]
-  },
-  "time": {
-    "from": "now-7d",
-    "to": "now"
-  },
-  "timepicker": {},
-  "timezone": "utc",
-  "title": "HỆ THỐNG GIÁM SÁT AN NINH ĐÔ THỊ (PHÂN TÍCH 7 NGÀY)",
+  "refresh": "1m",
+  "schemaVersion": 36,
+  "tags": [
+    "streamhouse",
+    "security"
+  ],
+  "title": "HE THONG GIAM SAT AN NINH DO THI",
   "uid": "violence-security-monitor",
-  "version": 34
+  "version": 2
 }

@@ -726,29 +726,69 @@ async def execute_query(state: AgentState) -> AgentState:
                     state["frame_urls"] = collected
                     logger.info(f"Collected {len(collected)} frame URLs from SQL results")
 
-            # --- Evidence fallback: nếu user yêu cầu ảnh nhưng SQL không có frame_url ---
-            # Chạy BẤT KỂ row_count (kể cả 0) vì evidence có thể không liên quan đến SQL rows
-            if wants_evidence and not state.get("frame_urls") and _evidence_service:
-                logger.info("[EVIDENCE FALLBACK] No frame_urls from SQL — querying MinIO directly")
+            # --- Evidence fallback: chỉ dùng khi SQL không có frame_url VÀ không có filter cụ thể ---
+            # KHÔNG dùng blind MinIO listing — phải query đúng context (location, camera, time)
+            if wants_evidence and not state.get("frame_urls") and _trino_client:
                 try:
                     minio_public = os.getenv("MINIO_EXTERNAL_URL", os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000"))
                     bucket_name = os.getenv("S3_BUCKET", "evidence-frames")
-                    s3_client = _evidence_service.client if hasattr(_evidence_service, "client") else None
-                    if s3_client:
-                        objects = s3_client.list_objects(bucket_name=bucket_name, recursive=True)
-                        urls = []
-                        for obj in objects:
-                            key = getattr(obj, "object_name", str(obj))
-                            urls.append(f"{minio_public}/{bucket_name}/{key}")
-                            if len(urls) >= 20:
-                                break
-                        if urls:
-                            state["frame_urls"] = urls
-                            # Override "no data" answer to reflect that images were found
-                            state["row_count"] = len(urls)
-                            logger.info(f"[EVIDENCE FALLBACK] Found {len(urls)} frames from MinIO listing")
+
+                    # Trích xuất count limit từ query ("1 ảnh" → limit=1, "vài ảnh" → 5, default=10)
+                    import re as _re
+                    q_lower = (state.get("user_query") or "").lower()
+                    count_match = _re.search(r'(\d+)\s*(ảnh|hình|frame|image)', q_lower)
+                    limit = int(count_match.group(1)) if count_match else 10
+                    limit = min(limit, 20)  # max 20
+
+                    # Build WHERE clause từ context: location, camera_id, time_period
+                    where_parts = ["frame_url IS NOT NULL", "is_violent = TRUE"]
+                    time_period = state.get("time_period") or ""
+                    if "hôm nay" in time_period or "today" in time_period:
+                        where_parts.append("DATE(timestamp) = CURRENT_DATE")
+                    elif "tuần" in time_period or "week" in time_period:
+                        where_parts.append("timestamp >= NOW() - INTERVAL '7' DAY")
+                    else:
+                        where_parts.append("timestamp >= NOW() - INTERVAL '7' DAY")
+
+                    # Lọc theo location nếu user đề cập
+                    for loc_hint in ["đường ", "phường ", "quận "]:
+                        if loc_hint in q_lower:
+                            # Trích chuỗi sau keyword
+                            idx = q_lower.find(loc_hint)
+                            loc_text = q_lower[idx:idx+30].split(",")[0].split("và")[0].strip()
+                            where_parts.append(f"LOWER(location) LIKE '%{loc_text}%'")
+                            break
+
+                    where_clause = " AND ".join(where_parts)
+                    evidence_sql = (
+                        f"SELECT frame_url, camera_id, timestamp, location, risk_score "
+                        f"FROM paimon.security.violence_incidents "
+                        f"WHERE {where_clause} "
+                        f"ORDER BY risk_score DESC, timestamp DESC "
+                        f"LIMIT {limit}"
+                    )
+                    logger.info("[EVIDENCE FALLBACK] Contextual SQL: %s", evidence_sql[:150])
+                    ev_rows = _trino_client.route_query(
+                        sql=evidence_sql, layer=LayerChoice.PAIMON, timeout=20
+                    ) if hasattr(_trino_client, 'route_query') else []
+                    ev_rows = ev_rows if isinstance(ev_rows, list) else []
+
+                    urls = []
+                    for r in (ev_rows or []):
+                        url = r.get("frame_url", "") if isinstance(r, dict) else ""
+                        if url:
+                            if not url.startswith("http"):
+                                url = f"{minio_public}/{bucket_name}/{url.lstrip('/')}"
+                            urls.append(url)
+
+                    if urls:
+                        state["frame_urls"] = urls
+                        state["row_count"] = len(urls)
+                        logger.info("[EVIDENCE FALLBACK] Found %d contextual frames", len(urls))
+                    else:
+                        logger.info("[EVIDENCE FALLBACK] No matching frames with context filter")
                 except Exception as ev_err:
-                    logger.warning(f"[EVIDENCE FALLBACK] MinIO listing failed: {ev_err}")
+                    logger.warning("[EVIDENCE FALLBACK] Contextual query failed: %s", ev_err)
 
             # ── Dual-layer: supplementary HOT scan for "hôm nay" queries ──────────────
             # "today" = Paimon WARM (2h–24h old) + Fluss HOT (last 2h, not yet tiered).
@@ -957,14 +997,14 @@ async def generate_response(state: AgentState) -> AgentState:
             # Nếu có frame_urls từ evidence fallback → không báo "no data"
             frame_urls_from_fallback = state.get("frame_urls") or []
             if row_count == 0 and frame_urls_from_fallback:
-                # Evidence đã được collect qua MinIO fallback — tạo answer thông báo
+                # Evidence được tìm theo context (location/camera/time) — tạo answer phù hợp
                 n = len(frame_urls_from_fallback)
+                user_q = state.get("user_query", "")
                 state["final_answer"] = (
-                    f"Đã tìm thấy {n} hình ảnh bằng chứng gần đây từ hệ thống camera.\n"
-                    f"Các ảnh được thu thập từ MinIO evidence storage ({state['data_layer']}).\n\n"
-                    f"Nguồn: evidence-frames (MinIO), {n} ảnh"
+                    f"Đã tìm thấy {n} hình ảnh bằng chứng phù hợp với yêu cầu của bạn.\n"
+                    f"Nguồn: violence_incidents (Paimon), {n} ảnh"
                 )
-                state["response_confidence"] = 0.9
+                state["response_confidence"] = 0.85
                 row_count = n  # Update để gallery rendering hoạt động
             elif row_count == 0:
                 state["final_answer"] = (
