@@ -750,7 +750,7 @@ async def execute_query(state: AgentState) -> AgentState:
 
                     # Query Paimon — chỉ cần camera_id + date (không cần incident_id)
                     sql = (
-                        f"SELECT DISTINCT camera_id, CAST(DATE(timestamp) AS VARCHAR) "
+                        f"SELECT DISTINCT camera_id, CAST(DATE(timestamp) AS VARCHAR) AS dt "
                         f"FROM paimon.security.violence_incidents "
                         f"WHERE is_violent = TRUE {loc_where} "
                         f"ORDER BY 2 DESC LIMIT 5"
@@ -767,7 +767,7 @@ async def execute_query(state: AgentState) -> AgentState:
                         if len(urls) >= limit:
                             break
                         cid = (r.get("camera_id") if isinstance(r, dict) else r[0]) or ""
-                        dt  = (r.get("_col2") or r.get("date") if isinstance(r, dict) else r[1]) or ""
+                        dt  = (r.get("dt") if isinstance(r, dict) else r[1]) or ""
                         dt  = str(dt).split(" ")[0].split("T")[0]
                         if not (cid and dt):
                             continue
