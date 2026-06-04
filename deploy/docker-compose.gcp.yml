@@ -619,6 +619,38 @@ services:
       - violence-detection-net
     restart: unless-stopped
 
+  frame-extractor:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.producer
+    container_name: frame-extractor
+    environment:
+      KAFKA_BROKER: kafka:9092
+      S3_ENDPOINT: http://minio:9000
+      # Public HTTP URL dùng trong frame_url — truy cập được từ browser qua external IP
+      S3_PUBLIC_URL: http://${GCP_VM_EXTERNAL_IP:-34.124.131.144}:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-mypassword}
+      STOP_FILE: /app/tmp/STOP
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../scripts/transform:/app/scripts/transform
+      - frame-extractor-tmp:/app/tmp
+    command: python /app/scripts/transform/frame_extractor_sink.py
+    depends_on:
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.25"
+    networks:
+      - violence-detection-net
+    restart: on-failure
+
 # ─── VOLUMES ─────────────────────────────────────────────────────────────────
 volumes:
   kafka-data:
@@ -632,6 +664,7 @@ volumes:
   fluss-remote-data:
   rtsp-pusher-tmp:
   rtsp-inference-tmp:
+  frame-extractor-tmp:
 
 # ─── NETWORKS ────────────────────────────────────────────────────────────────
 networks:
