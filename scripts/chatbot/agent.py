@@ -159,6 +159,10 @@ _EVIDENCE_KEYWORDS = (
     "bằng chứng", "xem ảnh", "xem hinh", "ảnh chụp", "screenshot",
     "frame", "clip", "video", "chứng cứ", "chung cu", "hình ảnh",
     "cho xem", "xem được không", "có ảnh không", "có hình không",
+    # phrases thường dùng nhưng chưa có:
+    "hình ảnh bằng chứng", "bằng chứng gần đây", "xem bằng chứng",
+    "bằng chứng hình ảnh", "ảnh gần đây", "hình gần đây",
+    "cho tôi xem", "cho mình xem",
 )
 
 # Short tokens that need whole-word matching to avoid false-positives:
@@ -973,6 +977,7 @@ Hãy tổng hợp kết quả truy vấn dưới đây thành một câu trả l
 **Bảng nguồn:** {src}
 **Lớp dữ liệu:** {dlayer}
 **Thời gian:** {state['time_period']}
+**SQL đã dùng (tóm tắt):** {state.get('sql_used', '')[:120]}
 
 **Yêu cầu:**
 1. Viết câu trả lời tự nhiên bằng tiếng Việt dựa trên dữ liệu
@@ -980,14 +985,31 @@ Hãy tổng hợp kết quả truy vấn dưới đây thành một câu trả l
 3. Cuối cùng, thêm dòng citation: "Nguồn: {src} ({dlayer}), {row_count} hàng"
 4. Không bịa dữ liệu, chỉ sử dụng những gì có trong kết quả
 5. Trả về CHỈ câu trả lời, không có giải thích thêm
-6. KHI đề cập địa điểm xảy ra sự kiện: PHẢI dùng giá trị cột `location` (ví dụ: "tại Đường Nguyễn Huệ", "tại Đường Võ Văn Kiệt"), KHÔNG dùng "tại camera cam_XX". Nếu có cột `ward_id`/`district` thì thêm thông tin phường/quận.{evidence_note_for_gemini}
+6. KHI đề cập địa điểm xảy ra sự kiện: PHẢI dùng giá trị cột `location` (ví dụ: "tại Đường Nguyễn Huệ", "tại Đường Võ Văn Kiệt"), KHÔNG dùng "tại camera cam_XX". Nếu có cột `ward_id`/`district` thì thêm thông tin phường/quận.
+7. QUAN TRỌNG: Nếu dữ liệu JSON là rỗng [] hoặc không có hàng nào, PHẢI trả lời "Không tìm thấy dữ liệu" — KHÔNG được tạo số liệu.{evidence_note_for_gemini}
 
 **Câu trả lời:**
                         """.strip()
 
                         response = model.generate_content(prompt)
-                        state["final_answer"] = response.text.strip()
-                        state["response_confidence"] = state["intent"].query_confidence * 0.95
+                        answer = response.text.strip()
+
+                        # Anti-hallucination guard: nếu DB trả 0 rows nhưng Gemini
+                        # vẫn tạo ra số liệu cụ thể → override bằng "không có dữ liệu"
+                        if row_count == 0:
+                            import re as _re
+                            if _re.search(r'\d+\s*(vụ|alert|sự cố|camera|lần|incident)', answer, _re.IGNORECASE):
+                                logger.warning("Hallucination detected (row_count=0 but Gemini returned numbers) — overriding")
+                                answer = (
+                                    f"Không tìm thấy dữ liệu cho câu hỏi của bạn trong khoảng thời gian "
+                                    f"'{state['time_period']}'.\n"
+                                    f"Vui lòng thử mở rộng phạm vi thời gian hoặc điều chỉnh bộ lọc.\n\n"
+                                    f"Nguồn: {src} ({dlayer})"
+                                )
+                                state["response_confidence"] = 0.0
+
+                        state["final_answer"] = answer
+                        state["response_confidence"] = state["intent"].query_confidence * 0.95 if row_count > 0 else 0.0
 
                     except Exception as e:
                         logger.error(f"Gemini synthesis failed: {e}")
