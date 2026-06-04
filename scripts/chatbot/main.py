@@ -933,7 +933,11 @@ async def grafana_kpi(field: str):
             "avg_risk_score": violence.get("avg_risk_score", 0.0),
         }
         value = mapping.get(field, 0)
-        return [{"value": value, "metric": field}]
+        # Return with timestamp so Infinity creates a time-series frame
+        # (stat panel requires time-series or single-value frame to reduce correctly)
+        import datetime as _dt
+        now_iso = _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        return [{"time": now_iso, "value": float(value)}]
     except Exception as e:
         logger.warning("grafana_kpi/%s failed: %s", field, e)
         return [{"value": 0, "metric": field}]

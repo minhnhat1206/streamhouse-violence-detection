@@ -73,13 +73,18 @@
           "root_selector": "",
           "columns": [
             {
+              "selector": "time",
+              "text": "time",
+              "type": "timestamp"
+            },
+            {
               "selector": "value",
               "text": "value",
               "type": "number"
             }
           ],
           "parser": "backend",
-          "format": "table"
+          "format": "timeseries"
         }
       ],
       "title": "Violent Incidents (24h)",
@@ -131,13 +136,18 @@
           "root_selector": "",
           "columns": [
             {
+              "selector": "time",
+              "text": "time",
+              "type": "timestamp"
+            },
+            {
               "selector": "value",
               "text": "value",
               "type": "number"
             }
           ],
           "parser": "backend",
-          "format": "table"
+          "format": "timeseries"
         }
       ],
       "title": "Violent Incidents (7 days)",
@@ -189,13 +199,18 @@
           "root_selector": "",
           "columns": [
             {
+              "selector": "time",
+              "text": "time",
+              "type": "timestamp"
+            },
+            {
               "selector": "value",
               "text": "value",
               "type": "number"
             }
           ],
           "parser": "backend",
-          "format": "table"
+          "format": "timeseries"
         }
       ],
       "title": "Active Cameras (24h)",
@@ -247,13 +262,18 @@
           "root_selector": "",
           "columns": [
             {
+              "selector": "time",
+              "text": "time",
+              "type": "timestamp"
+            },
+            {
               "selector": "value",
               "text": "value",
               "type": "number"
             }
           ],
           "parser": "backend",
-          "format": "table"
+          "format": "timeseries"
         }
       ],
       "title": "Avg Risk Score (24h)",

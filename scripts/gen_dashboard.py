@@ -11,8 +11,11 @@ def kpi_target(field):
         "refId": "A", "type": "json", "source": "url",
         "url": f"{CHATBOT}/api/grafana/kpi/{field}",
         "root_selector": "",
-        "columns": [{"selector": "value", "text": "value", "type": "number"}],
-        "parser": "backend", "format": "table"
+        "columns": [
+            {"selector": "time", "text": "time", "type": "timestamp"},
+            {"selector": "value", "text": "value", "type": "number"}
+        ],
+        "parser": "backend", "format": "timeseries"
     }
 
 def arr_target(url, root, cols):
