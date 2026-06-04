@@ -18,7 +18,7 @@ from typing import List, Optional
 from uuid import uuid4
 
 try:
-    from prometheus_client import Histogram, Counter, generate_latest, CONTENT_TYPE_LATEST
+    from prometheus_client import Histogram, Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
     _PROM_ENABLED = True
     _query_duration = Histogram(
         "chatbot_query_duration_seconds",
@@ -31,6 +31,17 @@ try:
         "Total queries by layer",
         labelnames=["layer"],
     )
+    # ── Dashboard KPI Gauges (refreshed every 5 min) ──────────────────────
+    _g_violent_24h   = Gauge("violence_incidents_24h_total",   "Violent incidents last 24h")
+    _g_violent_7d    = Gauge("violence_incidents_7d_total",    "Violent incidents last 7 days")
+    _g_cameras       = Gauge("violence_cameras_active",        "Distinct cameras last 24h")
+    _g_risk          = Gauge("violence_avg_risk_score",        "Avg risk score last 24h")
+    _g_by_type       = Gauge("violence_incidents_by_type",     "Incidents by event type",    ["event_type"])
+    _g_by_camera     = Gauge("violence_incidents_by_camera",   "Incidents by camera (7d)",   ["camera_id"])
+    _g_by_location   = Gauge("violence_incidents_by_location", "Incidents by location",      ["location"])
+    _g_hot_rows      = Gauge("streamhouse_hot_rows_total",     "HOT layer row count")
+    _g_warm_rows     = Gauge("streamhouse_warm_rows_total",    "WARM layer row count")
+    _g_cold_rows     = Gauge("streamhouse_cold_rows_total",    "COLD layer row count")
 except ImportError:
     _PROM_ENABLED = False
 
@@ -143,6 +154,69 @@ class HealthResponse(BaseModel):
 # Startup & Shutdown
 # ============================================================================
 
+async def _refresh_dashboard_metrics():
+    """Query Paimon/Fluss and update Prometheus Gauges for Grafana dashboard panels."""
+    if not _PROM_ENABLED:
+        return
+    logger.info("[metrics] Refreshing dashboard Prometheus gauges...")
+    try:
+        import asyncio as _asyncio
+
+        # ── KPI aggregates ────────────────────────────────────────────────
+        rows = await _asyncio.gather(
+            _trino_query("SELECT COUNT(*) FROM paimon.security.violence_incidents WHERE is_violent=TRUE AND timestamp>=NOW()-INTERVAL '1' DAY", timeout=15.0),
+            _trino_query("SELECT COUNT(*) FROM paimon.security.violence_incidents WHERE is_violent=TRUE AND timestamp>=NOW()-INTERVAL '7' DAY", timeout=15.0),
+            _trino_query("SELECT COUNT(DISTINCT camera_id) FROM paimon.security.violence_incidents WHERE timestamp>=NOW()-INTERVAL '1' DAY", timeout=15.0),
+            _trino_query("SELECT ROUND(AVG(risk_score),3) FROM paimon.security.violence_incidents WHERE is_violent=TRUE AND timestamp>=NOW()-INTERVAL '1' DAY", timeout=15.0),
+        )
+        _g_violent_24h.set(int(rows[0][0][0]) if rows[0] and rows[0][0][0] else 0)
+        _g_violent_7d.set(int(rows[1][0][0]) if rows[1] and rows[1][0][0] else 0)
+        _g_cameras.set(int(rows[2][0][0]) if rows[2] and rows[2][0][0] else 0)
+        _g_risk.set(float(rows[3][0][0]) if rows[3] and rows[3][0][0] else 0.0)
+
+        # ── By event type ─────────────────────────────────────────────────
+        type_rows = await _trino_query(
+            "SELECT event_type, COUNT(*) FROM paimon.security.violence_incidents WHERE timestamp>=NOW()-INTERVAL '7' DAY GROUP BY event_type",
+            timeout=15.0,
+        )
+        for r in (type_rows or []):
+            if r[0]:
+                _g_by_type.labels(event_type=str(r[0])).set(int(r[1]))
+
+        # ── By camera ─────────────────────────────────────────────────────
+        cam_rows = await _trino_query(
+            "SELECT camera_id, COUNT(*) FROM paimon.security.violence_incidents WHERE is_violent=TRUE AND timestamp>=NOW()-INTERVAL '7' DAY GROUP BY camera_id ORDER BY 2 DESC LIMIT 15",
+            timeout=15.0,
+        )
+        for r in (cam_rows or []):
+            if r[0]:
+                _g_by_camera.labels(camera_id=str(r[0])).set(int(r[1]))
+
+        # ── By location ───────────────────────────────────────────────────
+        loc_rows = await _trino_query(
+            "SELECT location, COUNT(*) FROM paimon.security.violence_incidents WHERE timestamp>=NOW()-INTERVAL '7' DAY GROUP BY location ORDER BY 2 DESC LIMIT 10",
+            timeout=15.0,
+        )
+        for r in (loc_rows or []):
+            if r[0]:
+                _g_by_location.labels(location=str(r[0])).set(int(r[1]))
+
+        # ── Layer row counts ──────────────────────────────────────────────
+        lc = await get_layer_counts()
+        _g_warm_rows.set(lc.get("warm") or 0)
+        _g_cold_rows.set(lc.get("cold") or 0)
+        hot = lc.get("hot")
+        if hot is not None:
+            _g_hot_rows.set(hot)
+
+        logger.info("[metrics] Dashboard gauges updated: violent_24h=%s violent_7d=%s cameras=%s",
+                    int(rows[0][0][0]) if rows[0] and rows[0][0][0] else 0,
+                    int(rows[1][0][0]) if rows[1] and rows[1][0][0] else 0,
+                    int(rows[2][0][0]) if rows[2] and rows[2][0][0] else 0)
+    except Exception as e:
+        logger.warning("[metrics] _refresh_dashboard_metrics error: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan context manager for startup/shutdown."""
@@ -211,6 +285,20 @@ async def lifespan(app: FastAPI):
         # Mark as initialized
         app_state["initialized"] = True
         logger.info("✓ Chatbot API ready")
+
+        # Start background Prometheus metrics refresh (every 5 min)
+        if _PROM_ENABLED:
+            import asyncio as _asyncio
+            async def _prom_refresh_loop():
+                await _asyncio.sleep(10)  # initial delay
+                while True:
+                    try:
+                        await _refresh_dashboard_metrics()
+                    except Exception as _e:
+                        logger.warning("prom_refresh failed: %s", _e)
+                    await _asyncio.sleep(300)  # 5 min
+            _asyncio.create_task(_prom_refresh_loop())
+            logger.info("✓ Dashboard metrics refresh loop started")
 
     except Exception as e:
         logger.error(f"❌ Startup failed: {e}", exc_info=True)
