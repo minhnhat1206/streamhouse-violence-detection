@@ -726,69 +726,55 @@ async def execute_query(state: AgentState) -> AgentState:
                     state["frame_urls"] = collected
                     logger.info(f"Collected {len(collected)} frame URLs from SQL results")
 
-            # --- Evidence fallback: chỉ dùng khi SQL không có frame_url VÀ không có filter cụ thể ---
-            # KHÔNG dùng blind MinIO listing — phải query đúng context (location, camera, time)
-            if wants_evidence and not state.get("frame_urls") and _trino_client:
+            # --- Evidence fallback: gọi /api/recent-incidents với filter từ context ---
+            # Không dùng blind listing — filter theo location/camera nếu user đề cập
+            if wants_evidence and not state.get("frame_urls"):
                 try:
-                    minio_public = os.getenv("MINIO_EXTERNAL_URL", os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000"))
-                    bucket_name = os.getenv("S3_BUCKET", "evidence-frames")
-
-                    # Trích xuất count limit từ query ("1 ảnh" → limit=1, "vài ảnh" → 5, default=10)
                     import re as _re
+                    import urllib.request as _urq
+                    import json as _json
+
                     q_lower = (state.get("user_query") or "").lower()
+
+                    # Trích count limit từ query ("1 ảnh" → 1, default=10)
                     count_match = _re.search(r'(\d+)\s*(ảnh|hình|frame|image)', q_lower)
-                    limit = int(count_match.group(1)) if count_match else 10
-                    limit = min(limit, 20)  # max 20
+                    limit = min(int(count_match.group(1)) if count_match else 10, 20)
 
-                    # Build WHERE clause từ context: location, camera_id, time_period
-                    where_parts = ["frame_url IS NOT NULL", "is_violent = TRUE"]
-                    time_period = state.get("time_period") or ""
-                    if "hôm nay" in time_period or "today" in time_period:
-                        where_parts.append("DATE(timestamp) = CURRENT_DATE")
-                    elif "tuần" in time_period or "week" in time_period:
-                        where_parts.append("timestamp >= NOW() - INTERVAL '7' DAY")
-                    else:
-                        where_parts.append("timestamp >= NOW() - INTERVAL '7' DAY")
-
-                    # Lọc theo location nếu user đề cập
-                    for loc_hint in ["đường ", "phường ", "quận "]:
-                        if loc_hint in q_lower:
-                            # Trích chuỗi sau keyword
-                            idx = q_lower.find(loc_hint)
-                            loc_text = q_lower[idx:idx+30].split(",")[0].split("và")[0].strip()
-                            where_parts.append(f"LOWER(location) LIKE '%{loc_text}%'")
-                            break
-
-                    where_clause = " AND ".join(where_parts)
-                    evidence_sql = (
-                        f"SELECT frame_url, camera_id, timestamp, location, risk_score "
-                        f"FROM paimon.security.violence_incidents "
-                        f"WHERE {where_clause} "
-                        f"ORDER BY risk_score DESC, timestamp DESC "
-                        f"LIMIT {limit}"
+                    # Xây dựng query params
+                    params = [f"limit={limit}"]
+                    # Lọc location
+                    loc_match = _re.search(
+                        r'(?:đường|phường|quận)\s+([\w\s]+?)(?:\s*(?:,|và|trong|ở|tại|$))',
+                        q_lower
                     )
-                    logger.info("[EVIDENCE FALLBACK] Contextual SQL: %s", evidence_sql[:150])
-                    ev_rows = _trino_client.route_query(
-                        sql=evidence_sql, layer=LayerChoice.PAIMON, timeout=20
-                    ) if hasattr(_trino_client, 'route_query') else []
-                    ev_rows = ev_rows if isinstance(ev_rows, list) else []
+                    if loc_match:
+                        loc = loc_match.group(1).strip()
+                        params.append(f"location={urllib.parse.quote(loc)}")
 
-                    urls = []
-                    for r in (ev_rows or []):
-                        url = r.get("frame_url", "") if isinstance(r, dict) else ""
-                        if url:
-                            if not url.startswith("http"):
-                                url = f"{minio_public}/{bucket_name}/{url.lstrip('/')}"
-                            urls.append(url)
+                    api_url = f"http://localhost:5002/api/recent-incidents?{'&'.join(params)}"
+                    logger.info("[EVIDENCE FALLBACK] Calling: %s", api_url)
 
+                    import urllib.parse
+                    # Rebuild URL with proper encoding
+                    base_params = [f"limit={limit}"]
+                    if loc_match:
+                        loc = loc_match.group(1).strip()
+                        base_params.append(f"location={urllib.parse.quote(loc)}")
+                    api_url = f"http://localhost:5002/api/recent-incidents?{'&'.join(base_params)}"
+
+                    req = _urq.Request(api_url)
+                    resp = _urq.urlopen(req, timeout=15)
+                    incidents = _json.loads(resp.read())
+
+                    urls = [i["frame_url"] for i in (incidents or []) if i.get("frame_url")]
                     if urls:
-                        state["frame_urls"] = urls
-                        state["row_count"] = len(urls)
-                        logger.info("[EVIDENCE FALLBACK] Found %d contextual frames", len(urls))
+                        state["frame_urls"] = urls[:limit]
+                        state["row_count"] = len(urls[:limit])
+                        logger.info("[EVIDENCE FALLBACK] Found %d frames via /api/recent-incidents", len(urls[:limit]))
                     else:
-                        logger.info("[EVIDENCE FALLBACK] No matching frames with context filter")
+                        logger.info("[EVIDENCE FALLBACK] No frames from /api/recent-incidents")
                 except Exception as ev_err:
-                    logger.warning("[EVIDENCE FALLBACK] Contextual query failed: %s", ev_err)
+                    logger.warning("[EVIDENCE FALLBACK] Failed: %s", ev_err)
 
             # ── Dual-layer: supplementary HOT scan for "hôm nay" queries ──────────────
             # "today" = Paimon WARM (2h–24h old) + Fluss HOT (last 2h, not yet tiered).

@@ -680,17 +680,31 @@ async def get_evidence_frames(
 
 
 @app.get("/api/recent-incidents")
-async def get_recent_incidents(limit: int = 50):
-    """Latest incidents from Iceberg cold layer via Trino, with frame_url from MinIO."""
+async def get_recent_incidents(
+    limit: int = 50,
+    camera_id: str | None = None,
+    location: str | None = None,
+):
+    """Latest violent incidents from Paimon, with MinIO frame_url.
+    Optional filters: camera_id, location (partial match).
+    """
+    where_parts = ["is_violent = TRUE"]
+    if camera_id:
+        where_parts.append(f"camera_id = '{camera_id}'")
+    if location:
+        # Partial match, case-insensitive
+        where_parts.append(f"LOWER(location) LIKE '%{location.lower()}%'")
+
+    where_clause = " AND ".join(where_parts)
     sql = f"""
     SELECT
         incident_id, camera_id,
         CAST(timestamp AS VARCHAR) AS timestamp,
         risk_score, event_type, location,
         is_violent,
-        CAST(timestamp AS VARCHAR) AS incident_date
+        CAST(DATE(timestamp) AS VARCHAR) AS incident_date
     FROM paimon.security.violence_incidents
-    WHERE is_violent = TRUE
+    WHERE {where_clause}
     ORDER BY timestamp DESC
     LIMIT {limit}
     """
@@ -703,9 +717,11 @@ async def get_recent_incidents(limit: int = 50):
     minio_external = os.getenv("MINIO_EXTERNAL_URL", "http://localhost:9000")
     evidence_bucket = os.getenv("S3_BUCKET", "evidence-frames")
 
-    def build_frame_url(incident_id: str, camera_id: str, incident_date: str) -> str:
-        """Build HTTP URL for evidence frame in MinIO."""
-        return f"{minio_external}/{evidence_bucket}/{camera_id}/{incident_date}/{incident_id}.jpg"
+    def build_frame_url(incident_id: str, camera_id: str, date_str: str) -> str:
+        """Build MinIO URL: {camera_id}/{YYYY-MM-DD}/{incident_id}.jpg"""
+        # date_str is already YYYY-MM-DD from DATE(timestamp) cast
+        clean_date = (date_str or "").split(" ")[0].split("T")[0]
+        return f"{minio_external}/{evidence_bucket}/{camera_id}/{clean_date}/{incident_id}.jpg"
 
     return [
         {
