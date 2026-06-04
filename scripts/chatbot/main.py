@@ -176,30 +176,35 @@ async def _refresh_dashboard_metrics():
 
         # ── By event type ─────────────────────────────────────────────────
         type_rows = await _trino_query(
-            "SELECT event_type, COUNT(*) FROM paimon.security.violence_incidents WHERE timestamp>=NOW()-INTERVAL '7' DAY GROUP BY event_type",
+            "SELECT event_type, COUNT(*) FROM paimon.security.violence_incidents "
+            "WHERE event_type IS NOT NULL AND timestamp>=NOW()-INTERVAL '7' DAY GROUP BY event_type",
             timeout=15.0,
         )
         for r in (type_rows or []):
-            if r[0]:
-                _g_by_type.labels(event_type=str(r[0])).set(int(r[1]))
+            if r[0] and str(r[0]).strip():
+                _g_by_type.labels(event_type=str(r[0]).strip()).set(int(r[1] or 0))
 
         # ── By camera ─────────────────────────────────────────────────────
         cam_rows = await _trino_query(
-            "SELECT camera_id, COUNT(*) FROM paimon.security.violence_incidents WHERE is_violent=TRUE AND timestamp>=NOW()-INTERVAL '7' DAY GROUP BY camera_id ORDER BY 2 DESC LIMIT 15",
+            "SELECT camera_id, COUNT(*) FROM paimon.security.violence_incidents "
+            "WHERE is_violent=TRUE AND camera_id IS NOT NULL AND timestamp>=NOW()-INTERVAL '7' DAY "
+            "GROUP BY camera_id ORDER BY 2 DESC LIMIT 15",
             timeout=15.0,
         )
         for r in (cam_rows or []):
-            if r[0]:
-                _g_by_camera.labels(camera_id=str(r[0])).set(int(r[1]))
+            if r[0] and str(r[0]).strip():
+                _g_by_camera.labels(camera_id=str(r[0]).strip()).set(int(r[1] or 0))
 
         # ── By location ───────────────────────────────────────────────────
         loc_rows = await _trino_query(
-            "SELECT location, COUNT(*) FROM paimon.security.violence_incidents WHERE timestamp>=NOW()-INTERVAL '7' DAY GROUP BY location ORDER BY 2 DESC LIMIT 10",
+            "SELECT location, COUNT(*) FROM paimon.security.violence_incidents "
+            "WHERE location IS NOT NULL AND timestamp>=NOW()-INTERVAL '7' DAY "
+            "GROUP BY location ORDER BY 2 DESC LIMIT 10",
             timeout=15.0,
         )
         for r in (loc_rows or []):
-            if r[0]:
-                _g_by_location.labels(location=str(r[0])).set(int(r[1]))
+            if r[0] and str(r[0]).strip():
+                _g_by_location.labels(location=str(r[0]).strip()).set(int(r[1] or 0))
 
         # ── Layer row counts ──────────────────────────────────────────────
         lc = await get_layer_counts()
@@ -214,7 +219,22 @@ async def _refresh_dashboard_metrics():
                     int(rows[1][0][0]) if rows[1] and rows[1][0][0] else 0,
                     int(rows[2][0][0]) if rows[2] and rows[2][0][0] else 0)
     except Exception as e:
-        logger.warning("[metrics] _refresh_dashboard_metrics error: %s", e)
+        logger.warning("[metrics] _refresh_dashboard_metrics error: %s", e, exc_info=True)
+
+
+@app.post("/api/grafana/refresh-metrics")
+async def refresh_metrics_now():
+    """Manually trigger Prometheus metrics refresh (for debug/testing)."""
+    try:
+        await _refresh_dashboard_metrics()
+        return {"status": "ok", "metrics": {
+            "violent_24h": float(_g_violent_24h._value.get()) if _PROM_ENABLED else 0,
+            "violent_7d":  float(_g_violent_7d._value.get())  if _PROM_ENABLED else 0,
+            "cameras":     float(_g_cameras._value.get())      if _PROM_ENABLED else 0,
+        }}
+    except Exception as e:
+        logger.error("refresh_metrics_now failed: %s", e, exc_info=True)
+        return {"status": "error", "message": str(e)}
 
 
 @asynccontextmanager
