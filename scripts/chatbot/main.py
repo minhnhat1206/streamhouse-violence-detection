@@ -222,21 +222,6 @@ async def _refresh_dashboard_metrics():
         logger.warning("[metrics] _refresh_dashboard_metrics error: %s", e, exc_info=True)
 
 
-@app.post("/api/grafana/refresh-metrics")
-async def refresh_metrics_now():
-    """Manually trigger Prometheus metrics refresh (for debug/testing)."""
-    try:
-        await _refresh_dashboard_metrics()
-        return {"status": "ok", "metrics": {
-            "violent_24h": float(_g_violent_24h._value.get()) if _PROM_ENABLED else 0,
-            "violent_7d":  float(_g_violent_7d._value.get())  if _PROM_ENABLED else 0,
-            "cameras":     float(_g_cameras._value.get())      if _PROM_ENABLED else 0,
-        }}
-    except Exception as e:
-        logger.error("refresh_metrics_now failed: %s", e, exc_info=True)
-        return {"status": "error", "message": str(e)}
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan context manager for startup/shutdown."""
@@ -1083,6 +1068,20 @@ async def _get_violence_counts():
     except Exception as e:
         logger.warning("_get_violence_counts failed: %s", e)
         return {"violent_24h": 0, "violent_7d": 0, "cameras_24h": 0, "avg_risk_score": 0.0}
+
+
+@app.post("/api/grafana/refresh-metrics")
+async def refresh_metrics_now():
+    """Manually trigger Prometheus metrics refresh."""
+    try:
+        await _refresh_dashboard_metrics()
+        v24 = float(_g_violent_24h._value.get()) if _PROM_ENABLED else 0
+        v7d = float(_g_violent_7d._value.get()) if _PROM_ENABLED else 0
+        cam = float(_g_cameras._value.get()) if _PROM_ENABLED else 0
+        return {"status": "ok", "violent_24h": v24, "violent_7d": v7d, "cameras": cam}
+    except Exception as e:
+        logger.error("refresh_metrics_now failed: %s", e, exc_info=True)
+        return {"status": "error", "message": str(e)}
 
 
 @app.get("/api/grafana/cameras")
