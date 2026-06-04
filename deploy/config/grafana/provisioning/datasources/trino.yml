@@ -1,0 +1,10 @@
+apiVersion: 1
+
+# Trino plugin không có sẵn trên Grafana marketplace — datasource đã được thay thế
+# bằng Infinity datasource (yesoreyeram-infinity-datasource) gọi chatbot API.
+# File này giữ lại để reference; Infinity được provision bởi prometheus.yml (cùng file)
+# hoặc được tự động install qua GF_INSTALL_PLUGINS nếu cần thêm sau.
+
+deleteDatasources:
+  - name: Trino_Security_DB
+    orgId: 1
