@@ -70,7 +70,7 @@
           "type": "json",
           "source": "url",
           "url": "http://chatbot:5002/api/grafana/stats",
-          "root_selector": "[0]",
+          "root_selector": "",
           "columns": [
             {
               "selector": "violent_24h",
@@ -128,7 +128,7 @@
           "type": "json",
           "source": "url",
           "url": "http://chatbot:5002/api/grafana/stats",
-          "root_selector": "[0]",
+          "root_selector": "",
           "columns": [
             {
               "selector": "violent_7d",
@@ -186,7 +186,7 @@
           "type": "json",
           "source": "url",
           "url": "http://chatbot:5002/api/grafana/stats",
-          "root_selector": "[0]",
+          "root_selector": "",
           "columns": [
             {
               "selector": "cameras_active",
@@ -244,7 +244,7 @@
           "type": "json",
           "source": "url",
           "url": "http://chatbot:5002/api/grafana/stats",
-          "root_selector": "[0]",
+          "root_selector": "",
           "columns": [
             {
               "selector": "avg_risk_score",
@@ -314,7 +314,7 @@
           "columns": [
             {
               "selector": "name",
-              "text": "Time",
+              "text": "Date",
               "type": "string"
             },
             {
@@ -408,6 +408,9 @@
           "color": {
             "fixedColor": "red",
             "mode": "fixed"
+          },
+          "custom": {
+            "fillOpacity": 80
           }
         },
         "overrides": []
@@ -422,9 +425,12 @@
       "options": {
         "orientation": "horizontal",
         "barRadius": 0.05,
-        "xTickLabelRotation": 0,
         "tooltip": {
           "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
         }
       },
       "targets": [
@@ -463,6 +469,9 @@
           "color": {
             "fixedColor": "orange",
             "mode": "fixed"
+          },
+          "custom": {
+            "fillOpacity": 80
           }
         },
         "overrides": []
@@ -477,9 +486,12 @@
       "options": {
         "orientation": "horizontal",
         "barRadius": 0.05,
-        "xTickLabelRotation": 0,
         "tooltip": {
           "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
         }
       },
       "targets": [
@@ -541,13 +553,7 @@
       },
       "id": 9,
       "options": {
-        "showHeader": true,
-        "sortBy": [
-          {
-            "displayName": "timestamp",
-            "desc": true
-          }
-        ]
+        "showHeader": true
       },
       "targets": [
         {
@@ -581,11 +587,6 @@
               "selector": "location",
               "text": "Location",
               "type": "string"
-            },
-            {
-              "selector": "frame_url",
-              "text": "Frame URL",
-              "type": "string"
             }
           ],
           "parser": "backend",
@@ -605,5 +606,5 @@
   ],
   "title": "🔍 Violence Incidents Analytics",
   "uid": "violence-incidents-v2",
-  "version": 1
+  "version": 2
 }
