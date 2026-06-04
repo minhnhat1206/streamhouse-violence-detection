@@ -726,8 +726,10 @@ async def execute_query(state: AgentState) -> AgentState:
                     state["frame_urls"] = collected
                     logger.info(f"Collected {len(collected)} frame URLs from SQL results")
 
-            # --- Evidence fallback: query Paimon trực tiếp (không gọi HTTP localhost) ---
-            if wants_evidence and not state.get("frame_urls") and _trino_client:
+            # --- Evidence fallback: list actual MinIO files (camera_id + date từ Paimon) ---
+            # Paimon incident_id ≠ MinIO filename (2 pipelines khác nhau).
+            # Fix: lấy camera_id + date từ Paimon, rồi list actual files trong MinIO bucket.
+            if wants_evidence and not state.get("frame_urls") and _trino_client and _evidence_service:
                 try:
                     import re as _re
                     q_lower = (state.get("user_query") or "").lower()
@@ -746,37 +748,54 @@ async def execute_query(state: AgentState) -> AgentState:
                         loc_val = loc_m.group(1).strip().replace("'", "''")
                         loc_where = f"AND LOWER(location) LIKE '%{loc_val.lower()}%'"
 
-                    # Query Paimon — lấy incident_id, camera_id, DATE, để build frame_url
+                    # Query Paimon — chỉ cần camera_id + date (không cần incident_id)
                     sql = (
-                        f"SELECT incident_id, camera_id, CAST(DATE(timestamp) AS VARCHAR) "
+                        f"SELECT DISTINCT camera_id, CAST(DATE(timestamp) AS VARCHAR) "
                         f"FROM paimon.security.violence_incidents "
                         f"WHERE is_violent = TRUE {loc_where} "
-                        f"ORDER BY timestamp DESC LIMIT {limit}"
+                        f"ORDER BY 2 DESC LIMIT 5"
                     )
                     logger.info("[EVIDENCE FALLBACK] SQL: %s", sql[:150])
                     rows = _trino_client.query_paimon(sql, timeout=15) if hasattr(_trino_client, 'query_paimon') else []
-                    if not rows and hasattr(_trino_client, '_execute'):
-                        rows = _trino_client._execute(sql, timeout=15) or []
 
                     minio_pub = os.getenv("MINIO_EXTERNAL_URL", "http://localhost:9000")
                     bucket = os.getenv("S3_BUCKET", "evidence-frames")
+                    s3 = _evidence_service.client if hasattr(_evidence_service, "client") else None
+
                     urls = []
                     for r in (rows or []):
-                        if isinstance(r, dict):
-                            iid, cid, dt = r.get("incident_id"), r.get("camera_id"), r.get("_col2") or r.get("date")
-                        else:
-                            iid, cid, dt = (r[0], r[1], r[2]) if len(r) >= 3 else (None, None, None)
-                        if iid and cid and dt:
-                            clean_dt = str(dt).split(" ")[0].split("T")[0]
-                            urls.append(f"{minio_pub}/{bucket}/{cid}/{clean_dt}/{iid}.jpg")
+                        if len(urls) >= limit:
+                            break
+                        cid = (r.get("camera_id") if isinstance(r, dict) else r[0]) or ""
+                        dt  = (r.get("_col2") or r.get("date") if isinstance(r, dict) else r[1]) or ""
+                        dt  = str(dt).split(" ")[0].split("T")[0]
+                        if not (cid and dt):
+                            continue
+                        # List actual files from MinIO for this camera/date prefix
+                        if s3:
+                            prefix = f"{cid}/{dt}/"
+                            try:
+                                objs = list(s3.list_objects(
+                                    bucket_name=bucket, prefix=prefix, recursive=False
+                                ))
+                                for obj in objs:
+                                    key = getattr(obj, "object_name", "")
+                                    size = getattr(obj, "size", 0)
+                                    # Skip corrupt/empty files (< 500 bytes)
+                                    if key and size > 500:
+                                        urls.append(f"{minio_pub}/{bucket}/{key}")
+                                        if len(urls) >= limit:
+                                            break
+                            except Exception:
+                                pass
 
                     if urls:
                         state["frame_urls"] = urls
                         state["row_count"] = len(urls)
-                        logger.info("[EVIDENCE FALLBACK] %d frames (loc=%s)", len(urls),
+                        logger.info("[EVIDENCE FALLBACK] %d real MinIO files (loc=%s)", len(urls),
                                     loc_m.group(1) if loc_m else "any")
                     else:
-                        logger.info("[EVIDENCE FALLBACK] No rows from Paimon")
+                        logger.info("[EVIDENCE FALLBACK] No MinIO files found")
                 except Exception as ev_err:
                     logger.warning("[EVIDENCE FALLBACK] Failed: %s", ev_err, exc_info=True)
 
