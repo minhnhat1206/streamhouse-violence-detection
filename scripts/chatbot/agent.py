@@ -711,6 +711,7 @@ async def execute_query(state: AgentState) -> AgentState:
             wants_evidence = (
                 state.get("intent") and state["intent"].wants_evidence
             )
+            # --- Collect frame_urls from SQL results ---
             if results and (wants_evidence or any(r.get("frame_url") for r in results)):
                 minio_base = os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000")
                 bucket = os.getenv("S3_BUCKET", "evidence-frames")
@@ -721,32 +722,33 @@ async def execute_query(state: AgentState) -> AgentState:
                         url = f"{minio_base}/{bucket}/{url.lstrip('/')}"
                     if url:
                         collected.append(url)
-                # Preserve frame_urls across retries: only update if new URLs were found
                 if collected:
                     state["frame_urls"] = collected
                     logger.info(f"Collected {len(collected)} frame URLs from SQL results")
-                elif wants_evidence and _evidence_service:
-                    # Fallback: SQL có thể không SELECT frame_url — query MinIO trực tiếp
-                    logger.info("[EVIDENCE FALLBACK] SQL had no frame_url — querying MinIO directly")
-                    try:
-                        minio_public = os.getenv("MINIO_EXTERNAL_URL", os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000"))
-                        bucket_name = os.getenv("S3_BUCKET", "evidence-frames")
-                        # List objects từ MinIO bucket, lấy 20 ảnh mới nhất
-                        s3_client = _evidence_service.client if hasattr(_evidence_service, 'client') else None
-                        if s3_client:
-                            objects = s3_client.list_objects(bucket_name=bucket_name, recursive=True)
-                            urls = []
-                            for obj in objects:
-                                key = obj.object_name if hasattr(obj, 'object_name') else str(obj)
-                                urls.append(f"{minio_public}/{bucket_name}/{key}")
-                                if len(urls) >= 20:
-                                    break
-                            if urls:
-                                state["frame_urls"] = urls
-                                logger.info(f"[EVIDENCE FALLBACK] Found {len(urls)} frames from MinIO listing")
-                    except Exception as ev_err:
-                        logger.warning(f"[EVIDENCE FALLBACK] MinIO listing failed: {ev_err}")
-                # Don't clear existing frame_urls when collected is empty
+
+            # --- Evidence fallback: nếu user yêu cầu ảnh nhưng SQL không có frame_url ---
+            # Chạy BẤT KỂ row_count (kể cả 0) vì evidence có thể không liên quan đến SQL rows
+            if wants_evidence and not state.get("frame_urls") and _evidence_service:
+                logger.info("[EVIDENCE FALLBACK] No frame_urls from SQL — querying MinIO directly")
+                try:
+                    minio_public = os.getenv("MINIO_EXTERNAL_URL", os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000"))
+                    bucket_name = os.getenv("S3_BUCKET", "evidence-frames")
+                    s3_client = _evidence_service.client if hasattr(_evidence_service, "client") else None
+                    if s3_client:
+                        objects = s3_client.list_objects(bucket_name=bucket_name, recursive=True)
+                        urls = []
+                        for obj in objects:
+                            key = getattr(obj, "object_name", str(obj))
+                            urls.append(f"{minio_public}/{bucket_name}/{key}")
+                            if len(urls) >= 20:
+                                break
+                        if urls:
+                            state["frame_urls"] = urls
+                            # Override "no data" answer to reflect that images were found
+                            state["row_count"] = len(urls)
+                            logger.info(f"[EVIDENCE FALLBACK] Found {len(urls)} frames from MinIO listing")
+                except Exception as ev_err:
+                    logger.warning(f"[EVIDENCE FALLBACK] MinIO listing failed: {ev_err}")
 
             # ── Dual-layer: supplementary HOT scan for "hôm nay" queries ──────────────
             # "today" = Paimon WARM (2h–24h old) + Fluss HOT (last 2h, not yet tiered).
