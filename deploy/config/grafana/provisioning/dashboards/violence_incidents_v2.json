@@ -59,7 +59,7 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
+          "fields": "violent_24h",
           "values": false
         },
         "textMode": "auto"
@@ -71,13 +71,7 @@
           "source": "url",
           "url": "http://chatbot:5002/api/grafana/stats",
           "root_selector": "",
-          "columns": [
-            {
-              "selector": "violent_24h",
-              "text": "value",
-              "type": "number"
-            }
-          ],
+          "columns": [],
           "parser": "backend",
           "format": "table"
         }
@@ -117,7 +111,7 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
+          "fields": "violent_7d",
           "values": false
         },
         "textMode": "auto"
@@ -129,13 +123,7 @@
           "source": "url",
           "url": "http://chatbot:5002/api/grafana/stats",
           "root_selector": "",
-          "columns": [
-            {
-              "selector": "violent_7d",
-              "text": "value",
-              "type": "number"
-            }
-          ],
+          "columns": [],
           "parser": "backend",
           "format": "table"
         }
@@ -175,7 +163,7 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
+          "fields": "cameras_active",
           "values": false
         },
         "textMode": "auto"
@@ -187,13 +175,7 @@
           "source": "url",
           "url": "http://chatbot:5002/api/grafana/stats",
           "root_selector": "",
-          "columns": [
-            {
-              "selector": "cameras_active",
-              "text": "value",
-              "type": "number"
-            }
-          ],
+          "columns": [],
           "parser": "backend",
           "format": "table"
         }
@@ -233,7 +215,7 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
+          "fields": "avg_risk_score",
           "values": false
         },
         "textMode": "auto"
@@ -245,13 +227,7 @@
           "source": "url",
           "url": "http://chatbot:5002/api/grafana/stats",
           "root_selector": "",
-          "columns": [
-            {
-              "selector": "avg_risk_score",
-              "text": "value",
-              "type": "number"
-            }
-          ],
+          "columns": [],
           "parser": "backend",
           "format": "table"
         }
@@ -283,7 +259,7 @@
           },
           "custom": {
             "lineWidth": 2,
-            "fillOpacity": 10
+            "fillOpacity": 15
           }
         },
         "overrides": []
@@ -327,7 +303,7 @@
           "format": "table"
         }
       ],
-      "title": "📊 Incidents per Day — Total vs Violent",
+      "title": "📊 Incidents per Day — Trend",
       "type": "timeseries"
     },
     {
@@ -395,7 +371,7 @@
         "y": 14
       },
       "id": 202,
-      "title": "📍 Camera & Location Hotspot Analysis",
+      "title": "📍 Camera & Location Hotspot",
       "type": "row"
     },
     {
@@ -408,9 +384,6 @@
           "color": {
             "fixedColor": "red",
             "mode": "fixed"
-          },
-          "custom": {
-            "fillOpacity": 80
           }
         },
         "overrides": []
@@ -469,9 +442,6 @@
           "color": {
             "fixedColor": "orange",
             "mode": "fixed"
-          },
-          "custom": {
-            "fillOpacity": 80
           }
         },
         "overrides": []
@@ -529,7 +499,7 @@
         "y": 23
       },
       "id": 203,
-      "title": "🚨 Recent High-Risk Incidents",
+      "title": "🚨 Recent Incidents",
       "type": "row"
     },
     {
@@ -601,10 +571,9 @@
   "schemaVersion": 36,
   "tags": [
     "streamhouse",
-    "violence",
-    "infinity"
+    "violence"
   ],
   "title": "🔍 Violence Incidents Analytics",
   "uid": "violence-incidents-v2",
-  "version": 2
+  "version": 3
 }
