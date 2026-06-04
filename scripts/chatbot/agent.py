@@ -725,6 +725,27 @@ async def execute_query(state: AgentState) -> AgentState:
                 if collected:
                     state["frame_urls"] = collected
                     logger.info(f"Collected {len(collected)} frame URLs from SQL results")
+                elif wants_evidence and _evidence_service:
+                    # Fallback: SQL có thể không SELECT frame_url — query MinIO trực tiếp
+                    logger.info("[EVIDENCE FALLBACK] SQL had no frame_url — querying MinIO directly")
+                    try:
+                        minio_public = os.getenv("MINIO_EXTERNAL_URL", os.getenv("MINIO_PUBLIC_URL", "http://localhost:9000"))
+                        bucket_name = os.getenv("S3_BUCKET", "evidence-frames")
+                        # List objects từ MinIO bucket, lấy 20 ảnh mới nhất
+                        s3_client = _evidence_service.client if hasattr(_evidence_service, 'client') else None
+                        if s3_client:
+                            objects = s3_client.list_objects(bucket_name=bucket_name, recursive=True)
+                            urls = []
+                            for obj in objects:
+                                key = obj.object_name if hasattr(obj, 'object_name') else str(obj)
+                                urls.append(f"{minio_public}/{bucket_name}/{key}")
+                                if len(urls) >= 20:
+                                    break
+                            if urls:
+                                state["frame_urls"] = urls
+                                logger.info(f"[EVIDENCE FALLBACK] Found {len(urls)} frames from MinIO listing")
+                    except Exception as ev_err:
+                        logger.warning(f"[EVIDENCE FALLBACK] MinIO listing failed: {ev_err}")
                 # Don't clear existing frame_urls when collected is empty
 
             # ── Dual-layer: supplementary HOT scan for "hôm nay" queries ──────────────
