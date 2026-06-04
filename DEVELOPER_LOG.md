@@ -13,6 +13,75 @@ Xây dựng hệ thống phát hiện bạo lực thời gian thực (**Streamho
 
 ---
 
+### 🗺️ Last State — Session 2026-06-04 (Bug Fixes + Full Test) ✅ COMPLETED
+
+**Branch:** `deploy/hybrid-cloud`
+**GCP VM:** `34.124.131.144` (RUNNING), static IP
+
+#### Services Status (GCP)
+| Service | Status |
+|---------|--------|
+| kafka, minio, flink, fluss, chatbot | ✅ UP |
+| grafana (port 3001), prometheus | ✅ UP |
+| rtsp pipeline (mediamtx + rtsp_pusher + rtsp-inference-mock) | ✅ UP |
+| frame-extractor | ✅ UP (MinIO evidence-frames ~7k+ files) |
+| pipeline-manager | ✅ UP (2 Flink jobs RUNNING) |
+
+#### Data State
+- **HOT (Fluss)**: ~25k rows, 106ms latency
+- **WARM (Paimon)**: 366,135 rows (2026-05-25 → 2026-06-04)
+- **COLD (Iceberg)**: 10,312 rows (historical)
+- **MinIO evidence-frames**: ~7,000+ JPEG thumbnails (cam_01–cam_15, 2026-06-04)
+
+#### Bugs Fixed This Session
+| Bug | Fix |
+|-----|-----|
+| Grafana "Error loading: stat" (Trino plugin unavailable) | Migrate tất cả panels sang Prometheus custom gauges |
+| Grafana violence-security-monitor + analytics "No data" | Rebuild với Prometheus datasource |
+| Evidence chatbot trả 20 ảnh random | Fix: query MinIO theo camera_id+date từ Paimon, respect count limit |
+| Evidence: UUID mismatch (Paimon ≠ MinIO) | Dùng DISTINCT camera_id+DATE, list actual MinIO files |
+| Evidence: Deadlock asyncio (HTTP self-call) | Dùng `_trino_client.query_paimon()` trực tiếp |
+| GCP firewall block MinIO port 9000 | Tạo rule `streamhouse-minio` allow tcp:9000,9001 |
+| MinIO credentials mismatch (minio/mypassword vs minioadmin/minioadmin) | Update `.env.gcp` |
+| HOT count null in /api/layer-counts | Fix metric param `0.numRecordsIn` + return 0 thay vì None |
+| Chatbot hallucination khi row_count=0 | Guard + anti-hallucination prompt |
+
+#### Grafana Dashboards (All Working)
+| Dashboard | UID | Datasource |
+|-----------|-----|-----------|
+| Violence Incidents Analytics | violence-incidents-v2 | Prometheus + Infinity |
+| Security Monitor | violence-security-monitor | Prometheus |
+| Violence Analytics | violence_analytics | Prometheus |
+| Chatbot Performance | chatbot-metrics | Prometheus |
+| Streamhouse Architecture | streamhouse-arch-001 | Prometheus |
+
+**Prometheus metrics refreshed every 5 min:**
+- `violence_incidents_24h_total = 160,404`
+- `violence_incidents_7d_total = 182,982`
+- `violence_cameras_active = 15`
+- `violence_incidents_by_type{event_type=...}` (4 types)
+- `violence_incidents_by_camera{camera_id=...}` (15 cameras)
+- `streamhouse_hot/warm/cold_rows_total`
+
+#### Test Results (5/5 PASS)
+| Query | Layer | Result |
+|-------|-------|--------|
+| "1 ảnh đường Nguyễn Huệ" | WARM | 1 ảnh thật ✅ |
+| "5 ảnh Hàm Nghi" | WARM | "Không tìm thấy" (đúng) ✅ |
+| "3 ảnh gần đây" | WARM | 3 ảnh thật ✅ |
+| "15 phút qua bao nhiêu alert?" | HOT · Fluss | 100 alerts ✅ |
+| "Camera nguy hiểm nhất 7 ngày?" | WARM · Paimon | cam_15 ✅ |
+
+#### Important Notes for Next Session
+- **MinIO credentials on GCP**: `minioadmin/minioadmin` (NOT `minio/mypassword` như trong `.env.gcp` cũ)
+- **Prometheus refresh**: auto mỗi 5 phút. Manual trigger: `POST /api/grafana/refresh-metrics`
+- **Evidence images**: MinIO port 9000 đã mở public. Frame URL pattern: `34.124.131.144:9000/evidence-frames/{cam}/{YYYY-MM-DD}/{uuid}.jpg`
+- **RTSP pipeline data files** trên GCP: chỉ có ~4 Fight clips (local upload) — đủ để test
+- **Grafana dashboard URL**: `http://34.124.131.144:3001/d/violence-incidents-v2`
+- **Local UI**: `Violence-Urban-Safety-UI/frontend/` → `npm run dev` (port 5173)
+
+---
+
 ### 🗺️ Plan Session 46 — Local RTSP → GCP Kafka ✅ COMPLETED
 
 > **Kết quả:** Toàn bộ P0–P3 hoàn thành. RTSP pipeline local verified E2E.
