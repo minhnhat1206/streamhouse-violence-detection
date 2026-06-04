@@ -815,12 +815,12 @@ async def get_layer_counts():
                             if "sink" in vname or "fluss" in vname:
                                 mr = await client.get(
                                     f"http://jobmanager:8081/jobs/{jid}/vertices/{v['id']}/metrics",
-                                    params={"get": "numRecordsIn"},
+                                    params={"get": "0.numRecordsIn"},
                                 )
                                 if mr.status_code == 200:
                                     for m in mr.json():
                                         mid = m.get("id", "")
-                                        if mid == "numRecordsIn":
+                                        if mid == "0.numRecordsIn":
                                             return int(m.get("value", 0))
         except Exception as exc:
             logger.debug("count_hot via Flink metrics failed: %s", exc)
