@@ -913,6 +913,26 @@ async def grafana_stats():
     }]
 
 
+@app.get("/api/grafana/cameras")
+async def grafana_cameras():
+    """Top cameras by incident count (7 days) — Infinity barchart datasource."""
+    try:
+        rows = await _trino_query(
+            "SELECT camera_id, COUNT(*) AS incident_count, ROUND(AVG(risk_score), 3) AS avg_risk "
+            "FROM paimon.security.violence_incidents "
+            "WHERE is_violent = TRUE AND timestamp >= NOW() - INTERVAL '7' DAY "
+            "GROUP BY camera_id ORDER BY incident_count DESC LIMIT 15",
+            timeout=15.0,
+        )
+        return [
+            {"camera_id": r[0], "incident_count": int(r[1]), "avg_risk": float(r[2] or 0)}
+            for r in (rows or [])
+        ]
+    except Exception as e:
+        logger.warning("grafana_cameras failed: %s", e)
+        return []
+
+
 @app.get("/api/latency")
 async def get_latency():
     """Measure round-trip query latency for each Streamhouse storage layer."""
