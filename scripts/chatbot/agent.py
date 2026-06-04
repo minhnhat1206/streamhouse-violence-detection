@@ -726,43 +726,57 @@ async def execute_query(state: AgentState) -> AgentState:
                     state["frame_urls"] = collected
                     logger.info(f"Collected {len(collected)} frame URLs from SQL results")
 
-            # --- Evidence fallback: gọi /api/recent-incidents với filter từ context ---
-            if wants_evidence and not state.get("frame_urls"):
+            # --- Evidence fallback: query Paimon trực tiếp (không gọi HTTP localhost) ---
+            if wants_evidence and not state.get("frame_urls") and _trino_client:
                 try:
                     import re as _re
-                    import urllib.request as _urq
-                    import urllib.parse as _up
-                    import json as _json
-
                     q_lower = (state.get("user_query") or "").lower()
 
-                    # Count limit ("1 ảnh" → 1, default=10)
+                    # Count limit
                     count_m = _re.search(r'(\d+)\s*(ảnh|hình|frame|image)', q_lower)
                     limit = min(int(count_m.group(1)) if count_m else 10, 20)
 
-                    # Trích location từ query (Vietnamese with diacritics)
+                    # Location filter
                     loc_m = _re.search(
                         r'(?:đường|phường|quận)\s+([^\s,]+(?:\s+[^\s,]+){0,3})',
                         q_lower
                     )
-                    loc_param = ""
+                    loc_where = ""
                     if loc_m:
-                        loc_param = "&location=" + _up.quote(loc_m.group(1).strip())
+                        loc_val = loc_m.group(1).strip().replace("'", "''")
+                        loc_where = f"AND LOWER(location) LIKE '%{loc_val.lower()}%'"
 
-                    api_url = f"http://localhost:5002/api/recent-incidents?limit={limit}{loc_param}"
-                    logger.info("[EVIDENCE FALLBACK] Calling %s", api_url)
+                    # Query Paimon — lấy incident_id, camera_id, DATE, để build frame_url
+                    sql = (
+                        f"SELECT incident_id, camera_id, CAST(DATE(timestamp) AS VARCHAR) "
+                        f"FROM paimon.security.violence_incidents "
+                        f"WHERE is_violent = TRUE {loc_where} "
+                        f"ORDER BY timestamp DESC LIMIT {limit}"
+                    )
+                    logger.info("[EVIDENCE FALLBACK] SQL: %s", sql[:150])
+                    rows = _trino_client.query_paimon(sql, timeout=15) if hasattr(_trino_client, 'query_paimon') else []
+                    if not rows and hasattr(_trino_client, '_execute'):
+                        rows = _trino_client._execute(sql, timeout=15) or []
 
-                    resp = _urq.urlopen(_urq.Request(api_url), timeout=15)
-                    incidents = _json.loads(resp.read())
+                    minio_pub = os.getenv("MINIO_EXTERNAL_URL", "http://localhost:9000")
+                    bucket = os.getenv("S3_BUCKET", "evidence-frames")
+                    urls = []
+                    for r in (rows or []):
+                        if isinstance(r, dict):
+                            iid, cid, dt = r.get("incident_id"), r.get("camera_id"), r.get("_col2") or r.get("date")
+                        else:
+                            iid, cid, dt = (r[0], r[1], r[2]) if len(r) >= 3 else (None, None, None)
+                        if iid and cid and dt:
+                            clean_dt = str(dt).split(" ")[0].split("T")[0]
+                            urls.append(f"{minio_pub}/{bucket}/{cid}/{clean_dt}/{iid}.jpg")
 
-                    urls = [i["frame_url"] for i in (incidents or []) if i.get("frame_url")]
                     if urls:
                         state["frame_urls"] = urls
                         state["row_count"] = len(urls)
-                        logger.info("[EVIDENCE FALLBACK] Got %d frames (loc=%s)", len(urls),
+                        logger.info("[EVIDENCE FALLBACK] %d frames (loc=%s)", len(urls),
                                     loc_m.group(1) if loc_m else "any")
                     else:
-                        logger.info("[EVIDENCE FALLBACK] No frames returned")
+                        logger.info("[EVIDENCE FALLBACK] No rows from Paimon")
                 except Exception as ev_err:
                     logger.warning("[EVIDENCE FALLBACK] Failed: %s", ev_err, exc_info=True)
 
