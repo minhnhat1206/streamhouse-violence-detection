@@ -181,8 +181,10 @@ services:
   # --- RTSP Inference Mock (optional — real RTSP + mock AI) ---
   # Reads frames from MediaMTX RTSP streams, generates mock inference results.
   # Replace mock_inference() in rtsp_inference_mock.py to plug in the real AI model.
-  # NOTE: stop inference-mock first to avoid duplicate Kafka messages:
-  #   docker exec inference-mock touch /app/tmp/STOP
+  # IMPORTANT: this mock publishes MOCK events to `urban-safety-alerts`. The real
+  # VioMoViNet server now publishes the same contract directly. To use REAL events,
+  # simply do NOT start this profile (`--profile streaming`) — otherwise events are
+  # double-published. Kept under [streaming] as an offline-dev fallback.
   rtsp-inference-mock:
     build:
       context: ..

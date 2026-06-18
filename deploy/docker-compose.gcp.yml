@@ -5,6 +5,9 @@
 # =============================================================================
 # NOTE: Streaming profile (rtsp_pusher, mediamtx, rtsp-inference-mock) requires
 #       the RWF-2000 dataset uploaded to ~/streamhouse/data/raw/RWF-2000/ on VM.
+# IMPORTANT: rtsp-inference-mock publishes MOCK events to `urban-safety-alerts`.
+#       When the real VioMoViNet server is the Kafka producer, do NOT enable
+#       `--profile streaming` here — it would double-publish (real + mock).
 # =============================================================================
 
 services:

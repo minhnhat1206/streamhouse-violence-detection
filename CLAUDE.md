@@ -118,7 +118,7 @@ Khi restart, stop file tự xóa. Chi tiết: `docs/agent-guides/stop-mechanism.
 ```
 Instance : instance-20260524-104630
 Zone     : asia-southeast1-b
-IP (ext) : 136.110.16.108
+IP (ext) : 34.124.131.144
 Username : user   ← KHÔNG phải ubuntu
 Project  : project-65c40e4a-6eda-4c02-87a
 ```

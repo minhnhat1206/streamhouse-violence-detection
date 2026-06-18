@@ -13,6 +13,99 @@ Xây dựng hệ thống phát hiện bạo lực thời gian thực (**Streamho
 
 ---
 
+### 🗺️ Last State — Session 2026-06-18 (VioMoViNet → Kafka real producer) 🔧 IMPLEMENTED
+
+**Agent:** Claude (local implementation — chưa deploy lên GCP)
+**GCP/Services:** KHÔNG thay đổi — không start/stop VM, không đụng pipeline GCP. Toàn bộ thay đổi ở code local (VioMoViNet + note streamhouse).
+
+#### Mục đích phiên
+Cài **producer Kafka thật** vào VioMoViNet để nó trở thành nguồn sự kiện duy nhất feed pipeline (thay mock `rtsp_inference_mock.py`). Đóng gap "mock vs real" đã tồn đọng.
+
+#### Vấn đề tồn đọng đã fix
+| Vấn đề | Fix |
+|--------|-----|
+| VioMoViNet không publish Kafka (chỉ MinIO + API) → pipeline GCP toàn chạy trên mock | Thêm `KafkaEventProducer` vào VioMoViNet, publish thẳng topic `urban-safety-alerts` theo đúng data contract |
+| GCP Kafka IP mâu thuẫn (`136.110.16.108` ở `.env.gcp.example` vs `34.124.131.144` ở `send_test_events.py`) | **Xác nhận `34.124.131.144` là IP đúng** (PARTNER_GUIDE + history). Fix default trong VioMoViNet compose. `.env.gcp.example` đang stale |
+| Lo ngại double-publish (mock + real cùng topic) | `rtsp-inference-mock` đã `profiles:[streaming]` ở cả `docker/docker-compose.yml` + `deploy/docker-compose.gcp.yml` (KHÔNG có standalone `inference-mock` — `resource-limits.md` cũ stale). Thêm note cảnh báo |
+
+#### Files thay đổi
+**VioMoViNet repo** (producer thật):
+- `app/kafka/producer.py` (MỚI) — `KafkaEventProducer`, lifecycle mirror `EvidenceStorage`, fail không crash, no flush/event
+- `app/kafka/__init__.py` (MỚI)
+- `app/config.py` — 11 settings `kafka_*` (default `KAFKA_ENABLED=false`)
+- `app/main.py` — instantiate + init + shutdown, wire vào `StreamManager`
+- `app/stream/manager.py` + `app/stream/worker.py` — truyền `event_producer`, hook publish trong `_do_inference` (gate 0.5s violent / 5s heartbeat), bắt thêm `p_nofight`
+- `app/routes/stream.py` — validate `camera_id` `^cam_\d{2}$` → 422
+- `requirements.txt` — `kafka-python`; `docker-compose.yml` — env `KAFKA_*`, default broker `34.124.131.144:9093`
+
+**Streamhouse repo** (disable mock):
+- `docker/docker-compose.yml` + `deploy/docker-compose.gcp.yml` — note cảnh báo: không bật `--profile streaming` khi VioMoViNet thật chạy (double-publish)
+- `docs/REAL_PRODUCER_INTEGRATION_PLAN.md` (MỚI) — plan chi tiết (data contract, hook points, verification)
+
+#### Quyết định thiết kế
+- Payload mirror `rtsp_inference_mock.py` (Flink validator **không đổi**): `risk_score`=final_prob, `confidence`=max(p_fight,p_nofight), `event_type`="FIGHTING" khi violent, base64 thumbnail 160×90 (frame-extractor sink cần field này), `is_valid` do Flink set.
+- `KAFKA_ENABLED=false` mặc định → VioMoViNet vẫn chạy standalone như cũ nếu chưa config Kafka.
+
+#### ⚠️ Notes cho session/agent kế
+- **CHƯA verify E2E** (cần GPU box + GCP lên). Verify tĩnh đã pass: Python compile OK, 3 YAML valid, wiring nhất quán.
+- **PREREQUISITE ops**: GCP firewall phải allow inbound TCP **9093** từ GPU box (Session 45 đã verify 9093 reach từ máy local; GPU box riêng cần check).
+- Khi chạy platform + producer thật: **KHÔNG** `--profile streaming`, **KHÔNG** dùng `docker-compose.local-stream.yml` (file đó chạy mock ungated).
+- `camera_id` bắt buộc `cam_NN` khi `KAFKA_ENABLED=true` (sai → 422 ở VioMoViNet; nếu lọt qua sẽ bị Flink quarantine).
+- `evidence_url` trong message trỏ MinIO của VioMoViNet (riêng) — chỉ là metadata phụ; evidence chính thức của platform vẫn do `frame-extractor` sink tạo từ `metadata.thumbnail`.
+- Memory Claude đã update: `viomovinet-kafka-producer`, `kltn-project-structure` (sửa 3 repo chính).
+
+#### Chưa làm (defer)
+- Verify E2E thật khi có infra (Kafka UI thấy `mock:false` → Flink `hot-violence-alerts-valid` → Trino → UI).
+- Commit (chờ user).
+- `.env.gcp.example` vẫn ghi IP stale `136.110.16.108` — nên sửa thành `34.124.131.144` (minor, để sau).
+
+---
+
+### 🗺️ Last State — Session 2026-06-17 (Thesis Benchmark Planning + Scope Correction) 📋 PLANNING
+
+**Agent:** Claude (local analysis)
+**GCP/Services:** KHÔNG thay đổi — giữ nguyên state từ Session 2026-06-04. Không start/stop VM, không đụng pipeline.
+
+#### Mục đích phiên
+Phân tích toàn bộ KLTN (4 repo) + lập bộ plan benchmark cho luận văn.
+
+#### ⚠️ Scope correction (QUAN TRỌNG cho agent sau)
+- KLTN = **4 repo** (không phải chỉ training repo):
+  1. `MoViNets-...-Streaming/` — train MoViNet A0–A5 (weights)
+  2. `VioMoViNet/` — AI inference server (FastAPI, **đã build v2**: MinIO evidence, auto-reconnect, ~40–60 stream)
+  3. `Violence-Urban-Safety-UI/` — React + Node dashboard
+  4. `streamhouse-violence-detection/` — platform Kafka/Flink/Fluss/Paimon/Iceberg/Trino/RAG (deployed GCP)
+- **KHÔNG build lại api/** — VioMoViNet đã có (Claude từng nhầm scope lúc đầu → đã đính chính).
+
+#### Gap thesis phát hiện
+Luận văn **nặng platform, nhẹ model**:
+- Có: kiến trúc (Ch3) + đánh giá platform (Fluss/Paimon/Iceberg latency, Kafka, Flink, chatbot E2E).
+- Thiếu: đánh giá MoViNet (accuracy A0–A5, vì sao chọn A3); số đa phần single-shot (thiếu mean±std); A3 gốc 84.66% **không tái lập** (re-run thật ~79–81%).
+
+#### Artifact tạo — `MoViNets-.../plan/` (7 file, **CHƯA thực thi**)
+Bộ benchmark plan 3 trục:
+| File | Nội dung |
+|---|---|
+| `00_overview` | mục lục, scope, nguyên tắc |
+| `01_platform_latency` | HOT/WARM/COLD, N=30 → mean±std/p95 (GCP) |
+| `02_model_accuracy` | data 35 thí nghiệm **đã có** → write-up; retrain A3×5 tùy chọn |
+| `03_inference_throughput` | A0–A5 VRAM/max-stream + Pareto — **việc đo mới chính** |
+| `04_methodology_env` | 2 môi trường, statistical rigor, tools |
+| `05_figures_roadmap` | tables/figures + phase A–E + risk |
+| `06_model_selection` | lý do chọn A3 (draft thesis luôn) |
+
+#### Lưu ý cho session/agent kế
+- **Accuracy**: report số reproduce ~79–81%, KHÔNG 84.66.
+- **2 môi trường**: platform đo GCP CPU VM; inference+accuracy đo GPU server (2×2080Ti). Demo GCP dùng `rtsp-inference-mock` (GCP không GPU) → **khai Limitation**.
+- **Model accuracy data đã có sẵn** (35 thí nghiệm trong training repo) → chỉ write-up, KHÔNG retrain nặng.
+- **Việc MỚI thật sự**: trục 3 (throughput benchmark trên VioMoViNet) + deployed detection P/R/F1.
+- Memory Claude đã update: `kltn-project-structure`, `kltn-contribution-strategy`, `kltn-benchmark-plan`, `movinet-reproduction-gap`.
+
+#### Chưa làm (defer)
+- Chưa chạy benchmark thật, chưa retrain, chưa viết chương thesis, chưa commit (chờ user duyệt plan).
+
+---
+
 ### 🗺️ Last State — Session 2026-06-04 (Bug Fixes + Full Test) ✅ COMPLETED
 
 **Branch:** `deploy/hybrid-cloud`
