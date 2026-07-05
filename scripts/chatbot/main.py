@@ -42,6 +42,19 @@ try:
     _g_hot_rows      = Gauge("streamhouse_hot_rows_total",     "HOT layer row count")
     _g_warm_rows     = Gauge("streamhouse_warm_rows_total",    "WARM layer row count")
     _g_cold_rows     = Gauge("streamhouse_cold_rows_total",    "COLD layer row count")
+    # ── E2E Pipeline Latency Gauges ───────────────────────────────────────
+    _g_e2e_kafka_to_fluss_ms = Gauge(
+        "streamhouse_e2e_kafka_to_fluss_ms",
+        "Avg E2E latency Kafka send → Fluss HOT write (ms), sampled from recent events"
+    )
+    _g_e2e_inference_ms = Gauge(
+        "streamhouse_inference_latency_ms",
+        "Avg StreamViD-A model inference latency per clip (ms)"
+    )
+    _g_pipeline_events_rate = Gauge(
+        "streamhouse_pipeline_events_per_min",
+        "Pipeline throughput: events written to Fluss per minute"
+    )
 except ImportError:
     _PROM_ENABLED = False
 
@@ -214,10 +227,30 @@ async def _refresh_dashboard_metrics():
         if hot is not None:
             _g_hot_rows.set(hot)
 
-        logger.info("[metrics] Dashboard gauges updated: violent_24h=%s violent_7d=%s cameras=%s",
-                    int(rows[0][0][0]) if rows[0] and rows[0][0][0] else 0,
-                    int(rows[1][0][0]) if rows[1] and rows[1][0][0] else 0,
-                    int(rows[2][0][0]) if rows[2] and rows[2][0][0] else 0)
+        # ── E2E inference latency from HOT layer (last 5 min) ─────────────
+        try:
+            e2e_rows = await _trino_query(
+                """SELECT
+                    ROUND(AVG(CAST(JSON_EXTRACT_SCALAR(metadata, '$.inference_ms') AS DOUBLE)), 2),
+                    COUNT(*),
+                    MAX(CAST(JSON_EXTRACT_SCALAR(metadata, '$.kafka_sent_at') AS DOUBLE))
+                FROM fluss_kafka_source
+                WHERE is_valid = true AND timestamp >= NOW() - INTERVAL '5' MINUTE""",
+                timeout=8.0,
+            )
+        except Exception:
+            e2e_rows = None
+        if e2e_rows and e2e_rows[0] and e2e_rows[0][0]:
+            _g_e2e_inference_ms.set(float(e2e_rows[0][0]))
+        if e2e_rows and e2e_rows[0] and e2e_rows[0][1]:
+            _g_pipeline_events_rate.set(float(e2e_rows[0][1]))
+
+        logger.info(
+            "[metrics] Dashboard gauges updated: violent_24h=%s violent_7d=%s cameras=%s",
+            int(rows[0][0][0]) if rows[0] and rows[0][0][0] else 0,
+            int(rows[1][0][0]) if rows[1] and rows[1][0][0] else 0,
+            int(rows[2][0][0]) if rows[2] and rows[2][0][0] else 0,
+        )
     except Exception as e:
         logger.warning("[metrics] _refresh_dashboard_metrics error: %s", e, exc_info=True)
 
@@ -589,6 +622,16 @@ async def get_evidence_frame(
 async def _trino_query(sql: str, timeout: float = 20.0) -> list:
     """Execute Trino SQL and return all rows via nextUri chain."""
     import httpx
+    import re as _re
+
+    # Convert backticks to double quotes
+    sql = _re.sub(r'`([^`]+)`', r'"\1"', sql)
+    # Rewrite raw events tables to use sessionized views
+    sql = _re.sub(r'\bpaimon\.security\.violence_incidents\b', 'iceberg.default.violence_incidents_sessionized', sql, flags=_re.IGNORECASE)
+    sql = _re.sub(r'(?<![.\w])violence_incidents\b', 'iceberg.default.violence_incidents_sessionized', sql, flags=_re.IGNORECASE)
+    sql = _re.sub(r'\biceberg\.security\.historical_violence_incidents\b', 'iceberg.default.historical_violence_incidents_sessionized', sql, flags=_re.IGNORECASE)
+    sql = _re.sub(r'(?<![.\w])historical_violence_incidents\b', 'iceberg.default.historical_violence_incidents_sessionized', sql, flags=_re.IGNORECASE)
+
     trino_host = os.getenv("TRINO_HOST", "trino-coordinator")
     trino_port = os.getenv("TRINO_PORT", "8080")
     trino_user = os.getenv("TRINO_USER", "trino")

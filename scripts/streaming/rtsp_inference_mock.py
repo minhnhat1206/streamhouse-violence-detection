@@ -153,6 +153,7 @@ def capture_jpeg(rtsp_url: str, timeout_s: int = RTSP_TIMEOUT_S) -> tuple[bool, 
 def real_inference(camera_id: str, thumbnail_b64: str) -> dict:
     """
     Read real-time inference status written by visualize_stream.py.
+    Returns dict with inference_ms for E2E latency tracking.
     """
     import json
     path = f"/tmp/status_{camera_id}.json"
@@ -164,12 +165,13 @@ def real_inference(camera_id: str, thumbnail_b64: str) -> dict:
                 is_violent = bool(data.get("is_violent", False))
                 fps = float(data.get("fps", 12.0))
                 confidence = float(max(score, 1.0 - score))
+                inf_ms = float(data.get("inference_ms", 0.0))
                 return {
                     "is_violent": is_violent,
                     "risk_score": round(score, 4),
                     "confidence": round(confidence, 4),
                     "event_type": "FIGHTING" if is_violent else None,
-                    "latency_ms": 100,
+                    "latency_ms": round(inf_ms, 2),
                     "thumbnail_b64": thumbnail_b64,
                     "fps": fps,
                     "mock": False
@@ -212,6 +214,8 @@ class CameraWorker(threading.Thread):
         return (time.time() - self.last_sent) >= interval
 
     def _publish(self, result: dict):
+        # Record Kafka send timestamp for E2E latency measurement
+        kafka_sent_at = time.time()
         payload = {
             "event_id": str(uuid.uuid4()),
             "camera_id": self.cam_id,
@@ -231,9 +235,12 @@ class CameraWorker(threading.Thread):
             "metadata": {
                 "fps": round(result.get("fps", CAPTURE_FPS), 1),
                 "latency_ms": result["latency_ms"],
+                "inference_ms": result.get("latency_ms", 0),
                 "mock": result.get("mock", False),
                 "rtsp_connected": True,
                 "thumbnail": result["thumbnail_b64"],
+                # E2E latency tracking: downstream subtracts this from their write_ts
+                "kafka_sent_at": round(kafka_sent_at, 3),
             },
         }
         # Note: is_valid is NOT set here — data_contract_validator Flink job sets it

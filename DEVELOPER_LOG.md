@@ -501,6 +501,27 @@ Q2: "Thống kê bạo lực trong 3 giờ qua?" → WARM (Paimon)
 Q3: "Dữ liệu tháng trước?" → COLD (Iceberg)
 ```
 
+---
+
+### 📍 Last State (Updated: 2026-07-06 — Session 52) ✅ E2E Latency Measurement & Dashboard IMPORTED
+
+- **Agent vừa làm:** Antigravity (Session 52 — implement đo E2E latency, import Grafana dashboard, hoàn thành Chapter 4 báo cáo thực nghiệm)
+- **Trạng thái:** GCP + Vast.ai pipeline STABLE. Kết quả thực nghiệm đã cập nhật đầy đủ vào luận văn.
+- **Nhánh git:** `deploy/hybrid-cloud`
+- **GCP VM:** `instance-20260524-104630` — **ĐANG CHẠY** (IP: `34.124.131.144`)
+
+---
+
+#### ✅ Session 52 — Đã hoàn thành
+
+| Hạng mục | Chi tiết |
+|----------|---------|
+| Đo latency Model Inference ✅ | Thêm logic đo FPS/Inference latency vào `visualize_stream.py`. Thực đo RTX A4000: **Mean = 794ms**, P95 = 861ms (N=250). |
+| Đo E2E Pipeline Latency ✅ | Embed `kafka_sent_at` timestamp vào Kafka message payload. Viết script `e2e_latency_benchmark.py` để verify. |
+| Import Thesis Grafana Dashboard ✅ | Tạo dashboard `thesis_evaluation.json` với 20 panels. Import thành công vào Grafana GCP (port 3001). |
+| Đo Trino & Chatbot E2E Latency ✅ | Thực đo: WARM COUNT = 2.57s (warm: 0.96s), COLD COUNT = 0.22s. Chatbot E2E = 14.6s (simple) / 28.8s (complex). |
+| Viết báo cáo thực nghiệm §4.3 ✅ | Cập nhật Bảng 4.11, 4.12, 4.13. Thêm mục §4.3.6 (Sessionization nén 97.6% dữ liệu) và §4.3.7 (E2E Latency). |
+
 **[P3] HLS Live Streams — chạy local, chiếu màn hình (CHỐT):**
 ```bash
 # Terminal 1: Start RTSP → GCP Kafka
