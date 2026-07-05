@@ -241,11 +241,14 @@ class CameraWorker(threading.Thread):
                 "thumbnail": result["thumbnail_b64"],
                 # E2E latency tracking: downstream subtracts this from their write_ts
                 "kafka_sent_at": round(kafka_sent_at, 3),
+                # Bbox enrichment
+                "bbox_status": result.get("bbox_status", "unavailable"),
+                "people": result.get("people", []),
             },
         }
         # Note: is_valid is NOT set here — data_contract_validator Flink job sets it
         # Publish raw event — data_contract_validator Flink job routes to hot-violence-alerts-valid
-        print(f"[{self.cam_id}] Publishing event to Kafka (mock={result.get('mock')}, is_violent={result['is_violent']})...", flush=True)
+        print(f"[{self.cam_id}] Publishing event to Kafka (mock={result.get('mock')}, is_violent={result['is_violent']}, bbox_status={result.get('bbox_status')})...", flush=True)
         try:
             self.producer.send(KAFKA_TOPIC, value=payload)
         except Exception as e:
@@ -255,7 +258,7 @@ class CameraWorker(threading.Thread):
         # DEBUG: Log payload structure
         if payload.get("is_violent"):
             thumb_len = len(payload.get("metadata", {}).get("thumbnail", "")) if isinstance(payload.get("metadata"), dict) else 0
-            print(f"    [PUBLISH] Thumbnail size: {thumb_len} | Topic: {KAFKA_TOPIC}", flush=True)
+            print(f"    [PUBLISH] Thumbnail size: {thumb_len} | Topic: {KAFKA_TOPIC} | People count: {len(payload['metadata']['people'])}", flush=True)
 
         status = "VIOLENCE" if result["is_violent"] else "Normal"
         print(f"[{self.cam_id}] {status} | score={result['risk_score']:.3f}")
@@ -267,7 +270,32 @@ class CameraWorker(threading.Thread):
         while not os.path.exists(STOP_FILE):
             t0 = time.time()
 
-            success, thumbnail_b64 = capture_jpeg(self.rtsp_url, RTSP_TIMEOUT_S)
+            # 1. Query bboxAPI to check if active and fetch people list
+            bbox_status = "unavailable"
+            people_list = []
+            try:
+                import urllib.request, json
+                url = f"http://localhost:8081/streams/{self.cam_id}/latest"
+                req = urllib.request.Request(url)
+                with urllib.request.urlopen(req, timeout=1.0) as resp:
+                    bbox_data = json.loads(resp.read().decode("utf-8"))
+                    bbox_status = "ok"
+                    people_list = bbox_data.get("people", [])
+            except Exception:
+                bbox_status = "unavailable"
+
+            # 2. Determine capture URL: try bbox stream if bboxAPI is active
+            capture_url = self.rtsp_url
+            if bbox_status == "ok":
+                # Convert e.g., rtsp://localhost:8554/cam_01 to rtsp://localhost:8554/cam_01_bbox
+                capture_url = self.rtsp_url + "_bbox"
+
+            success, thumbnail_b64 = capture_jpeg(capture_url, RTSP_TIMEOUT_S)
+            if not success and capture_url != self.rtsp_url:
+                # Fallback to raw stream if bbox capture failed
+                print(f"[{self.cam_id}] Bbox stream capture failed, falling back to raw stream...", flush=True)
+                capture_url = self.rtsp_url
+                success, thumbnail_b64 = capture_jpeg(capture_url, RTSP_TIMEOUT_S)
 
             if not success:
                 if connected:
@@ -280,13 +308,15 @@ class CameraWorker(threading.Thread):
 
             if not connected:
                 connected = True
-                print(f"[{self.cam_id}] RTSP connected: {self.rtsp_url}")
+                print(f"[{self.cam_id}] RTSP connected: {capture_url}")
 
             # Cache latest frame — reused when sending faster than capture rate
             self._last_thumbnail = thumbnail_b64
 
             # Get real inference result from status file
             result = real_inference(self.cam_id, self._last_thumbnail)
+            result["bbox_status"] = bbox_status
+            result["people"] = people_list
             self.is_violent = result["is_violent"]
 
             if self._should_send():
