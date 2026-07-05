@@ -21,11 +21,14 @@ Env vars:
   MEDIAMTX_HOST   MediaMTX hostname              (mediamtx)
   MAX_CAMERAS     Max cameras to push            (4) — limit CPU usage
   CLIPS_PER_CAM   Clips per camera playlist      (6)
+  PLAYLIST_REPEAT Number of times to repeat concat playlist (200; use 1 for scenarios)
   STOP_FILE       Graceful stop trigger          (/app/tmp/STOP)
   CAMERA_PLAYLISTS_FILE  Ordered per-camera clip playlists (JSON) produced by
                   prepare_cameras_context.py (/app/data/metadata/camera_playlists.json).
                   When present, clips stream in this exact order (no shuffle) so each
                   camera stays in one consistent scene. Absent → random sampling.
+  SCENARIO_METADATA_FILE Optional per-camera scenario metadata JSON for logs and
+                  annotation traceability.
 
 Graceful stop:
   docker exec rtsp_pusher touch /app/tmp/STOP
@@ -55,12 +58,15 @@ NONFIGHT_MANIFEST= os.getenv("NONFIGHT_MANIFEST","/app/data/metadata/nonfight_cl
 MEDIAMTX_HOST    = os.getenv("MEDIAMTX_HOST",    "mediamtx")
 MAX_CAMERAS      = int(os.getenv("MAX_CAMERAS",  "4"))   # keep CPU manageable
 CLIPS_PER_CAM    = int(os.getenv("CLIPS_PER_CAM","6"))
+PLAYLIST_REPEAT  = int(os.getenv("PLAYLIST_REPEAT", "200"))
 STOP_FILE        = os.getenv("STOP_FILE",        "/app/tmp/STOP")
 # Ordered per-camera clip playlists (from prepare_cameras_context.py).
 # When present, the pusher streams clips in this exact order (no shuffle) so each
 # camera stays in one consistent scene. Absent → legacy random sampling.
 CAMERA_PLAYLISTS_FILE = os.getenv(
     "CAMERA_PLAYLISTS_FILE", "/app/data/metadata/camera_playlists.json")
+SCENARIO_METADATA_FILE = os.getenv(
+    "SCENARIO_METADATA_FILE", "/app/data/metadata/camera_scenarios.json")
 # Comma-separated list of active camera IDs (e.g. "cam_01,cam_03,cam_07").
 # If unset, all cameras from registry are used (up to MAX_CAMERAS).
 _active_env      = os.getenv("ACTIVE_CAMERAS", "").strip()
@@ -198,6 +204,25 @@ def load_context_playlists(path: str) -> dict[str, list[str]]:
     return out
 
 
+def load_scenario_metadata(path: str) -> dict[str, dict]:
+    """Load optional per-camera scenario metadata for logs/evaluation traceability."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        print(f"[WARN] Could not read scenario metadata ({exc}); continuing.",
+              flush=True)
+        return {}
+    if not isinstance(data, dict):
+        print(f"[WARN] Scenario metadata is not an object: {path}", flush=True)
+        return {}
+    print(f"[INFO] Loaded scenario metadata for {len(data)} cameras from {path}",
+          flush=True)
+    return data
+
+
 # ─── Camera pusher thread ─────────────────────────────────────────────────────
 
 class CameraPusher(threading.Thread):
@@ -207,11 +232,12 @@ class CameraPusher(threading.Thread):
     Restarts ffmpeg automatically if it exits.
     """
 
-    def __init__(self, cam_id: str, rtsp_url: str, clips: list[str]):
+    def __init__(self, cam_id: str, rtsp_url: str, clips: list[str], repeat: int):
         super().__init__(daemon=True, name=f"push-{cam_id}")
         self.cam_id   = cam_id
         self.rtsp_url = rtsp_url
         self.clips    = clips
+        self.repeat   = repeat
         self._proc: subprocess.Popen | None = None
         self._playlist: str | None = None
 
@@ -238,7 +264,7 @@ class CameraPusher(threading.Thread):
 
         # Clips are pre-ordered for scene-continuous playback — do NOT shuffle
         # (shuffling would jump between unrelated scenes mid-stream).
-        self._playlist = write_playlist(self.clips)
+        self._playlist = write_playlist(self.clips, repeat=self.repeat)
 
         cmd = [
             "ffmpeg",
@@ -304,6 +330,7 @@ def main():
     print(f"  Fight dir: {FIGHT_DIR}", flush=True)
     print(f"  NonFight : {NON_FIGHT_DIR}", flush=True)
     print(f"  Max cams : {MAX_CAMERAS}", flush=True)
+    print(f"  Repeat   : {PLAYLIST_REPEAT}", flush=True)
     print(f"  Active   : {','.join(sorted(ACTIVE_CAMERAS)) if ACTIVE_CAMERAS else 'all (from registry)'}", flush=True)
     print(f"  Stop file: {STOP_FILE}", flush=True)
     print("=" * 56, flush=True)
@@ -346,6 +373,7 @@ def main():
 
     # Context-continuous playlists (scene-clustering). {} when absent.
     context_playlists = load_context_playlists(CAMERA_PLAYLISTS_FILE)
+    scenario_metadata = load_scenario_metadata(SCENARIO_METADATA_FILE)
 
     # Filter by ACTIVE_CAMERAS list if provided, then apply MAX_CAMERAS CPU budget
     if ACTIVE_CAMERAS:
@@ -368,7 +396,18 @@ def main():
         # Context-continuous mode: use the pre-ordered scene playlist if present.
         if cam_id in context_playlists:
             clips = context_playlists[cam_id]
-            label = "CONTEXT"
+            scenario = scenario_metadata.get(cam_id)
+            if scenario:
+                label = f"SCENARIO {scenario.get('stream_id', '')} {scenario.get('stream_name', '')}".strip()
+                print(
+                    f"  {cam_id}: {label}, clips={len(clips)}, "
+                    f"events={scenario.get('event_count', '?')}",
+                    flush=True,
+                )
+                print(f"    annotation={scenario.get('annotation_file', '')}", flush=True)
+                print(f"    schedule={scenario.get('schedule_file', '')}", flush=True)
+            else:
+                label = "CONTEXT"
         else:
             # Legacy random fallback (kept for when no playlists.json exists).
             if has_violence and fight_clips:
@@ -386,7 +425,7 @@ def main():
             flush=True,
         )
 
-        w = CameraPusher(cam_id, rtsp_url, clips)
+        w = CameraPusher(cam_id, rtsp_url, clips, repeat=PLAYLIST_REPEAT)
         w.start()
         workers.append(w)
         time.sleep(0.5)  # stagger ffmpeg starts to spread CPU spike
