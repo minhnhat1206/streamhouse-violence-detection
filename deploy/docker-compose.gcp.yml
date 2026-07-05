@@ -4,7 +4,7 @@
 # Usage: cd deploy && docker compose -f docker-compose.gcp.yml --env-file .env.gcp up -d
 # =============================================================================
 # NOTE: Streaming profile (rtsp_pusher, mediamtx, rtsp-inference-mock) requires
-#       the RWF-2000 dataset uploaded to ~/streamhouse/data/raw/RWF-2000/ on VM.
+#       the SCVD dataset uploaded to ~/streamhouse/data/raw/SCVD/ on VM.
 # IMPORTANT: rtsp-inference-mock publishes MOCK events to `urban-safety-alerts`.
 #       When the real VioMoViNet server is the Kafka producer, do NOT enable
 #       `--profile streaming` here — it would double-publish (real + mock).
@@ -486,7 +486,7 @@ services:
       - violence-detection-net
     restart: unless-stopped
 
-  # ─── STREAMING (profile — requires RWF-2000 dataset on VM) ──────────────
+  # ─── STREAMING (profile — requires SCVD dataset on VM) ──────────────
   mediamtx:
     container_name: mediamtx
     image: bluenviron/mediamtx:latest
@@ -521,7 +521,7 @@ services:
       ACTIVE_CAMERAS: "${ACTIVE_CAMERAS:-}"
     volumes:
       - ../scripts/streaming/rtsp_pusher.py:/app/rtsp_pusher.py:ro
-      - ../data/raw/RWF-2000:/app/data/raw/RWF-2000:ro
+      - ../data/raw/SCVD:/app/data/raw/SCVD:ro
       - ../data/metadata:/app/data/metadata:ro
       - rtsp-pusher-tmp:/app/tmp
     depends_on:
@@ -607,7 +607,8 @@ services:
       GF_SECURITY_ALLOW_EMBEDDING: "true"
       GF_SECURITY_COOKIE_SAMESITE: "disabled"
       GF_SECURITY_COOKIE_SECURE: "false"
-      GF_SERVER_ROOT_URL: "http://${GCP_VM_EXTERNAL_IP}:3001"
+      GF_SERVER_ROOT_URL: "http://${GCP_VM_EXTERNAL_IP}:3001/grafana-proxy/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
     volumes:
       - grafana-storage:/var/lib/grafana
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro

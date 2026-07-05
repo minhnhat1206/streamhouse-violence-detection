@@ -5,6 +5,22 @@ Hệ thống giám sát an ninh thông minh phát hiện bạo lực real-time (
 Chuyển đổi từ **Lakehouse + Spark** sang **Streamhouse Trio** (Fluss/Paimon/Iceberg).
 **Khóa luận tốt nghiệp** — Nguyễn Ngọc Minh Nhật & Nguyễn Quốc Huy.
 
+## ⚡ Deployment Topology — RULE CỨNG (AI/agent PHẢI tuân)
+
+Hệ thống chạy trên **3 môi trường**, KHÔNG trộn lẫn. AI/khi deploy/run phải tôn trọng để không chạy nhầm sang máy dev:
+
+| Môi trường | Chạy gì | Không chạy gì |
+|---|---|---|
+| **AI server (Vast.ai)** | VioMoViNet inference + **RTSP source sim** (mediamtx + `scripts/streaming/rtsp_pusher.py` + SCVD) + MinIO + Kafka producer. **Source CO-LOCATED với inference** (cùng box, `localhost:8554`). | — |
+| **Data platform (GCP `34.124.131.144`)** | Kafka broker, Flink Streamhouse, Trino/Fluss/Paimon/Iceberg, Grafana, chatbot service. | inference / RTSP source |
+| **Máy dev/local** | Repo (dev) + **web app frontend** (Vite `Violence-Urban-Safety-UI`) + SSH tunnels để xem. | **KHÔNG chạy inference / RTSP sim / Kafka producer** |
+
+**RULE CHO AI (Claude):**
+- **KHÔNG BAO GIỜ tự ý `docker compose -f local-stream.yml up`** (mediamtx + rtsp_pusher) hay start VioMoViNet inference trên máy dev local. Source sim + inference → **AI server (Vast.ai)**.
+- `local-stream.yml` **CHỈ** chạy khi (a) dev độc lập không có producer thật, HOẶC (b) cần HLS cho web app xem (lúc đó nó là nguồn hiển thị, KHÔNG phải nguồn cho inference).
+- **Đã verify**: source ở máy dev rồi tunnel tới AI server = bottleneck uplink → chỉ ~4/15 cam. Source + inference phải cùng box (localhost).
+- Chi tiết runbook: `../VioMoViNet/SETUP_VASTAI.html` + `CONNECT_VASTAI.html`.
+
 ## Tech Stack
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
@@ -100,6 +116,15 @@ docker exec rtsp-inference-mock touch /app/tmp/STOP
 docker exec rtsp_pusher touch /app/tmp/STOP
 ```
 Khi restart, stop file tự xóa. Chi tiết: `docs/agent-guides/stop-mechanism.md`
+
+## RTSP Simulation (Context-Continuous)
+RTSP source = `scripts/streaming/rtsp_pusher.py` (clip → ffmpeg → MediaMTX → `rtsp://mediamtx:8554/cam_NN`). Mỗi camera = **1 bối cảnh cố định** (scene-cluster), KHÔNG random shuffle.
+- **Sinh/cluster playlist:** `scripts/prepare_cameras_context.py` (chạy trên host, zero-install numpy/sklearn/cv2/ffmpeg) → cluster 481 clip SCVD thành 15 camera, dùng **100% dataset**, density ≈ `--target-density` (0.12). Output: `data/metadata/camera_registry.csv` + `camera_playlists.json`.
+- **Dataset SCVD** = symlink `data/raw/SCVD → ../MSA-MoViNet/data/SCVD/SCVD_converted` (sibling repo, KHÔNG copy 358MB).
+- **Reload sau khi rerun prep:** `docker compose -f docker/docker-compose.local-stream.yml up -d --force-recreate rtsp_pusher` (BẮT BUỘC `--force-recreate`, `up -d` thường không đọc lại playlist).
+- **Build image (lần đầu):** `docker build -f docker/Dockerfile.rtsp-pusher -t docker-rtsp_pusher:latest .`
+- **Xem luồng:** `ffplay rtsp://localhost:8554/cam_01`. HLS remap `:18888` (VS Code chiếm host :8888).
+- Chi tiết: `docs/RTSP_SIMULATION.md`, memory `rtsp-context-clustering`.
 
 ## Project Context (Shared)
 Đọc `docs/PROJECT_CONTEXT.md` để nắm toàn bộ trạng thái dự án (services, ports, tiến độ, phân công).

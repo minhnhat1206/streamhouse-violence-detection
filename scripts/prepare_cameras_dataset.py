@@ -6,7 +6,7 @@ from pathlib import Path
 
 # ====== CẤU HÌNH ======
 BASE_DIR = Path("./data")
-RAW_PATH = BASE_DIR / "raw" / "RWF-2000" / "train"
+RAW_ROOT = BASE_DIR / "raw" / "SCVD"   # SCVD stream/eval dataset (tách biệt RWF-2000 đã train)
 PROCESSED_PATH = BASE_DIR / "processed" / "clips_for_streaming"
 METADATA_PATH = BASE_DIR / "metadata"
 
@@ -41,17 +41,41 @@ LONGITUDES = [round(random.uniform(106.690, 106.710), 5) for _ in range(N_CAMERA
 PROCESSED_PATH.mkdir(parents=True, exist_ok=True)
 METADATA_PATH.mkdir(parents=True, exist_ok=True)
 
-# ====== Đọc video nguồn ======
-fight_dir = RAW_PATH / "Fight"
-nonfight_dir = RAW_PATH / "NonFight"
+# ====== Đọc video nguồn (SCVD) ======
+# Phân loại clip violence/non-violence theo tên thư mục lớp, quét tất cả split
+# (Train/Test/Val). Layout Kaggle unzip ra có thể là {Train,Test}/{Class A,Class B},
+# violence/non_violence, hoặc 3-class Normal/Violent/Weaponized.
+VIDEO_EXTS = ("*.avi", "*.mp4")
+_VIOLENCE_NAMES = {"classa", "violence", "fight", "violent", "weaponized"}
+_NON_VIOLENCE_NAMES = {"classb", "nonviolence", "nonviolent", "normal", "safe"}
 
-fight_videos = sorted(list(fight_dir.glob("*.avi")))
-nonfight_videos = sorted(list(nonfight_dir.glob("*.avi")))
+
+def _classify_clip(p: Path) -> str:
+    n = "".join(c for c in p.parent.name.lower() if c.isalnum())
+    if n in _VIOLENCE_NAMES or "weapon" in n or "violent" in n:
+        return "violence"
+    if n in _NON_VIOLENCE_NAMES or "normal" in n:
+        return "nonviolence"
+    return "?"
+
+
+fight_videos, nonfight_videos = [], []
+for ext in VIDEO_EXTS:
+    for clip in sorted(RAW_ROOT.rglob(ext)):
+        if clip.name.startswith("."):
+            continue
+        if _classify_clip(clip) == "violence":
+            fight_videos.append(clip)
+        else:
+            nonfight_videos.append(clip)
 
 if not fight_videos:
-    raise FileNotFoundError(f"Không tìm thấy file .avi trong {fight_dir.resolve()}")
+    raise FileNotFoundError(f"Không tìm thấy clip violence (.avi/.mp4) dưới {RAW_ROOT.resolve()}")
 if not nonfight_videos:
-    raise FileNotFoundError(f"Không tìm thấy file .avi trong {nonfight_dir.resolve()}")
+    raise FileNotFoundError(f"Không tìm thấy clip non-violence (.avi/.mp4) dưới {RAW_ROOT.resolve()}")
+print(f"  SCVD: {len(fight_videos)} violence + {len(nonfight_videos)} non-violence clips")
+
+fight_set = set(fight_videos)
 
 # ====== Helper: chọn playlist cho 1 camera ======
 def make_playlist(fight_pool, normal_pool, max_clips=4, prob_include_fight=0.6):
@@ -90,7 +114,6 @@ for i in range(N_CAMERAS):
     # Tạo playlist
     playlist_paths = make_playlist(fight_videos, nonfight_videos, max_clips=MAX_CLIPS_PER_CAMERA)
     copied_names = []
-    has_violence = False
 
     for j, clip_path in enumerate(playlist_paths, start=1):
         base_name = clip_path.name
@@ -106,9 +129,9 @@ for i in range(N_CAMERAS):
         dest_path = PROCESSED_PATH / dest_name
         shutil.copy2(clip_path, dest_path)
         copied_names.append(dest_name)
-        # check nếu clip gốc là fight (tên nằm trong thư mục fight)
-        if clip_path.parent.name.lower() in ("fight", "violence"):
-            has_violence = True
+
+    # has_violence = có ít nhất 1 clip thuộc pool violence
+    has_violence = any(c in fight_set for c in playlist_paths)
 
     metadata_rows.append({
         "camera_id": cam_id,

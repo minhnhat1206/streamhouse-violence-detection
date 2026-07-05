@@ -39,10 +39,10 @@ MAX_CONCURRENT_CAPTURES = int(os.getenv("MAX_CONCURRENT_CAPTURES", "3"))
 _capture_semaphore = threading.Semaphore(MAX_CONCURRENT_CAPTURES)
 
 # ================= CONFIGURATION =================
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
+KAFKA_BROKER = os.getenv("KAFKA_BROKER", "34.124.131.144:9093")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "urban-safety-alerts")
-METADATA_FILE = os.getenv("METADATA_FILE", "/app/data/metadata/camera_registry.csv")
-STOP_FILE = os.getenv("STOP_FILE", "/app/tmp/STOP")
+METADATA_FILE = os.getenv("METADATA_FILE", "/root/streamhouse/data/metadata/camera_registry.csv")
+STOP_FILE = os.getenv("STOP_FILE", "/tmp/STOP")
 CAPTURE_FPS = float(os.getenv("RTSP_FPS", "1"))       # frames/sec per camera
 RTSP_TIMEOUT_S = int(os.getenv("RTSP_TIMEOUT_S", "10"))
 RECONNECT_DELAY_S = int(os.getenv("RECONNECT_DELAY_S", "5"))
@@ -148,39 +148,45 @@ def capture_jpeg(rtsp_url: str, timeout_s: int = RTSP_TIMEOUT_S) -> tuple[bool, 
             pass
 
 
-# ================= MOCK INFERENCE =================
+# ================= REAL INFERENCE =================
 
-def mock_inference(thumbnail_b64: str, is_violent: bool) -> dict:
+def real_inference(camera_id: str, thumbnail_b64: str) -> dict:
     """
-    Stub AI inference.
-
-    TO REPLACE: swap this function body with a real call, e.g.:
-        resp = requests.post("http://viomobilenet_api:8000/predict",
-                             json={"image_b64": thumbnail_b64})
-        return resp.json()
+    Read real-time inference status written by visualize_stream.py.
     """
-    t0 = time.monotonic()
+    import json
+    path = f"/tmp/status_{camera_id}.json"
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+                score = float(data.get("score", 0.0))
+                is_violent = bool(data.get("is_violent", False))
+                fps = float(data.get("fps", 12.0))
+                confidence = float(max(score, 1.0 - score))
+                return {
+                    "is_violent": is_violent,
+                    "risk_score": round(score, 4),
+                    "confidence": round(confidence, 4),
+                    "event_type": "FIGHTING" if is_violent else None,
+                    "latency_ms": 100,
+                    "thumbnail_b64": thumbnail_b64,
+                    "fps": fps,
+                    "mock": False
+                }
+        except Exception as e:
+            print(f"[{camera_id}] Error reading status file: {e}")
 
-    risk_score = (
-        round(random.uniform(0.75, 0.99), 4)
-        if is_violent
-        else round(random.uniform(0.01, 0.15), 4)
-    )
-    confidence = (
-        round(random.uniform(0.85, 0.99), 4)
-        if is_violent
-        else round(random.uniform(0.30, 0.70), 4)
-    )
-    event_type = random.choice(EVENT_TYPES) if is_violent else None
-    latency_ms = int((time.monotonic() - t0) * 1000)
-
+    # Fallback to inactive normal state if status file doesn't exist
     return {
-        "is_violent": is_violent,
-        "risk_score": risk_score,
-        "confidence": confidence,
-        "event_type": event_type,
-        "latency_ms": latency_ms,
+        "is_violent": False,
+        "risk_score": 0.0,
+        "confidence": 1.0,
+        "event_type": None,
+        "latency_ms": 0,
         "thumbnail_b64": thumbnail_b64,
+        "fps": 12.0,
+        "mock": False
     }
 
 
@@ -194,20 +200,12 @@ class CameraWorker(threading.Thread):
         self.cam_id = cam_id
         self.meta = meta
         self.producer = producer
-        self.rtsp_url = meta.get("rtsp_url", "")
+        self.rtsp_url = meta.get("rtsp_url", "").replace("rtsp://mediamtx:", "rtsp://localhost:")
         self.is_violent = False
         self.last_sent = 0.0
         self._last_thumbnail = ""  # cache — reused between sends
 
-    def _update_state(self):
-        if not self.is_violent:
-            if random.random() < PROB_START_VIOLENCE:
-                self.is_violent = True
-                print(f"!!! [{self.cam_id}] Violence event started")
-        else:
-            if random.random() < PROB_STOP_VIOLENCE:
-                self.is_violent = False
-                print(f"--- [{self.cam_id}] Violence event cleared")
+    # (removed _update_state as it's now queried from the real visualizer status)
 
     def _should_send(self) -> bool:
         interval = ALERT_INTERVAL if self.is_violent else HEARTBEAT_INTERVAL
@@ -231,17 +229,20 @@ class CameraWorker(threading.Thread):
                 "long": self.meta.get("longitude"),
             },
             "metadata": {
-                "fps": round(CAPTURE_FPS, 1),
+                "fps": round(result.get("fps", CAPTURE_FPS), 1),
                 "latency_ms": result["latency_ms"],
-                "mock": True,
+                "mock": result.get("mock", False),
                 "rtsp_connected": True,
                 "thumbnail": result["thumbnail_b64"],
             },
         }
         # Note: is_valid is NOT set here — data_contract_validator Flink job sets it
         # Publish raw event — data_contract_validator Flink job routes to hot-violence-alerts-valid
-        self.producer.send(KAFKA_TOPIC, value=payload)
-        self.producer.flush()
+        print(f"[{self.cam_id}] Publishing event to Kafka (mock={result.get('mock')}, is_violent={result['is_violent']})...", flush=True)
+        try:
+            self.producer.send(KAFKA_TOPIC, value=payload)
+        except Exception as e:
+            print(f"[{self.cam_id}] Kafka Send Error: {e}", flush=True)
         self.last_sent = time.time()
 
         # DEBUG: Log payload structure
@@ -277,10 +278,11 @@ class CameraWorker(threading.Thread):
             # Cache latest frame — reused when sending faster than capture rate
             self._last_thumbnail = thumbnail_b64
 
-            self._update_state()
+            # Get real inference result from status file
+            result = real_inference(self.cam_id, self._last_thumbnail)
+            self.is_violent = result["is_violent"]
 
             if self._should_send():
-                result = mock_inference(self._last_thumbnail, self.is_violent)
                 self._publish(result)
 
             sleep_t = capture_interval - (time.time() - t0)
@@ -324,6 +326,8 @@ def main():
                 bootstrap_servers=[KAFKA_BROKER],
                 value_serializer=json_serializer,
                 acks=1,
+                api_version=(3, 7, 0),
+                enable_idempotence=False,
             )
             print("Connected to Kafka.")
             break

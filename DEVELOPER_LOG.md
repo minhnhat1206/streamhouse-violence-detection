@@ -13,6 +13,142 @@ Xây dựng hệ thống phát hiện bạo lực thời gian thực (**Streamho
 
 ---
 
+### 🗺️ Last State — Session 2026-06-21 (GCP clean reset + VioMoViNet runbook) ✅ DONE
+
+**Agent:** Claude
+**GCP/Services:** VM RUNNING. Mock streaming STOPPED. Data mock ĐÃ XÓA. Core pipeline chạy sạch.
+
+#### Mục đích phiên
+User muốn chạy lại hệ thống sạch với **VioMoViNet thật** (topology Hybrid: RTSP mock local → VioMoViNet GPU → GCP Kafka). Dọn mock data `rtsp-inference-mock` đã tích lũy, viết runbook.
+
+#### Đã làm (verify trên GCP, IP 34.124.131.144)
+- **Stop mock streaming**: rtsp-inference-mock, rtsp_pusher, mediamtx (double-publish risk khi VioMoViNet chạy).
+- **Cancel 2 Flink jobs** qua REST `PATCH /jobs/<id>` body rỗng (HTTP 202). `flink cancel` CLI lỗi JAAS.
+- **Clear + recreate 4 Kafka topics** (`/opt/kafka/bin`, image `apache/kafka:4.0.1`; `create-topics.sh` partitions=3).
+- **DROP Paimon** (`violence_incidents` = **366,135 rows mock** + `daily_incident_stats` + `camera_stats`) + **Iceberg** `historical_violence_incidents`. `dim_time`/`fact_violence_incidents` GIỮ.
+- **Restart pipeline-manager** → Contract Validator + Fluss sink RUNNING; `dim_camera` re-seed 15 cameras qua SQL Gateway.
+
+#### Runbook
+`step-by-step.md` — full clean-rerun (reset GCP → local RTSP → register VioMoViNet → verify E2E) + section **"lệnh check"**.
+
+#### ⚠️ Known issues (cho session kế)
+- **`aggregate_paimon.py` fail to submit**: `NoSuchFileException /tmp/pyflink/.../aggregate_paimon.py` (pyflink staging). **PRE-EXISTING** — job vốn không chạy từ trước (KHÔNG do reset). → `daily_incident_stats` + `camera_stats` không tự update. `violence_incidents` OK qua tiering (30ph). **Cần fix nếu demo cần WARM aggregation.**
+- `setup_star_schema.py` cũng fail (non-fatal, cùng lỗi pyflink). `dim_camera` seed riêng OK.
+- Iceberg COLD chỉ update 02:00 hằng ngày (`archive_to_iceberg` schedule).
+
+#### GCP gotchas (ghi nhớ)
+- Username VM = **`user`** (KHÔNG phải dataguy). Repo `/home/user/streamhouse/`. `gcloud ssh` phải dùng `user@instance-...`.
+- Trino catalogs: `iceberg`, `paimon` (KHÔNG có `fluss`). Query Fluss qua Chatbot/SQL Gateway.
+- jobmanager KHÔNG mount scripts (baked trong image); pipeline-manager là client submit qua `flink run -py`.
+
+#### Chưa làm (defer)
+- Chạy local RTSP + register VioMoViNet (chờ user confirm `VIOMOVINET_API_URL` / IP GPU box).
+- Fix `aggregate_paimon` pyflink staging.
+- Verify GCP firewall TCP 9093 từ GPU box.
+
+---
+
+### 🗺️ Last State — Session 2026-06-18 #3 (RTSP sim: context-continuous + full dataset coverage) ✅ IMPLEMENTED & VERIFIED E2E
+
+**Agent:** Claude (local code — chưa commit, chưa deploy GCP)
+**GCP/Services:** KHÔNG thay đổi.
+
+#### Mục đích phiên
+RTSP simulator cũ pick clip **ngẫu nhiên + shuffle** mỗi restart → 1 camera nhảy giữa các cảnh không liên quan (giả). User yêu cầu: mỗi luồng RTSP = **1 bối cảnh cố định (chung context)**, **timeline liền mạch + dài**, dùng **hết dataset** (cả normal lẫn violence, đa dạng), vẫn **realistic**.
+
+#### Root cause phát hiện
+- `rtsp_pusher.py` **bỏ qua** trường `playlist` của registry → tự `random.sample` + `shuffle` lại → effort của `prepare_cameras_dataset.py` vô dụng.
+- Registry cũ **randomize lat/lon** → trượt khỏi `dim_camera` (seed cố định) — bug tiềm ẩn.
+- `prepare_cameras_dataset.py` chỉ dùng một phần dataset (random sample 2-4 clip/cam).
+
+#### Files thay đổi
+| File | Thay đổi |
+|------|---------|
+| `scripts/prepare_cameras_context.py` | **MỚI** — clustering + playlist builder. ffmpeg/cv2 rút 1 frame/clip → HSV histogram 130-d → KMeans 15 cluster (1 cluster = 1 camera/bối cảnh) → nearest-neighbor order → `build_playlist` full-coverage. Chạy trên host (zero-install: numpy/sklearn/cv2/ffmpeg). |
+| `scripts/streaming/rtsp_pusher.py` | Thêm `load_context_playlists()` + `CAMERA_PLAYLISTS_FILE`; **bỏ shuffle** (ordered, deterministic); context-mode clip selection (fallback random nếu thiếu JSON). Backward-compatible. |
+| `docker/docker-compose.local-stream.yml` | Thêm env `CAMERA_PLAYLISTS_FILE`; remap HLS `8888→18888` (VS Code chiếm host :8888). |
+| `data/raw/SCVD` | **Symlink** → `../MSA-MoViNet/data/SCVD/SCVD_converted` (absolute; docker follow). |
+
+#### Quyết định thiết kế
+- **HSV color histogram + KMeans** (user chọn) — zero-install, ~15-30s. Mỗi cluster = 1 camera location cố định → "chung context".
+- **build_playlist full-coverage** (refinement sau khi user hỏi "dùng hết data?"): ALL normal clips lặp `r` lần làm phông nền dài + ALL violence clips rải đều → **dùng 100% dataset** + density ≈ `--target-density` (default 0.12) + timeline dài (25-227 clip/cam ≈ 20 phút). `r = ceil(n_v·(1/d−1)/n_n)`, cap 15.
+- **Geo FIXED** mirror `setup_star_schema.py:_seed_dim_camera` (15 tuple) → registry & Fluss dim_camera đồng bộ (fix bug randomize lat/lon).
+- Pusher image (`python:3.10-slim`+ffmpeg) không có numpy/sklearn/cv2 → clustering chạy **trên host 1 lần**, không trong container.
+
+#### Verify (tất cả PASS — E2E)
+- ✅ Coverage: **481/481 clip dùng (100%)** — normal 246/246 + violence 235/235.
+- ✅ Density 11.9% ≈ target 0.12; playlist 25-227 clip/cam.
+- ✅ Cluster coherence (visual): cam_01 = 1 cảnh nhà/quán trong nhà nhất quán; cam_12 = cảnh công nghiệp, violence xảy ra **ngay trong cảnh đó** (không phải clip violence nhảy vào từ cảnh khác).
+- ✅ 5 luồng RTSP live: `ffprobe` h264/1280×720/30fps, grab frame OK mỗi cam.
+- ✅ 5 camera = 5 cảnh khác nhau (quán ăn / cửa hàng / dân cư / đường phố / ngoài trời).
+
+#### ⚠️ Notes cho session/agent kế
+- **Dataset SCVD** nằm ở **sibling repo** `../MSA-MoViNet/data/SCVD/SCVD_converted`, symlink vào `data/raw/SCVD` (KHÔNG copy). 481 clip (246 Normal + 111 Violence + 124 Weaponized).
+- **Port conflict:** host `:8888` bị VS Code (`code`) chiếm → mediamtx HLS remap `18888:8888` trong local-stream.yml. RTSP `:8554` unaffected. **Đừng "fix" lại 8888.**
+- **Reload playlist:** sau khi rerun prep, pusher phải `--force-recreate` mới đọc `camera_playlists.json` mới (`up -d` thường không recreate).
+- **Build image:** `docker build -f docker/Dockerfile.rtsp-pusher -t docker-rtsp_pusher:latest .` (image local, không có trên registry).
+- Chỉ **5/15 camera** chạy (`MAX_CAMERAS=5`, CPU). Cam_06-15 sẵn sàng trong playlist.
+- **0 "calm" camera** — dataset 49% violence → KMeans trộn violence vào mọi cluster. Muốn calm → thêm normal-only cluster option.
+- Memory đã update: `rtsp-context-clustering`, `scvd-dataset-location`, `mediamtx-hls-port-conflict`.
+
+#### Chưa làm (defer)
+- **Commit** local changes (script mới + sửa pusher + compose + symlink) — đang trên branch `devHuy`.
+- **Test downstream** mock→Kafka (chưa chạy `rtsp-inference-mock`).
+- **Update docs/RTSP_SIMULATION.md** (vẫn mô tả random sampling cũ).
+- **Cameras "calm"** option nếu cần.
+
+---
+
+### 🗺️ Last State — Session 2026-06-18 #2 (RTSP sim: RWF-2000 → SCVD) 🔧 IMPLEMENTED
+
+**Agent:** Claude (local code — chưa deploy, chưa đụng GCP/services)
+**GCP/Services:** KHÔNG thay đổi. Toàn bộ thay đổi ở code local repo `streamhouse-violence-detection`.
+
+#### Mục đích phiên
+Chuyển **RTSP simulator** từ dataset **RWF-2000 → SCVD** (SmartCity CCTV Violence Detection). Lý do: RWF-2000 đã dùng để **train MoViNet** → streaming RWF-2000 = test-on-train leakage. SCVD (CCTV thực tế) làm dataset **stream/eval** riêng, tách biệt.
+
+#### ⚠️ Lỗi scope đã sửa
+Claude ban đầu sửa **nhầm repo legacy** `Smart-Security-Monitoring-System/` (có `simulateRTSP.py` với timeline risk-level). User đính chính repo active là `streamhouse-violence-detection/`. Đã **`git restore`** 3 file ở repo legacy → về trạng thái RWF-2000 ban đầu (sạch).
+
+#### Files thay đổi (streamhouse — 5 file)
+| File | Thay đổi |
+|------|---------|
+| `scripts/streaming/rtsp_pusher.py` | Defaults `FIGHT_DIR`/`NON_FIGHT_DIR` → `/app/data/raw/SCVD/{Violence,NonViolence}`; thêm `SCVD_DATA_ROOT` + `VIDEO_EXTENSIONS=(.avi,.mp4)`; thêm `discover_scvd_dirs()` (auto-detect class folders, **case-insensitive** split match Train/train, pool Train+Test, handle Class A/B + violence/non_violence + 3-class Normal/Violent/Weaponized); `load_clips` → recursive walk + both exts; thêm `load_clips_multi`; `main()` auto-discover khi configured dirs thiếu |
+| `scripts/prepare_cameras_dataset.py` | `RAW_ROOT=./data/raw/SCVD`; `rglob` `.avi`+`.mp4`; `_classify_clip()` theo parent folder; `has_violence = any(c in fight_set ...)` |
+| `docker/docker-compose.yml` | `rtsp_pusher`: env FIGHT_DIR/NON_FIGHT_DIR → SCVD + mount `../data/raw/SCVD:/app/data/raw/SCVD:ro` |
+| `docker/docker-compose.local-stream.yml` | như trên |
+| `deploy/docker-compose.gcp.yml` | mount SCVD + header/section comment `RWF-2000→SCVD` (gcp dùng script defaults, không set FIGHT_DIR env) |
+
+#### Quyết định thiết kế
+- **Repoint tối thiểu** (user chọn): GIỮ NGUYÊN thiết kế loop đơn giản của streamhouse (`CLIPS_PER_CAM=6` clips × `repeat=200` mỗi camera). KHÔNG port timeline thực tế (risk-level + safe-gap + violence injection 60-120s) — logic đó chỉ thuộc repo legacy.
+- Pusher dùng **stdlib only** (csv/os/random/subprocess/sys/tempfile/threading/time) → portable, không cần extra dep.
+
+#### 🐛 Bug bắt + fix khi verify
+`discover_scvd_dirs` match split theo `_SCVD_SPLITS=("train",...)` **lowercase**, nhưng SCVD publish là **`Train`/`Test` viết hoa** → case-sensitive trên Linux → trả empty lists. Fix: match case-insensitive qua `_norm_name()`. (Loại bug chỉ phát hiện khi chạy unit test.)
+
+#### Verify (tất cả PASS)
+- ✅ `py_compile` cả 2 file Python
+- ✅ RWF-2000 leftover: chỉ còn 2 **comment giải thích** cố ý (giải thích lý do tách SCVD) — không còn ref functional
+- ✅ 6 unit test `discover_scvd_dirs`/`load_clips`: `{Train,Test}/{Class A,B}` (publish layout), flat `violence/non_violence`, 3-class fallback, recursive load `.mp4+.avi`, pooling, missing-root clean fail
+
+#### ⚠️ Notes cho session/agent kế
+- **BLOCKER: SCVD chưa tải.** Trước khi `--profile streaming` chạy được, phải download:
+  ```bash
+  kaggle datasets download -d toluwaniaremu/smartcity-cctv-violence-detection-dataset-scvd \
+    -p data/raw/SCVD --unzip
+  ```
+  Tương tự trên GCP VM: upload SCVD vào `~/streamhouse/data/raw/SCVD/`.
+- Pusher **auto-detect** layout SCVD → không cần biết chính xác cấu trúc Kaggle unzip. Nếu log "No clips found" → folder name không khớp alias → thêm vào `_VIOLENCE_ALIASES`/`_NON_VIOLENCE_ALIASES` ở `rtsp_pusher.py`.
+- Repo legacy `Smart-Security-Monitoring-System/` **không dùng** cho project này (đã revert). RTSP sim thật ở streamhouse.
+- Memory Claude đã update: `streamhouse-rtsp-scvd` (+ MEMORY.md index).
+
+#### Chưa làm (defer)
+- **Verify E2E** (cần SCVD tải + docker run): pusher → MediaMTX → `ffplay rtsp://localhost:8554/cam_01`. Chờ user tải SCVD hoặc cấp `kaggle.json`.
+- **Commit** (chờ user).
+- Docs khác (QUICKSTART/ROADMAP/README) vẫn ghi RWF-2000 — chưa sửa (cosmetic, để user quyết).
+
+---
+
 ### 🗺️ Last State — Session 2026-06-18 (VioMoViNet → Kafka real producer) 🔧 IMPLEMENTED
 
 **Agent:** Claude (local implementation — chưa deploy lên GCP)

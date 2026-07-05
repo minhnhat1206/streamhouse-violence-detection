@@ -22,7 +22,7 @@ services:
     container_name: mediamtx
     ports:
       - "8554:8554"   # RTSP
-      - "8888:8888"   # HLS
+      - "18888:8888"  # HLS  (host remapped — 8888 taken by VS Code on this machine)
       - "8889:8889"   # WebRTC
       - "8189:8189/udp"
       - "9997:9997"   # MediaMTX API
@@ -41,25 +41,26 @@ services:
       - local-stream-net
     restart: unless-stopped
 
-  # Pushes RWF-2000 video clips to MediaMTX via ffmpeg (simulates RTSP cameras)
+  # Pushes SCVD video clips to MediaMTX via ffmpeg (simulates RTSP cameras)
   rtsp_pusher:
     image: docker-rtsp_pusher:latest
     command: python /app/rtsp_pusher.py
     container_name: rtsp_pusher
     environment:
       METADATA_FILE: /app/data/metadata/camera_registry.csv
-      FIGHT_DIR: /app/data/raw/RWF-2000/train/Fight
-      NON_FIGHT_DIR: /app/data/raw/RWF-2000/train/NonFight
+      FIGHT_DIR: /app/data/raw/SCVD/Violence
+      NON_FIGHT_DIR: /app/data/raw/SCVD/NonViolence
       FIGHT_MANIFEST: /app/data/metadata/fight_clips_manifest.txt
       NONFIGHT_MANIFEST: /app/data/metadata/nonfight_clips_manifest.txt
       MEDIAMTX_HOST: mediamtx
-      MAX_CAMERAS: "5"
+      MAX_CAMERAS: "15"
       CLIPS_PER_CAM: "6"
       STOP_FILE: /app/tmp/STOP
+      CAMERA_PLAYLISTS_FILE: /app/data/metadata/camera_playlists.json
       ACTIVE_CAMERAS: "${ACTIVE_CAMERAS:-}"
     volumes:
       - ../scripts/streaming/rtsp_pusher.py:/app/rtsp_pusher.py:ro
-      - ../data/raw/RWF-2000:/app/data/raw/RWF-2000:ro
+      - ../data/raw/SCVD:/app/data/raw/SCVD:ro
       - ../data/metadata:/app/data/metadata:ro
       - local-pusher-tmp:/app/tmp
     depends_on:
@@ -68,8 +69,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768m
-          cpus: "1.00"
+          memory: 2g
+          cpus: "6.00"
     networks:
       - local-stream-net
     restart: on-failure
