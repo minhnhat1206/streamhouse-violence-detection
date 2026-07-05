@@ -4,12 +4,56 @@
 
 Replace the old local RTSP simulation flow with a deterministic 5-stream benchmark built from the newly labeled SCVD behavior dataset.
 
+## Implementation Status
+
+Status on 2026-07-06: implemented locally, deployed on Vast.ai, and committed on `dev.VastAI`.
+
+Git commit:
+
+```text
+797775f Add deterministic SCVD RTSP scenario pipeline
+```
+
+Implemented files:
+
+```text
+scripts/prepare_rtsp_scenarios.py
+scripts/streaming/rtsp_pusher.py
+docker/docker-compose.scvd-scenarios.yml
+```
+
+Project-local dataset copy:
+
+```text
+data/raw/SCVD/
+├── SCVD_converted/
+├── labels/
+├── rtsp_scenarios/
+├── scripts/
+├── requirements.txt
+└── README_rtsp_fiftyone.md
+```
+
+`data/raw/SCVD` is now a real project-local directory, not the old symlink to the MSA-MoViNet dataset. The `data/` tree remains gitignored; it must be copied or regenerated on each runtime machine.
+
+Vast.ai runtime state:
+
+```text
+/root/streamhouse/data/raw/SCVD          # new labeled SCVD data
+/root/streamhouse/data/metadata          # regenerated runtime metadata
+rtsp://localhost:8554/cam_01..cam_05     # scenario source streams
+rtsp://localhost:8554/cam_01_result..cam_05_result
+```
+
+The old random/context-cluster RTSP data source is no longer the active Vast.ai runtime source.
+
 The new RTSP setup must support:
 
 - 5 fixed streams instead of 15 random/context-cluster cameras
 - scenario-specific background/event pools
 - exact event annotations in seconds
 - repeatable 15-minute loops
+- ordered clip selection by natural filename order inside each behavior label
 - stable camera IDs and RTSP URLs for StreamViD-A evaluation
 - later metric comparison against `annotations.csv`
 
@@ -134,10 +178,11 @@ Required project update sequence after scenario rebuild:
 cd "/home/dataguy/Documents/01 - Projects/KLTN/streamhouse-violence-detection"
 
 python scripts/prepare_rtsp_scenarios.py \
-  --scenario-root /home/dataguy/Documents/SCVD/rtsp_scenarios \
-  --out-dir ./data/metadata \
-  --host-scvd-root /home/dataguy/Documents/SCVD \
-  --container-scvd-root /app/data/raw/SCVD
+  --scenario-root data/raw/SCVD/rtsp_scenarios \
+  --out-dir data/metadata \
+  --host-scvd-root data/raw/SCVD \
+  --container-scvd-root /app/data/raw/SCVD \
+  --metadata-runtime-root /app/data/metadata
 ```
 
 This separation matters:
@@ -147,6 +192,18 @@ This separation matters:
 - `rtsp_scenarios/*/schedule.csv` answers what each RTSP camera plays and in what order.
 - `rtsp_scenarios/*/annotations.csv` answers when violence events occur.
 - project `data/metadata/*.json/csv` answers what Docker containers should mount and stream.
+
+Ordering policy:
+
+```text
+No random shuffle.
+Each behavior-label pool is sorted by natural filename order.
+Streams with multiple background/event labels use round-robin selection across
+labels, while preserving filename order inside each label.
+```
+
+This preserves continuity when source clips are consecutive cuts from the same
+long video.
 
 ## Target Stream Design
 
@@ -199,7 +256,7 @@ Main incompatibility:
 - Old metadata has no event timeline.
 - New benchmark needs `schedule.csv` and `annotations.csv` as first-class outputs.
 
-## Proposed Migration
+## Implemented Migration
 
 ### Phase 1. Add Scenario Dataset Preparation Script
 
@@ -229,13 +286,29 @@ Responsibilities:
   - `RTSP-04 -> cam_04`
   - `RTSP-05 -> cam_05`
 
-Suggested CLI:
+Docker/local CLI:
 
 ```bash
 python scripts/prepare_rtsp_scenarios.py \
-  --scenario-root /home/dataguy/Documents/SCVD/rtsp_scenarios \
-  --out-dir ./data/metadata \
-  --container-scvd-root /app/data/raw/SCVD
+  --scenario-root data/raw/SCVD/rtsp_scenarios \
+  --out-dir data/metadata \
+  --host-scvd-root data/raw/SCVD \
+  --container-scvd-root /app/data/raw/SCVD \
+  --metadata-runtime-root /app/data/metadata
+```
+
+Vast.ai bare-metal CLI:
+
+```bash
+cd ~/streamhouse
+
+python3 scripts/prepare_rtsp_scenarios.py \
+  --scenario-root data/raw/SCVD/rtsp_scenarios \
+  --out-dir data/metadata \
+  --host-scvd-root data/raw/SCVD \
+  --container-scvd-root /root/streamhouse/data/raw/SCVD \
+  --metadata-runtime-root /root/streamhouse/data/metadata \
+  --rtsp-base rtsp://localhost:8554
 ```
 
 Key implementation detail:
@@ -256,23 +329,17 @@ or, if mounting only the inner dataset root:
 
 Pick one mount convention and keep it consistent.
 
-Recommended project-local mount convention:
+Implemented project-local mount convention:
 
 ```text
-host: /home/dataguy/Documents/SCVD/SCVD_converted
+host: data/raw/SCVD/SCVD_converted
 container: /app/data/raw/SCVD/SCVD_converted
 ```
 
-Then convert original paths from:
+For Vast.ai bare-metal, generated playlists use:
 
 ```text
-/home/dataguy/Documents/SCVD/SCVD_converted/Train/Normal/n001_converted.avi
-```
-
-to:
-
-```text
-/app/data/raw/SCVD/SCVD_converted/Train/Normal/n001_converted.avi
+/root/streamhouse/data/raw/SCVD/SCVD_converted/Train/Normal/n001_converted.avi
 ```
 
 ### Phase 2. Metadata Schema
@@ -393,7 +460,7 @@ Key differences:
 - Mount the new SCVD dataset path.
 - Mount scenario metadata read-only.
 
-Suggested `rtsp_pusher` environment:
+Implemented `rtsp_pusher` environment:
 
 ```yaml
 environment:
@@ -407,15 +474,23 @@ environment:
   STOP_FILE: /app/tmp/STOP
 ```
 
-Suggested volumes:
+Implemented Docker volumes:
 
 ```yaml
 volumes:
   - ../scripts/streaming/rtsp_pusher.py:/app/rtsp_pusher.py:ro
-  - /home/dataguy/Documents/SCVD/SCVD_converted:/app/data/raw/SCVD/SCVD_converted:ro
+  - ../data/raw/SCVD/SCVD_converted:/app/data/raw/SCVD/SCVD_converted:ro
   - ../data/metadata:/app/data/metadata:ro
-  - local-pusher-tmp:/app/tmp
+  - scvd-pusher-tmp:/app/tmp
 ```
+
+Start locally:
+
+```bash
+docker compose -f docker/docker-compose.scvd-scenarios.yml up -d --build
+```
+
+The compose file also starts `rtsp-inference-mock` for the 5 scenario cameras.
 
 ### Phase 5. Annotation Contract
 
@@ -497,14 +572,15 @@ first_alert_time - event_start_seconds
 
 ### Data Preparation
 
-- [ ] Keep source data under `/home/dataguy/Documents/SCVD`.
-- [ ] Treat this file as the source of truth after manual labeling:
+- [x] Keep source data under `/home/dataguy/Documents/SCVD`.
+- [x] Copy required runtime data into project-local `data/raw/SCVD`.
+- [x] Treat this file as the source of truth after manual labeling:
 
 ```text
 /home/dataguy/Documents/SCVD/labels/behavior_manifest.csv
 ```
 
-- [ ] Regenerate labels if needed:
+- [ ] Regenerate labels if labels change:
 
 ```bash
 cd /home/dataguy/Documents/SCVD
@@ -512,7 +588,7 @@ source .venv/bin/activate
 python scripts/export_behavior_manifest.py --sync-fields
 ```
 
-- [ ] Regenerate duration-enhanced manifest if labels changed:
+- [ ] Regenerate duration-enhanced manifest if labels change:
 
 ```bash
 python scripts/add_video_durations.py \
@@ -521,7 +597,7 @@ python scripts/add_video_durations.py \
   --video-out labels/video_durations.csv
 ```
 
-- [ ] Regenerate scenario files:
+- [ ] Regenerate scenario files after label changes:
 
 ```bash
 cd /home/dataguy/Documents/SCVD
@@ -531,19 +607,20 @@ python scripts/build_rtsp_scenarios.py
 
 ### Project Integration
 
-- [ ] Add `scripts/prepare_rtsp_scenarios.py`.
-- [ ] Generate project metadata:
+- [x] Add `scripts/prepare_rtsp_scenarios.py`.
+- [x] Generate project metadata:
 
 ```bash
 cd "/home/dataguy/Documents/01 - Projects/KLTN/streamhouse-violence-detection"
 python scripts/prepare_rtsp_scenarios.py \
-  --scenario-root /home/dataguy/Documents/SCVD/rtsp_scenarios \
-  --out-dir ./data/metadata \
-  --host-scvd-root /home/dataguy/Documents/SCVD \
-  --container-scvd-root /app/data/raw/SCVD
+  --scenario-root data/raw/SCVD/rtsp_scenarios \
+  --out-dir data/metadata \
+  --host-scvd-root data/raw/SCVD \
+  --container-scvd-root /app/data/raw/SCVD \
+  --metadata-runtime-root /app/data/metadata
 ```
 
-- [ ] Confirm outputs:
+- [x] Confirm outputs:
 
 ```text
 data/metadata/camera_registry.csv
@@ -555,34 +632,34 @@ data/metadata/rtsp_schedules/cam_01_schedule.csv
 
 ### Pusher Integration
 
-- [ ] Add `SCENARIO_METADATA_FILE` support in `rtsp_pusher.py`.
-- [ ] Add `PLAYLIST_REPEAT` env var in `rtsp_pusher.py`.
-- [ ] Keep old random/context fallback working.
-- [ ] Log each scenario stream with annotation file path.
+- [x] Add `SCENARIO_METADATA_FILE` support in `rtsp_pusher.py`.
+- [x] Add `PLAYLIST_REPEAT` env var in `rtsp_pusher.py`.
+- [x] Keep old random/context fallback working.
+- [x] Log each scenario stream with annotation file path.
 
 ### Docker Integration
 
-- [ ] Add `docker/docker-compose.scvd-scenarios.yml`.
-- [ ] Set `MAX_CAMERAS=5`.
-- [ ] Mount `/home/dataguy/Documents/SCVD/SCVD_converted` into the pusher.
-- [ ] Set `ACTIVE_CAMERAS=cam_01,cam_02,cam_03,cam_04,cam_05`.
-- [ ] Keep `rtsp-inference-mock` using the same `camera_registry.csv`.
+- [x] Add `docker/docker-compose.scvd-scenarios.yml`.
+- [x] Set `MAX_CAMERAS=5`.
+- [x] Mount `data/raw/SCVD/SCVD_converted` into the pusher.
+- [x] Set `ACTIVE_CAMERAS=cam_01,cam_02,cam_03,cam_04,cam_05`.
+- [x] Keep `rtsp-inference-mock` using the same `camera_registry.csv`.
 
 ### Smoke Test
 
-- [ ] Start stack:
+- [x] Start stack:
 
 ```bash
 docker compose -f docker/docker-compose.scvd-scenarios.yml up -d
 ```
 
-- [ ] Check pusher logs:
+- [x] Check pusher logs:
 
 ```bash
 docker logs rtsp_pusher --tail 80
 ```
 
-- [ ] Check streams:
+- [x] Check streams:
 
 ```bash
 ffprobe rtsp://localhost:8554/cam_01
@@ -592,13 +669,13 @@ ffprobe rtsp://localhost:8554/cam_04
 ffprobe rtsp://localhost:8554/cam_05
 ```
 
-- [ ] Check MediaMTX API:
+- [x] Check MediaMTX API:
 
 ```bash
 curl http://localhost:9997/v3/paths/list
 ```
 
-- [ ] Confirm inference mock sees 5 cameras only.
+- [x] Confirm inference mock sees 5 cameras only.
 
 ### Evaluation Readiness
 
@@ -661,11 +738,11 @@ Decision:
 
 The migration is complete when:
 
-- [ ] `docker compose -f docker/docker-compose.scvd-scenarios.yml up -d` starts 5 RTSP streams.
-- [ ] `rtsp://localhost:8554/cam_01` through `cam_05` are playable.
-- [ ] `camera_registry.csv` contains exactly 5 scenario cameras.
-- [ ] `camera_playlists.json` contains exactly 5 ordered playlists.
-- [ ] `camera_scenarios.json` maps each camera to its scenario and annotation file.
-- [ ] `rtsp_annotations/*.csv` contain ground-truth event windows.
-- [ ] Inference mock can consume the 5 streams without code changes outside metadata/compose/pusher.
-- [ ] The old `docker-compose.local-stream.yml` flow remains usable for legacy demos.
+- [x] `docker compose -f docker/docker-compose.scvd-scenarios.yml up -d` starts 5 RTSP streams.
+- [x] `rtsp://localhost:8554/cam_01` through `cam_05` are playable.
+- [x] `camera_registry.csv` contains exactly 5 scenario cameras.
+- [x] `camera_playlists.json` contains exactly 5 ordered playlists.
+- [x] `camera_scenarios.json` maps each camera to its scenario and annotation file.
+- [x] `rtsp_annotations/*.csv` contain ground-truth event windows.
+- [x] Inference mock can consume the 5 streams without code changes outside metadata/compose/pusher.
+- [x] The old `docker-compose.local-stream.yml` flow remains usable for legacy demos.

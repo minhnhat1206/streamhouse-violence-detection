@@ -2,33 +2,45 @@
 
 > Tài liệu mô tả cách hệ thống **giả lập nhiều luồng camera RTSP** từ video clip (không cần camera thật) để test/benchmark/demo pipeline Streamhouse.
 >
-- **Code:** `scripts/streaming/rtsp_pusher.py` (pusher), `scripts/prepare_cameras_dataset.py` (prep registry)
-- **Compose:** `docker/docker-compose.yml`, `docker/docker-compose.local-stream.yml`, `deploy/docker-compose.gcp.yml` (profile `streaming`)
+- **Code:** `scripts/streaming/rtsp_pusher.py` (pusher), `scripts/prepare_rtsp_scenarios.py` (5-stream scenario metadata), `scripts/prepare_cameras_dataset.py` / `scripts/prepare_cameras_context.py` (legacy prep)
+- **Compose:** `docker/docker-compose.scvd-scenarios.yml` (current 5-stream benchmark), `docker/docker-compose.local-stream.yml`, `docker/docker-compose.yml`, `deploy/docker-compose.gcp.yml`
 
 ---
 
 ## 1. Tổng quan
 
-Vì không có camera CCTV thật, hệ thống **mô phỏng camera** bằng cách: lấy các video clip bạo lực/bình thường từ dataset, **loop liên tục** và đẩy vào MediaMTX dưới dạng luồng **RTSP live** (`rtsp://mediamtx:8554/cam_NN`). Pipeline downstream xử lý y như camera thật.
+Vì không có camera CCTV thật, hệ thống **mô phỏng camera** bằng cách: lấy các video clip bạo lực/bình thường từ dataset, ghép thành timeline deterministic, **loop liên tục** và đẩy vào MediaMTX dưới dạng luồng **RTSP live** (`rtsp://mediamtx:8554/cam_NN`). Pipeline downstream xử lý y như camera thật.
 
 **Dataset hiện tại:** **SCVD** (SmartCity CCTV Violence Detection) — CCTV thực tế, dùng làm dataset **stream/eval**.
 > ⚠️ Tách biệt khỏi **RWF-2000** (đã dùng để **train MoViNet**) → tránh test-on-train leakage. Trước đây sim dùng RWF-2000; đã chuyển sang SCVD (Session 2026-06-18 #2).
 
+**Runtime hiện tại:** deterministic 5-stream scenario benchmark:
+
+| Camera | Scenario | Mục đích |
+|--------|----------|----------|
+| `cam_01` | RTSP-01 baseline | baseline accuracy |
+| `cam_02` | RTSP-02 crowd | crowded/occluded scenes |
+| `cam_03` | RTSP-03 difficult_conditions | lighting/distance/shake |
+| `cam_04` | RTSP-04 hard_negative | false-alarm control |
+| `cam_05` | RTSP-05 peak_frequency | dense alert stress test |
+
+Mỗi camera có playlist ordered và annotation CSV riêng để đánh giá model theo timeline.
+
 ---
 
-## 2. Kiến trúc (3 service, profile `streaming`)
+## 2. Kiến trúc hiện tại
 
 ```
               ffmpeg -re (concat loop)                  capture + inference
   ┌──────────────────────┐   RTSP    ┌─────────────┐   ┌─────────────────────┐
   │   rtsp_pusher        │ ────────► │  mediamtx   │ ─►│ rtsp-inference-mock │ ──► Kafka
   │ (1 thread / camera)  │  :8554    │ (RTSP/HLS/  │   │ (MOCK inference)    │   urban-safety-
-  │ 6 clip × 200 loop    │           │  WebRTC)    │   │                     │   alerts
+  │ scenario playlists   │           │  WebRTC)    │   │                     │   alerts
   └──────────────────────┘           └─────────────┘   └─────────────────────┘
         ▲                                                        │
-        │ đọc registry                              Kafka topic  ▼
-  data/raw/SCVD +                                          Flink pipeline
-  data/metadata/camera_registry.csv                        (Fluss/Paimon/Iceberg)
+        │ đọc registry + playlists + scenarios     Kafka topic  ▼
+  data/raw/SCVD + data/metadata/*                         Flink pipeline
+                                                          (Fluss/Paimon/Iceberg)
 ```
 
 | Service | Vai trò | Port |
@@ -41,21 +53,19 @@ Vì không có camera CCTV thật, hệ thống **mô phỏng camera** bằng c�
 
 ---
 
-## 3. Giả lập như thế nào (logic pusher)
+## 3. Giả lập như thế nào
 
 `rtsp_pusher.py` chạy **1 thread ffmpeg mỗi camera** (`CameraPusher`), mỗi thread:
 
-1. **Đọc registry** `data/metadata/camera_registry.csv` → danh sách camera (`cam_01`…`cam_15`) + cờ `has_violence` mỗi camera.
-2. **Chọn pool clip** theo `has_violence`:
-   - `has_violence=True` → pool **violence** (clip bạo lực)
-   - `has_violence=False` → pool **non-violence** (clip bình thường)
-3. **Sample ngẫu nhiên** `CLIPS_PER_CAM` clip (mặc định **6**) từ pool.
-4. **Ghi playlist** ffmpeg concat-demuxer: 6 clip × `repeat=200` (lặp 200 vòng) → tệp temp.
+1. **Đọc registry** `data/metadata/camera_registry.csv` → đúng 5 camera scenario (`cam_01`…`cam_05`).
+2. **Đọc ordered playlist** `data/metadata/camera_playlists.json` → danh sách clip theo timeline đã build sẵn.
+3. **Đọc scenario metadata** `data/metadata/camera_scenarios.json` → tên scenario, số event, annotation/schedule path.
+4. **Ghi playlist** ffmpeg concat-demuxer với `PLAYLIST_REPEAT=1` cho scenario mode.
 5. **ffmpeg `-re`** (real-time) đọc concat playlist → encode H.264 baseline, `-preset ultrafast`, `-tune zerolatency`, `-rtsp_transport tcp` → đẩy `rtsp://mediamtx:8554/<cam_id>`.
-6. Khi ffmpeg exit (hết 200 loop) → **thread tự restart** với playlist shuffle mới → **stream chạy vô tận**.
-7. **Graceful stop:** `docker exec rtsp_pusher touch /app/tmp/STOP` (file bị xóa khi restart).
+6. Khi ffmpeg exit → thread tự restart cùng ordered playlist → stream chạy vô tận nhưng timeline vẫn deterministic.
+7. **Graceful stop:** `docker exec rtsp_pusher touch /app/tmp/STOP` hoặc `touch /tmp/STOP` khi chạy bare-metal trên Vast.ai.
 
-→ Mỗi camera là **1 luồng RTSP liên tục**, xen kẽ clip bạo lực/bình thường tùy `has_violence`.
+Pusher vẫn giữ fallback legacy: nếu thiếu `camera_playlists.json`, nó auto-discover pool SCVD và sample ngẫu nhiên như flow cũ. Runtime hiện tại không dùng fallback đó.
 
 ---
 
@@ -63,13 +73,13 @@ Vì không có camera CCTV thật, hệ thống **mô phỏng camera** bằng c�
 
 | Thông số | Giá trị | Ý nghĩa |
 |----------|---------|---------|
-| Camera trong registry | **15** (`cam_01`…`cam_15`) | Sinh bởi `prepare_cameras_dataset.py` (`N_CAMERAS=15`) |
-| Luồng chạy cùng lúc | **5** (`MAX_CAMERAS=5`) | Giới hạn CPU — pusher chỉ lấy 5 camera đầu (hoặc theo `ACTIVE_CAMERAS`) |
-| Clip mỗi camera | **6** (`CLIPS_PER_CAM=6`) | Sample ngẫu nhiên từ pool |
-| Số vòng loop | **200** (`repeat=200`) | Mỗi playlist lặp 200 lần trước khi reshuffle |
-| Tỷ lệ bạo lực | **~60%** (`prob_include_fight=0.6`) | Sinh ở bước prep → ~60% camera `has_violence=True` |
+| Camera trong registry | **5** (`cam_01`…`cam_05`) | Sinh bởi `prepare_rtsp_scenarios.py` |
+| Luồng source chạy cùng lúc | **5** (`MAX_CAMERAS=5`) | `ACTIVE_CAMERAS=cam_01,cam_02,cam_03,cam_04,cam_05` |
+| Clip mỗi camera | **192-268** | Theo scenario schedule, không sample random |
+| Số vòng repeat | **1** (`PLAYLIST_REPEAT=1`) | Mỗi scenario playlist chạy một lần rồi ffmpeg restart |
+| Annotation events | **17 total** | 3 + 3 + 3 + 1 + 7 events |
 
-**→ Mặc định: 5 luồng RTSP song song**, mỗi luồng loop 6 clip × 200 lần. Tăng `MAX_CAMERAS` = thêm luồng (cẩn thận CPU — mỗi luồng = 1 tiến trình ffmpeg re-encode).
+**→ Mặc định: 5 luồng RTSP source song song**, cộng thêm 5 luồng `*_result` khi VioMoViNet visualizer chạy.
 
 Override từng camera: đặt env `ACTIVE_CAMERAS=cam_01,cam_03,cam_07`.
 
@@ -82,7 +92,24 @@ Override từng camera: đặt env `ACTIVE_CAMERAS=cam_01,cam_03,cam_07`.
 | Dataset | RWF-2000 (`.avi`, clip 5s) | **SCVD** (`.avi`/`.mp4`, clip CCTV ngắn) |
 | Vai trò | train MoViNet | **stream/eval** (tách biệt train) |
 
-**Cấu trúc SCVD** (layout Kaggle unzip ra có thể khác nhau — pusher **auto-detect**):
+**Cấu trúc project-local hiện tại:**
+
+```
+data/raw/SCVD/
+├── SCVD_converted/
+│   ├── Train/Normal/
+│   ├── Train/Violence/
+│   ├── Train/Weaponized/
+│   └── Test/...
+├── labels/
+├── rtsp_scenarios/
+├── scripts/
+├── requirements.txt
+└── README_rtsp_fiftyone.md
+```
+
+**Legacy Kaggle layout** vẫn được pusher auto-detect nếu dùng fallback:
+
 ```
 data/raw/SCVD/
 ├── Train/{Class A, Class B}/   ← layout publish (Class A=Violence, Class B=NonViolence)
@@ -108,13 +135,14 @@ Nếu `FIGHT_DIR`/`NON_FIGHT_DIR` không tồn tại → pusher auto-discover d�
 
 ## 6. Camera registry (`camera_registry.csv`)
 
-Sinh bởi `prepare_cameras_dataset.py` (chạy 1 lần). Mỗi camera có:
+Sinh bởi `prepare_rtsp_scenarios.py` cho runtime hiện tại. Mỗi camera có:
 - `camera_id` (`cam_NN`), `rtsp_url` (`rtsp://mediamtx:8554/cam_NN`)
-- `has_violence` (True/False) — quyết định pool clip
+- `has_violence` (True/False)
+- `scenario_id`, `scenario_name`, `difficulty`, `frequency`, `purpose`
+- `n_events`, `duration_seconds`, `annotation_file`, `schedule_file`
 - **Geo metadata** (giả lập Quận 1, TP.HCM): `city`, `district`, `ward` (15 phường), `street` (15 đường), `latitude`/`longitude` (10.77–10.78, 106.69–106.71)
-- `playlist`, `total_clips` (lưu vết prep)
 
-> Geo metadata cho phép pipeline **enrich location** + dashboard vẽ heatmap. Pusher runtime chỉ quan tâm `has_violence` (+ `camera_id`).
+> Geo metadata cho phép pipeline **enrich location** + dashboard vẽ heatmap. Pusher runtime chủ yếu dùng `camera_id`; ordered clip list nằm trong `camera_playlists.json`.
 
 ---
 
@@ -122,13 +150,14 @@ Sinh bởi `prepare_cameras_dataset.py` (chạy 1 lần). Mỗi camera có:
 
 | File | Khi nào dùng |
 |------|--------------|
-| `docker/docker-compose.local-stream.yml` | **Demo local** — chỉ 3 service streaming (mediamtx + pusher + mock), KHÔNG cần Kafka local (mock push thẳng GCP Kafka) |
+| `docker/docker-compose.scvd-scenarios.yml` | **Current SCVD benchmark** — 5 deterministic scenario streams + mock publisher |
+| `docker/docker-compose.local-stream.yml` | Legacy local streaming — mediamtx + pusher + mock |
 | `docker/docker-compose.yml --profile streaming` | **Full stack local** — chạy cùng core services (Kafka/Flink/Fluss/...) |
 | `deploy/docker-compose.gcp.yml --profile streaming` | **GCP VM** — cần upload SCVD lên `~/streamhouse/data/raw/SCVD/` |
 
 ```bash
-# Local demo (mock → GCP Kafka)
-docker compose -f docker/docker-compose.local-stream.yml up -d
+# Current SCVD 5-stream benchmark
+docker compose -f docker/docker-compose.scvd-scenarios.yml up -d --build
 
 # Full local
 docker compose -f docker/docker-compose.yml --profile streaming up -d
@@ -142,7 +171,7 @@ docker exec rtsp_pusher touch /app/tmp/STOP
 docker exec rtsp-inference-mock touch /app/tmp/STOP
 ```
 
-> Đảm bảo đã có `data/raw/SCVD/` (tải dataset) + `data/metadata/camera_registry.csv` (chạy `prepare_cameras_dataset.py` nếu chưa).
+> Đảm bảo đã có `data/raw/SCVD/` + `data/metadata/camera_registry.csv`/`camera_playlists.json`/`camera_scenarios.json` (chạy `prepare_rtsp_scenarios.py` nếu chưa).
 
 ---
 
@@ -167,10 +196,13 @@ Theo `.claude/rules/resource-limits.md` (máy 16GB):
 | Env | Mặc định | Ý nghĩa |
 |-----|----------|---------|
 | `MAX_CAMERAS` | `5` | Số luồng RTSP cùng lúc |
-| `CLIPS_PER_CAM` | `6` | Số clip mỗi camera |
-| `FIGHT_DIR` / `NON_FIGHT_DIR` | SCVD Violence/NonViolence | Override pool (bỏ trống → auto-discover) |
-| `SCVD_DATA_ROOT` | `/app/data/raw/SCVD` | Root để auto-discover |
-| `ACTIVE_CAMERAS` | (all) | `cam_01,cam_03` — chỉ push camera cụ thể |
+| `ACTIVE_CAMERAS` | `cam_01..cam_05` trong scenario compose | Chỉ push camera cụ thể |
+| `CAMERA_PLAYLISTS_FILE` | `/app/data/metadata/camera_playlists.json` | Ordered per-camera clip playlists |
+| `SCENARIO_METADATA_FILE` | `/app/data/metadata/camera_scenarios.json` | Scenario metadata + annotation/schedule paths |
+| `PLAYLIST_REPEAT` | `1` trong scenario compose, `200` legacy default | Số lần lặp concat playlist |
+| `SCVD_DATA_ROOT` | `/app/data/raw/SCVD/SCVD_converted` trong scenario compose | Root để auto-discover fallback |
+| `FIGHT_DIR` / `NON_FIGHT_DIR` | SCVD Violence/NonViolence | Legacy fallback override |
+| `CLIPS_PER_CAM` | `6` | Legacy fallback random sample size |
 | `STOP_FILE` | `/app/tmp/STOP` | Graceful stop |
 
 ---
@@ -180,10 +212,12 @@ Theo `.claude/rules/resource-limits.md` (máy 16GB):
 | Triệu chứng | Nguyên nhân / Fix |
 |-------------|-------------------|
 | `[ERROR] No .avi clips found` | SCVD chưa tải, hoặc folder name không khớp alias → thêm vào `_VIOLENCE_ALIASES`/`_NON_VIOLENCE_ALIASES` trong `rtsp_pusher.py` |
+| `camera_playlists.json` load được nhưng camera có `0 valid clips` | Playlist path không khớp runtime mount. Regenerate bằng `prepare_rtsp_scenarios.py` với đúng `--container-scvd-root` |
 | Camera không có trên `ffplay` | Kiểm tra `docker logs rtsp_pusher`; mediamtx chưa up? (`depends_on: mediamtx`) |
 | CPU quá cao | Giảm `MAX_CAMERAS`; ffmpeg đã `-preset ultrafast` |
-| Stream đứt/quá ngắn | Bình thường — ffmpeg restart sau 200 loop; thread tự relaunch |
-| `ffprobe`/duration sai | SCVD clip ngắn nhưng pusher loop theo số (200), không tính duration → OK, không ảnh hưởng |
+| Stream đứt sau một scenario loop | Bình thường — ffmpeg restart sau playlist, thread tự relaunch |
+| Pusher dừng ngay sau start | Có stale stop file: xóa `/app/tmp/STOP` trong container hoặc `/tmp/STOP` khi chạy bare-metal |
+| MediaMTX chỉ thấy `cam_01..cam_05` nhưng không thấy `*_result` | Source RTSP đã chạy; cần start VioMoViNet visualizer để publish result stream |
 
 ---
-*Session 2026-06-18 #2 — chuyển RWF-2000 → SCVD. Xem `DEVELOPER_LOG.md` để biết chi tiết thay đổi.*
+*Updated 2026-07-06 — deterministic SCVD 5-stream scenario runtime. Xem `docs/NEW_SCVD_RTSP_SCENARIO_PLAN.md` và `DEVELOPER_LOG.md` để biết chi tiết thay đổi.*

@@ -327,6 +327,13 @@ class TrinoClient:
         if trino_connect is None:
             raise ImportError("PyTrino not installed")
 
+        import re as _re
+        # Rewrite raw events tables to use sessionized views
+        sql = _re.sub(r'\bpaimon\.security\.violence_incidents\b', 'iceberg.default.violence_incidents_sessionized', sql, flags=_re.IGNORECASE)
+        sql = _re.sub(r'(?<![.\w])violence_incidents\b', 'iceberg.default.violence_incidents_sessionized', sql, flags=_re.IGNORECASE)
+        sql = _re.sub(r'\biceberg\.security\.historical_violence_incidents\b', 'iceberg.default.historical_violence_incidents_sessionized', sql, flags=_re.IGNORECASE)
+        sql = _re.sub(r'(?<![.\w])historical_violence_incidents\b', 'iceberg.default.historical_violence_incidents_sessionized', sql, flags=_re.IGNORECASE)
+
         conn = trino_connect(
             host=self.trino_host,
             port=self.trino_port,
