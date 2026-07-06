@@ -891,9 +891,15 @@ async def get_camera_status():
                     is_violent = val.get("is_violent", False) or val.get("violence_detected", False)
                     score = float(val.get("risk_score") or val.get("violence_score") or 0)
                     if is_violent or score >= 0.5:
-                        status_map[cam] = "VIOLENCE_DETECTED"
+                        status_map[cam] = {
+                            "status": "VIOLENCE_DETECTED",
+                            "score": score
+                        }
                     elif cam not in status_map:
-                        status_map[cam] = "NORMAL"
+                        status_map[cam] = {
+                            "status": "NORMAL",
+                            "score": score
+                        }
             consumer.close()
         except Exception as e:
             logger.warning(f"Kafka camera-status error: {e}")
