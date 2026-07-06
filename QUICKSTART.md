@@ -99,7 +99,7 @@ curl http://localhost:5002/api/latency
 ## Bước 9 — Mở dashboard
 
 ```bash
-cd Violence-Urban-Safety-UI
+cd Violence-Urban-Safety-UI/frontend
 npm install && npm run dev
 # Mở http://localhost:5173
 ```

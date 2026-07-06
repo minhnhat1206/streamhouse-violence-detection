@@ -724,3 +724,30 @@ Chatbot:          WORKING — Fluss routing verified (15 camera locations return
 > Session 40: Hard reset, RTSP pipeline sole data source, 9624+ HOT events, chatbot routing 100% correct.  
 > Session 46: RTSP E2E verified (local → GCP → Fluss → chatbot). HLS player deployed to Vercel (hls.js + ngrok URL). S3 plugin baked permanently in Dockerfile.flink.
 
+---
+
+### 📝 Session 50 (06/07/2026) — Rework HLS Player & Fix Trino GCP S3
+
+#### 1. Đã hoàn thành:
+* **HLS Player kép (Dual Buffer CSS Switcher):** 
+  * Cải tiến `HLSPlayer.jsx` để nạp song song cả hai luồng video raw gốc (`cam_XX`) và luồng bounding box (`cam_XX_bbox`).
+  * Thực hiện chuyển đổi tức thời giữa hai luồng bằng thuộc tính CSS `opacity` trên 2 thẻ `<video>` thay vì reload Hls.js instance, giúp loại bỏ hoàn toàn màn hình đen và hiện tượng khựng/loading khi cảnh báo bạo lực xảy ra.
+* **Đồng bộ thời gian thực (Low-latency Sync):**
+  * Thiết lập Hls.js với `lowLatencyMode: true` và bộ đệm (buffer) cực nhỏ (2-4s) để đồng bộ khớp hình ảnh video với điểm số bạo lực (%) thời gian thực trả ra từ API `/vio` trên GPU.
+* **Sửa lỗi Trino GCP 503:**
+  * Khắc phục lỗi `org.apache.paimon.fs.UnsupportedSchemeException: Could not find a file io implementation for scheme 's3'` bằng cách cập nhật `docker/Dockerfile.trino` tải thêm thư viện `paimon-s3-0.8.2.jar` đưa vào plugin directory.
+  * Rebuild và force-recreate thành công container `trino-coordinator` trên GCP VM giúp chatbot truy vấn sự kiện lịch sử (warm layer) trơn tru trở lại.
+* **Reset GPU & Hoạt động ổn định:**
+  * Giải phóng GPU VRAM và khởi động lại sạch sẽ 5 camera visualizers và tiến trình `rtsp_inference_mock.py` đẩy Kafka events ổn định.
+
+#### 📂 Files thay đổi trong Session 50:
+| File | Thay đổi |
+|------|---------|
+| `Violence-Urban-Safety-UI/frontend/src/common/HLSPlayer.jsx` | Thêm cơ chế đệm kép dual video elements, tối ưu hóa low-latency buffer |
+| `Violence-Urban-Safety-UI/frontend/src/pages/LiveStreams.jsx` | Tích hợp lại HLSPlayer, tối ưu hóa HUD ở đáy card camera |
+| `Violence-Urban-Safety-UI/frontend/vite.config.js` | Đồng bộ dọn dẹp các proxy và config môi trường |
+| `docker/Dockerfile.trino` | Thêm lệnh tải `paimon-s3-0.8.2.jar` hỗ trợ MinIO/S3 |
+| `scripts/chatbot/main.py` | Cập nhật API endpoint chatbot trả về cấu trúc trạng thái mới |
+| `DEVELOPER_LOG.md` + `QUICKSTART.md` | Cập nhật devlog và hướng dẫn setup frontend |
+
+
