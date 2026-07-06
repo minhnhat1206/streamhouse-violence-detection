@@ -316,6 +316,10 @@ USER root
 # Copy patched paimon plugin (trino-hdfs-440.jar removed from main classloader dir)
 COPY --from=paimon-builder /paimon-plugin/ /usr/lib/trino/plugin/
 
+# Download paimon-s3 jar to enable S3 filesystem scheme (MinIO)
+RUN curl -fsSL -o /usr/lib/trino/plugin/paimon/paimon-s3-0.8.2.jar \
+    https://repo1.maven.org/maven2/org/apache/paimon/paimon-s3/0.8.2/paimon-s3-0.8.2.jar
+
 # Copy the hdfs/ support directory from the base image's iceberg plugin.
 #
 # Why: Trino 440's HdfsFileSystemLoader.load() unconditionally requires a 'hdfs/'
