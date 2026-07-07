@@ -55,8 +55,14 @@ def validate_record(record_str):
             if confidence < 0.85:
                 violations.append("LOW_CONFIDENCE_CRITICAL")
 
+        # 7. Sessionization contract: event violent phải mang incident_uid để
+        # downstream đếm đúng số VỤ (Warning only — producer cũ chưa có field này)
+        if is_violent is True and not record.get('incident_uid'):
+            violations.append("MISSING_INCIDENT_UID")
+
         # Determine validity (exclude warnings from rejection criteria)
-        critical_violations = [v for v in violations if v != "LOW_CONFIDENCE_CRITICAL"]
+        _WARNINGS = {"LOW_CONFIDENCE_CRITICAL", "MISSING_INCIDENT_UID"}
+        critical_violations = [v for v in violations if v not in _WARNINGS]
         is_valid = len(critical_violations) == 0
         
         record['violations'] = violations

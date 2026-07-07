@@ -1,8 +1,13 @@
 """
-Flink Streaming Job: Paimon Aggregation (Warm Gold Layer).
-Reads CDC changelog from Paimon 'violence_incidents' and produces:
-  - daily_incident_stats: daily aggregation by location
-  - camera_stats: daily aggregation by camera
+Flink Streaming Job: Paimon Aggregation (Warm Gold Layer) v2.
+
+Đọc CDC changelog từ fact_violence_incident (grain = 1 VỤ đã sessionize)
+thay vì raw events → daily_incident_stats / camera_stats đếm ĐÚNG số vụ
+(bản cũ COUNT(*) trên events: 1 vụ 20s = ~40 event vì producer gửi 0.5s/lần).
+
+Outputs (giữ nguyên tên bảng để Grafana/chatbot không phải đổi):
+  - daily_incident_stats: theo ngày × location (street từ dim_camera)
+  - camera_stats:         theo ngày × camera
 
 Run inside Flink JobManager:
     flink run -py /opt/flink/scripts/aggregate_paimon.py
@@ -14,19 +19,15 @@ from pyflink.table.statement_set import StatementSet
 
 
 def main():
-    # Setup Stream Table Environment
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)
     env.enable_checkpointing(30000)  # 30s — Paimon requires checkpointing
     t_env = StreamTableEnvironment.create(env)
 
     # Force parallelism=1 for ALL table operations.
-    # Without this, Paimon source inherits bucket count ('bucket'='4') → uses 4 task slots.
-    # 4 streaming jobs × 4 slots = 16 slots needed, starving SQL Gateway queries.
+    # Without this, Paimon source inherits bucket count → starves task slots.
     t_env.get_config().set("parallelism.default", "1")
     t_env.get_config().set("table.exec.resource.default-parallelism", "1")
-
-    # JARs pre-loaded in /opt/flink/lib/
 
     s3_endpoint = os.getenv("S3_ENDPOINT", "http://minio:9000")
     s3_access_key = os.getenv("MINIO_ROOT_USER", "minio")
@@ -44,30 +45,9 @@ def main():
             's3.path.style.access' = 'true'
         )
     """)
-
-    # 1b. Ensure Paimon tables exist (idempotent after hard reset)
     t_env.execute_sql("CREATE DATABASE IF NOT EXISTS `paimon`.`security`")
-    t_env.execute_sql("""
-        CREATE TABLE IF NOT EXISTS `paimon`.`security`.`violence_incidents` (
-            incident_id      STRING,
-            camera_id        STRING,
-            `timestamp`      TIMESTAMP(3),
-            risk_score       DOUBLE,
-            confidence       DOUBLE,
-            is_violent       BOOLEAN,
-            event_type       STRING,
-            location         STRING,
-            is_deleted       BOOLEAN,
-            frame_url        STRING,
-            thumbnail_b64    STRING,
-            frame_capture_ts BIGINT,
-            PRIMARY KEY (incident_id) NOT ENFORCED
-        ) WITH (
-            'merge-engine' = 'deduplicate',
-            'changelog-producer' = 'input',
-            'bucket' = '4'
-        )
-    """)
+
+    # 1b. Gold tables (schema không đổi so với v1)
     t_env.execute_sql("""
         CREATE TABLE IF NOT EXISTS `paimon`.`security`.`daily_incident_stats` (
             stat_date         DATE,
@@ -98,29 +78,27 @@ def main():
     """)
     print("[INFO] Paimon aggregation tables ready.")
 
-    # 2. Create a temporary source table with scan.parallelism=1 as a real table
-    #    property (not a hint). This is needed because the Paimon connector assigns
-    #    source parallelism = bucket count ('bucket'='4') and the OPTIONS() hint
-    #    does NOT override it in this Paimon/Flink version combination.
-    # Build the direct path to the Paimon table (connector approach, not catalog)
-    # This allows setting scan.parallelism=1 as a real table property, overriding
-    # the bucket-based source parallelism that the catalog connector assigns.
-    table_path = f"{warehouse_path}/security.db/violence_incidents"
-    print("[INFO] Creating temporary source table vi_stream (scan.parallelism=1)...")
+    # 2. Temporary source table trỏ thẳng path của fact với scan.parallelism=1
+    #    (catalog connector gán source parallelism = bucket count, hint không override được).
+    table_path = f"{warehouse_path}/security.db/fact_violence_incident"
+    print("[INFO] Creating temporary source table fact_stream (scan.parallelism=1)...")
     t_env.execute_sql(f"""
-        CREATE TEMPORARY TABLE vi_stream (
-            incident_id      STRING,
-            camera_id        STRING,
-            `timestamp`      TIMESTAMP(3),
-            risk_score       DOUBLE,
-            confidence       DOUBLE,
-            is_violent       BOOLEAN,
-            event_type       STRING,
-            location         STRING,
-            is_deleted       BOOLEAN,
-            frame_url        STRING,
-            thumbnail_b64    STRING,
-            frame_capture_ts BIGINT,
+        CREATE TEMPORARY TABLE fact_stream (
+            incident_id    STRING,
+            camera_id      STRING,
+            date_id        DATE,
+            time_id        INT,
+            event_type_id  INT,
+            start_ts       TIMESTAMP(3),
+            end_ts         TIMESTAMP(3),
+            duration_sec   INT,
+            event_count    BIGINT,
+            max_risk_score DOUBLE,
+            avg_confidence DOUBLE,
+            is_violent     BOOLEAN,
+            people_count   INT,
+            frame_url      STRING,
+            created_at     TIMESTAMP(3),
             PRIMARY KEY (incident_id) NOT ENFORCED
         ) WITH (
             'connector' = 'paimon',
@@ -129,49 +107,48 @@ def main():
             's3.access-key' = '{s3_access_key}',
             's3.secret-key' = '{s3_secret_key}',
             's3.path.style.access' = 'true',
-            'merge-engine' = 'deduplicate',
-            'changelog-producer' = 'input',
+            'merge-engine' = 'partial-update',
+            'changelog-producer' = 'lookup',
             'scan.parallelism' = '1'
         )
     """)
 
-    # 3. Use StatementSet to submit multiple INSERT jobs as one Flink job
     stmt_set: StatementSet = t_env.create_statement_set()
 
-    # 4. Daily incident stats aggregation
-    # Reads CDC changelog from vi_stream (p=1), groups by date + location
-    print("[INFO] Adding INSERT: daily_incident_stats aggregation...")
+    # 3. Daily stats theo location: join dim_camera (bản is_current) lấy street.
+    #    dim nhỏ (vài chục dòng) → regular changelog join chấp nhận được.
+    print("[INFO] Adding INSERT: daily_incident_stats (incident grain)...")
     stmt_set.add_insert_sql("""
         INSERT INTO paimon.security.daily_incident_stats
         SELECT
-            CAST(`timestamp` AS DATE) AS stat_date,
-            location,
-            COUNT(*) AS total_incidents,
-            COUNT(*) FILTER (WHERE is_violent = true) AS violent_incidents,
-            AVG(risk_score) AS avg_risk_score,
-            MAX(risk_score) AS max_risk_score
-        FROM vi_stream
-        GROUP BY CAST(`timestamp` AS DATE), location
+            f.date_id                                    AS stat_date,
+            COALESCE(c.street, 'Unknown')                AS location,
+            COUNT(*)                                     AS total_incidents,
+            COUNT(*) FILTER (WHERE f.is_violent = true)  AS violent_incidents,
+            AVG(f.max_risk_score)                        AS avg_risk_score,
+            MAX(f.max_risk_score)                        AS max_risk_score
+        FROM fact_stream f
+        LEFT JOIN `paimon`.`security`.`dim_camera` c
+            ON f.camera_id = c.camera_id AND c.is_current = true
+        GROUP BY f.date_id, COALESCE(c.street, 'Unknown')
     """)
 
-    # 5. Camera stats aggregation
-    # Reads CDC changelog from vi_stream (p=1), groups by date + camera
-    print("[INFO] Adding INSERT: camera_stats aggregation...")
+    # 4. Camera stats (incident grain)
+    print("[INFO] Adding INSERT: camera_stats (incident grain)...")
     stmt_set.add_insert_sql("""
         INSERT INTO paimon.security.camera_stats
         SELECT
-            CAST(`timestamp` AS DATE) AS stat_date,
+            date_id                                    AS stat_date,
             camera_id,
-            COUNT(*) AS total_incidents,
-            COUNT(*) FILTER (WHERE is_violent = true) AS violent_incidents,
-            AVG(risk_score) AS avg_risk_score,
-            AVG(confidence) AS avg_confidence
-        FROM vi_stream
-        GROUP BY CAST(`timestamp` AS DATE), camera_id
+            COUNT(*)                                   AS total_incidents,
+            COUNT(*) FILTER (WHERE is_violent = true)  AS violent_incidents,
+            AVG(max_risk_score)                        AS avg_risk_score,
+            AVG(avg_confidence)                        AS avg_confidence
+        FROM fact_stream
+        GROUP BY date_id, camera_id
     """)
 
-    # 5. Execute both INSERT statements as a single Flink job
-    print("[INFO] Starting Flink job: Paimon Aggregation (daily_incident_stats + camera_stats)...")
+    print("[INFO] Starting Flink job: Paimon Aggregation v2 (fact → gold)...")
     stmt_set.execute()
 
 

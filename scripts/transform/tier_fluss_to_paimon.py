@@ -85,30 +85,12 @@ def _register_paimon(t_env: StreamTableEnvironment) -> None:
 
 
 def _ensure_paimon_tables(t_env: StreamTableEnvironment) -> None:
-    t_env.execute_sql("""
-        CREATE TABLE IF NOT EXISTS `paimon`.`security`.`fact_violence_incidents` (
-            incident_id STRING,
-            camera_id   STRING,
-            `timestamp` TIMESTAMP(3),
-            date_id     DATE,
-            risk_score  DOUBLE,
-            confidence  DOUBLE,
-            is_violent  BOOLEAN,
-            event_type  STRING,
-            location    STRING,
-            ward_id     STRING,
-            district    STRING,
-            frame_url   STRING,
-            PRIMARY KEY (incident_id) NOT ENFORCED
-        ) WITH (
-            'merge-engine'       = 'deduplicate',
-            'changelog-producer' = 'input',
-            'bucket'             = '4'
-        )
-    """)
+    # Event grain v2 — partial-update: NULL không ghi đè giá trị đã có
+    # (frame_url do update_frame_url.py ghi trước đó được bảo toàn).
     t_env.execute_sql("""
         CREATE TABLE IF NOT EXISTS `paimon`.`security`.`violence_incidents` (
             incident_id      STRING,
+            incident_uid     STRING,
             camera_id        STRING,
             `timestamp`      TIMESTAMP(3),
             risk_score       DOUBLE,
@@ -120,10 +102,12 @@ def _ensure_paimon_tables(t_env: StreamTableEnvironment) -> None:
             frame_url        STRING,
             thumbnail_b64    STRING,
             frame_capture_ts BIGINT,
+            people_json      STRING,
+            people_count     INT,
             PRIMARY KEY (incident_id) NOT ENFORCED
         ) WITH (
-            'merge-engine'       = 'deduplicate',
-            'changelog-producer' = 'input',
+            'merge-engine'       = 'partial-update',
+            'changelog-producer' = 'lookup',
             'bucket'             = '4'
         )
     """)
@@ -146,31 +130,14 @@ def phase1_fluss_to_paimon(cutoff_str: str) -> bool:
 
     stmt: StatementSet = t_env.create_statement_set()
 
-    # Insert into star-schema fact table
-    stmt.add_insert_sql(f"""
-        INSERT INTO `paimon`.`security`.`fact_violence_incidents`
-        SELECT
-            incident_id,
-            camera_id,
-            `timestamp`,
-            CAST(`timestamp` AS DATE)   AS date_id,
-            risk_score,
-            confidence,
-            is_violent,
-            event_type,
-            location,
-            ward_id,
-            district,
-            CAST(NULL AS STRING)        AS frame_url
-        FROM `fluss`.`security`.`hot_violence_alerts`
-        WHERE `timestamp` < TO_TIMESTAMP('{cutoff_str}')
-    """)
-
-    # Insert into backward-compat table (aggregate_paimon.py reads this)
+    # Event grain → Paimon (partial-update: NULL frame_url/thumbnail KHÔNG ghi đè
+    # giá trị thật đã được update_frame_url.py ghi trước đó).
+    # Fact grain=1 vụ do build_incident_facts.py đảm nhiệm (chạy sau tiering).
     stmt.add_insert_sql(f"""
         INSERT INTO `paimon`.`security`.`violence_incidents`
         SELECT
             incident_id,
+            incident_uid,
             camera_id,
             `timestamp`,
             risk_score,
@@ -181,7 +148,9 @@ def phase1_fluss_to_paimon(cutoff_str: str) -> bool:
             CAST(false AS BOOLEAN)      AS is_deleted,
             CAST(NULL AS STRING)        AS frame_url,
             CAST(NULL AS STRING)        AS thumbnail_b64,
-            CAST(NULL AS BIGINT)        AS frame_capture_ts
+            CAST(NULL AS BIGINT)        AS frame_capture_ts,
+            CAST(NULL AS STRING)        AS people_json,
+            people_count
         FROM `fluss`.`security`.`hot_violence_alerts`
         WHERE `timestamp` < TO_TIMESTAMP('{cutoff_str}')
     """)
@@ -225,6 +194,18 @@ def phase2_delete_from_fluss(cutoff_str: str) -> bool:
 
     t_env = _make_streaming_env()
     _register_fluss(t_env)
+
+    # 2b. Xoá các VỤ đã đóng và aged khỏi hot_violence_incidents (best-effort).
+    # Vụ đã được build vào fact_violence_incident (Paimon) bởi build_incident_facts.py.
+    try:
+        r2 = t_env.execute_sql(f"""
+            DELETE FROM `fluss`.`security`.`hot_violence_incidents`
+            WHERE last_ts < TO_TIMESTAMP('{cutoff_str}')
+        """)
+        r2.wait(timeout_ms=PHASE2_WAIT_SECS * 1000)
+        print("[INFO] Phase 2b: aged incidents removed from hot_violence_incidents.")
+    except Exception as e:
+        print(f"[WARN] Phase 2b DELETE hot_violence_incidents failed (non-fatal): {e}")
 
     try:
         result = t_env.execute_sql(f"""

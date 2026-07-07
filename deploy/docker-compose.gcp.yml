@@ -345,6 +345,8 @@ services:
       - .env.gcp
     volumes:
       - ../scripts/transform:/opt/flink/scripts
+      # camera_registry.csv — nguồn duy nhất seed dim_camera (init_star_schema_v2)
+      - ../data/metadata:/opt/flink/data/metadata:ro
     depends_on:
       jobmanager:
         condition: service_healthy

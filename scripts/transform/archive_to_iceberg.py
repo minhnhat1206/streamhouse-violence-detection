@@ -1,11 +1,15 @@
 """
-Flink Batch Job: Paimon → Iceberg Archival (Cold Storage).
-Reads aged data from Paimon 'violence_incidents' (older than 7 days)
-and archives to Iceberg 'historical_violence_incidents'.
+Flink Batch Job: Paimon → Iceberg Archival (Cold Storage) v2.
 
-Uses LEFT ANTI JOIN to avoid duplicates on re-runs.
+Archives 2 bảng (older than ARCHIVE_INTERVAL_DAYS):
+  1. fact_violence_incident → iceberg.security.historical_incident_facts
+     (grain = 1 VỤ, GIỮ frame_url/duration/people_count — bản cũ mất frame_url)
+  2. violence_incidents (event grain) → iceberg.security.historical_violence_incidents
+     (giữ nguyên schema cũ cho tương thích)
 
-Designed to run on a weekly schedule (not continuous streaming).
+Uses NOT EXISTS to avoid duplicates on re-runs.
+
+Designed to run on a daily schedule (pipeline_manager, ARCHIVE_HOUR).
 Run inside Flink JobManager:
     flink run -py /opt/flink/scripts/archive_to_iceberg.py
 """
@@ -79,10 +83,60 @@ def main():
         )
     """)
 
+    # 3b. Fact archive table (grain = 1 vụ, GIỮ frame_url)
+    t_env.execute_sql("""
+        CREATE TABLE IF NOT EXISTS `iceberg`.`security`.`historical_incident_facts` (
+            incident_id    STRING,
+            camera_id      STRING,
+            date_id        DATE,
+            time_id        INT,
+            event_type_id  INT,
+            start_ts       TIMESTAMP(6),
+            end_ts         TIMESTAMP(6),
+            duration_sec   INT,
+            event_count    BIGINT,
+            max_risk_score DOUBLE,
+            avg_confidence DOUBLE,
+            is_violent     BOOLEAN,
+            people_count   INT,
+            frame_url      STRING
+        ) PARTITIONED BY (date_id)
+        WITH (
+            'format-version' = '2'
+        )
+    """)
+
     # 4. Archive aged data: Paimon → Iceberg (deduplicated via NOT EXISTS)
     # NOTE: Production filter is '7' DAY. For fresh-reset testing, archive all data.
     archive_interval = os.getenv("ARCHIVE_INTERVAL_DAYS", "7")
-    print(f"[INFO] Starting archival: Paimon → Iceberg (data older than {archive_interval} days)...")
+
+    print(f"[INFO] Archiving incident FACTS older than {archive_interval} days...")
+    t_env.execute_sql(f"""
+        INSERT INTO iceberg.security.historical_incident_facts
+        SELECT
+            f.incident_id,
+            f.camera_id,
+            f.date_id,
+            f.time_id,
+            f.event_type_id,
+            CAST(f.start_ts AS TIMESTAMP(6)),
+            CAST(f.end_ts AS TIMESTAMP(6)),
+            f.duration_sec,
+            f.event_count,
+            f.max_risk_score,
+            f.avg_confidence,
+            f.is_violent,
+            f.people_count,
+            f.frame_url
+        FROM paimon.security.fact_violence_incident f
+        WHERE f.start_ts < LOCALTIMESTAMP - INTERVAL '{archive_interval}' DAY
+          AND NOT EXISTS (
+              SELECT 1 FROM iceberg.security.historical_incident_facts i
+              WHERE i.incident_id = f.incident_id
+          )
+    """).wait()
+
+    print(f"[INFO] Archiving raw EVENTS older than {archive_interval} days...")
     result = t_env.execute_sql(f"""
         INSERT INTO iceberg.security.historical_violence_incidents
         SELECT

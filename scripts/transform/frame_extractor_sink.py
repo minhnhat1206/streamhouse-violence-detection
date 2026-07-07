@@ -67,6 +67,7 @@ def upload_frame(
     incident_date: str,
     incident_id: str,
     risk_score: float,
+    incident_uid: Optional[str] = None,
 ) -> Optional[str]:
     """
     Upload base64 frame to S3.
@@ -74,7 +75,11 @@ def upload_frame(
     Returns:
         S3 URL if successful, None otherwise
     """
-    s3_key = f"{camera_id}/{incident_date}/{incident_id}.jpg"
+    # Gom ảnh theo VỤ khi có incident_uid: {camera}/{date}/{incident_uid}/{event}.jpg
+    if incident_uid:
+        s3_key = f"{camera_id}/{incident_date}/{incident_uid}/{incident_id}.jpg"
+    else:
+        s3_key = f"{camera_id}/{incident_date}/{incident_id}.jpg"
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -124,6 +129,11 @@ def process_record(
         risk_score = record.get("risk_score", 0.0)
         timestamp_str = record.get("timestamp", "")
 
+        # Chỉ lưu evidence cho event VIOLENT — heartbeat 5s/camera không phải
+        # bằng chứng, upload tất cả sẽ rác MinIO (hàng trăm nghìn ảnh 160x90).
+        if not record.get("is_violent"):
+            return True
+
         # Extract thumbnail from metadata
         metadata = record.get("metadata", {})
         if isinstance(metadata, str):
@@ -162,6 +172,7 @@ def process_record(
             incident_date,
             incident_id,
             risk_score,
+            incident_uid=record.get("incident_uid"),
         )
 
         if not frame_url:
@@ -177,11 +188,15 @@ def process_record(
             return False
 
         # Enrich and publish to downstream topic
-        # Promote thumbnail_b64 to a top-level field so Flink job can map it directly
+        # Promote thumbnail_b64 + people (bbox list) to top-level fields so the
+        # Flink job (update_frame_url.py) can map them directly into Paimon columns.
         enriched = dict(record)
         enriched["frame_url"] = frame_url
         enriched["frame_capture_ts"] = int(datetime.utcnow().timestamp() * 1000)
         enriched["thumbnail_b64"] = thumbnail_b64  # promote from metadata
+        people = metadata.get("people") or []
+        enriched["people_json"] = json.dumps(people, ensure_ascii=False)
+        enriched["people_count"] = record.get("people_count", len(people))
 
         producer.send("hot-violence-frames-uploaded", value=enriched)
         logger.info(f"[FRAME] Processed {incident_id} → {frame_url}")

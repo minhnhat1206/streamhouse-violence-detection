@@ -78,6 +78,15 @@ STREAMING_JOBS: dict[str, dict] = {
 # ── Periodic tiering job: Fluss HOT → Paimon WARM ──────────────────────────────
 TIERING_SCRIPT = f"{SCRIPTS_DIR}/tier_fluss_to_paimon.py"
 
+# ── Incident fact build: events (Paimon) → fact_violence_incident (grain=1 vụ) ──
+# Chạy ngay sau mỗi lần tiering để fact luôn theo kịp events.
+FACT_BUILD_SCRIPT = f"{SCRIPTS_DIR}/build_incident_facts.py"
+
+# ── Nguồn metadata camera DUY NHẤT (bỏ hardcode 15 camera cũ) ──────────────────
+CAMERA_REGISTRY_FILE = os.getenv(
+    "CAMERA_REGISTRY_FILE", "/opt/flink/data/metadata/camera_registry.csv"
+)
+
 # ── Batch archival job: Paimon WARM → Iceberg COLD ─────────────────────────────
 ARCHIVE_SCRIPT = f"{SCRIPTS_DIR}/archive_to_iceberg.py"
 
@@ -251,23 +260,28 @@ def _seed_dim_camera_via_gateway() -> bool:
     """
     gateway = os.getenv("FLINK_GATEWAY_URL", "http://flink-sql-gateway:8083")
 
-    cameras = [
-        ("cam_01", "Đường Nguyễn Huệ",         "Phường Bến Nghé",          "Quận 1", 10.77845, 106.70014),
-        ("cam_02", "Đường Lê Lợi",              "Phường Nguyễn Thái Bình",  "Quận 1", 10.77322, 106.69453),
-        ("cam_03", "Đường Nguyễn Thái Học",     "Phường Bến Thành",         "Quận 1", 10.77407, 106.70229),
-        ("cam_04", "Đường Lê Thánh Tôn",        "Phường Cầu Ông Lãnh",      "Quận 1", 10.77613, 106.69705),
-        ("cam_05", "Đường Pasteur",              "Phường Phạm Ngũ Lão",      "Quận 1", 10.77157, 106.70435),
-        ("cam_06", "Đường Trần Hưng Đạo",       "Phường Tân Định",          "Quận 1", 10.77336, 106.70019),
-        ("cam_07", "Đường Đồng Khởi",           "Phường Đa Kao",            "Quận 1", 10.77833, 106.69332),
-        ("cam_08", "Đường Hai Bà Trưng",        "Phường Bến Thành",         "Quận 1", 10.78446, 106.70214),
-        ("cam_09", "Đường Nguyễn Du",           "Phường Nguyễn Cư Trinh",   "Quận 1", 10.77002, 106.70027),
-        ("cam_10", "Đường Võ Văn Kiệt",         "Phường Cầu Kho",           "Quận 1", 10.78266, 106.70826),
-        ("cam_11", "Đường Nguyễn Công Trứ",     "Phường Tân Định",          "Quận 1", 10.77552, 106.70748),
-        ("cam_12", "Đường Công Trường Mê Linh", "Phường Nguyễn Thái Bình",  "Quận 1", 10.77956, 106.70549),
-        ("cam_13", "Đường Hàm Nghi",            "Phường Phạm Ngũ Lão",      "Quận 1", 10.78320, 106.69630),
-        ("cam_14", "Đường Nguyễn Bỉnh Khiêm",  "Phường Bến Nghé",          "Quận 1", 10.78074, 106.70235),
-        ("cam_15", "Đường Trương Định",         "Phường Đa Kao",            "Quận 1", 10.77709, 106.69288),
-    ]
+    # Đọc từ camera_registry.csv — nguồn duy nhất (trước đây hardcode 15 camera
+    # ở 3 nơi khác nhau, lệch với CSV chỉ còn 5 camera kịch bản RTSP-01..05).
+    import csv as _csv
+    cameras: list[tuple] = []
+    try:
+        with open(CAMERA_REGISTRY_FILE, encoding="utf-8") as f:
+            for row in _csv.DictReader(f):
+                cameras.append((
+                    row["camera_id"],
+                    row.get("street", ""),
+                    row.get("ward", ""),
+                    row.get("district", ""),
+                    float(row.get("latitude") or 0),
+                    float(row.get("longitude") or 0),
+                ))
+    except Exception as exc:
+        log.error("Cannot read camera registry %s: %s — dim_camera NOT seeded.",
+                  CAMERA_REGISTRY_FILE, exc)
+        return False
+    if not cameras:
+        log.error("Camera registry %s is empty — dim_camera NOT seeded.", CAMERA_REGISTRY_FILE)
+        return False
 
     def _gw_exec(session_id: str, sql: str, timeout: int = 60) -> str:
         resp = urllib.request.urlopen(
@@ -336,18 +350,18 @@ def _run_star_schema_setup() -> bool:
     Nhưng INSERT vào Fluss primary key table cần streaming checkpoint →
     dùng SQL Gateway để seed dim_camera sau khi DDL hoàn thành.
     """
-    setup_script = f"{SCRIPTS_DIR}/setup_star_schema.py"
+    setup_script = f"{SCRIPTS_DIR}/init_star_schema_v2.py"
     if not os.path.exists(setup_script):
-        log.warning("setup_star_schema.py not found at %s — skipping.", setup_script)
+        log.warning("init_star_schema_v2.py not found at %s — skipping.", setup_script)
         return True
 
-    log.info("Running star schema DDL setup: %s", setup_script)
+    log.info("Running star schema v2 DDL setup: %s", setup_script)
     ok, err = _run_flink(
         args=[
             "run",
             "--python", setup_script,
             "-Dexecution.runtime-mode=BATCH",
-            "-Dpipeline.name=setup_star_schema",
+            "-Dpipeline.name=init_star_schema_v2",
         ],
         timeout=600,
     )
@@ -394,6 +408,31 @@ def run_tiering_job() -> bool:
         log.info("✓ Tiering job completed successfully.")
     else:
         log.error("✗ Tiering job failed: %s", err)
+    return ok
+
+
+def run_fact_build_job() -> bool:
+    """
+    Chạy build_incident_facts.py (batch, blocking) — events → fact grain 1 vụ.
+    Chạy ngay sau tiering để fact_violence_incident luôn theo kịp dữ liệu.
+    """
+    log.info("Starting incident fact build: Paimon events → fact_violence_incident")
+    log.info("  script: %s", FACT_BUILD_SCRIPT)
+
+    ok, err = _run_flink(
+        args=[
+            "run",
+            "--python", FACT_BUILD_SCRIPT,
+            "-Dexecution.runtime-mode=BATCH",
+            "-Dpipeline.name=build_incident_facts",
+        ],
+        timeout=600,
+    )
+
+    if ok:
+        log.info("✓ Incident fact build completed.")
+    else:
+        log.error("✗ Incident fact build failed: %s", err)
     return ok
 
 
@@ -580,12 +619,13 @@ def main() -> None:
         log.info("--- Watchdog tick @ %s ---", datetime.now().strftime("%H:%M:%S"))
         watchdog_tick()
 
-        # Tiering check (Fluss HOT → Paimon WARM)
+        # Tiering check (Fluss HOT → Paimon WARM), sau đó build fact (grain = 1 vụ)
         if should_run_tiering(last_tiering):
             log.info("--- Tiering triggered @ %s ---",
                      datetime.now().strftime("%Y-%m-%d %H:%M"))
             if run_tiering_job():
                 last_tiering = datetime.now()
+                run_fact_build_job()
             else:
                 log.warning("Tiering failed — will retry next check interval.")
 

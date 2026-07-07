@@ -1,13 +1,18 @@
 """
-Flink Streaming Job: Kafka → Temporal Join → Fluss HOT (Enriched).
+Flink Streaming Job: Kafka → Temporal Join → Fluss HOT (Enriched) v2.
 
 Streamhouse write-once pattern:
   Kafka hot-violence-alerts-valid
     → PROCTIME() temporal join with fluss.security.dim_camera
-    → INSERT INTO fluss.security.hot_violence_alerts (with location enrichment)
+    → INSERT INTO fluss.security.hot_violence_alerts   (event grain, enriched)
+    → INSERT INTO fluss.security.hot_violence_incidents (grain = 1 VỤ,
+      GROUP BY incident_uid — upsert liên tục khi vụ còn diễn ra)
 
-Replaces sink_to_fluss.py (no enrichment) + dual-write sink_to_paimon_star.py.
-Data moves to Paimon WARM via tier_fluss_to_paimon.py (every TIERING_INTERVAL_MINS).
+Đếm số vụ realtime = COUNT trên hot_violence_incidents (KHÔNG đếm events —
+events phát 0.5s/lần khi violent nên 1 vụ ~20s = ~40 event).
+
+DDL dùng CREATE IF NOT EXISTS — schema migration làm ở init_star_schema_v2.py,
+job streaming restart thường xuyên không được phép DROP dữ liệu HOT.
 
 Run inside Flink JobManager (submitted by pipeline_manager.py, --detached):
     flink run --detached -py /opt/flink/scripts/sink_to_fluss_enriched.py
@@ -40,29 +45,46 @@ def main():
     """)
     t_env.execute_sql("CREATE DATABASE IF NOT EXISTS `fluss`.`security`")
 
-    # ── 2. Ensure hot_violence_alerts has enriched schema ────────────────────────
-    # Extended schema adds location/ward_id/district vs the old sink_to_fluss.py.
-    # IF the old table exists (no location columns), DROP it first — HOT data is
-    # ephemeral (tiered every 30 min), so data loss during upgrade is acceptable.
-    t_env.execute_sql("DROP TABLE IF EXISTS `fluss`.`security`.`hot_violence_alerts`")
+    # ── 2. Ensure HOT tables exist (schema v2 — migration ở init_star_schema_v2) ─
     t_env.execute_sql("""
-        CREATE TABLE `fluss`.`security`.`hot_violence_alerts` (
-            incident_id STRING,
-            camera_id   STRING,
-            `timestamp` TIMESTAMP(3),
-            risk_score  DOUBLE,
-            confidence  DOUBLE,
-            is_violent  BOOLEAN,
-            event_type  STRING,
-            location    STRING,
-            ward_id     STRING,
-            district    STRING,
+        CREATE TABLE IF NOT EXISTS `fluss`.`security`.`hot_violence_alerts` (
+            incident_id  STRING,
+            incident_uid STRING,
+            camera_id    STRING,
+            `timestamp`  TIMESTAMP(3),
+            risk_score   DOUBLE,
+            confidence   DOUBLE,
+            is_violent   BOOLEAN,
+            event_type   STRING,
+            location     STRING,
+            ward_id      STRING,
+            district     STRING,
+            people_count INT,
             PRIMARY KEY (incident_id) NOT ENFORCED
         ) WITH (
             'bucket.num' = '3'
         )
     """)
-    print("[INFO] Fluss table hot_violence_alerts ready (enriched schema: +location/ward_id/district).")
+    t_env.execute_sql("""
+        CREATE TABLE IF NOT EXISTS `fluss`.`security`.`hot_violence_incidents` (
+            incident_uid   STRING,
+            camera_id      STRING,
+            start_ts       TIMESTAMP(3),
+            last_ts        TIMESTAMP(3),
+            event_count    BIGINT,
+            max_risk_score DOUBLE,
+            avg_confidence DOUBLE,
+            event_type     STRING,
+            location       STRING,
+            ward_id        STRING,
+            district       STRING,
+            people_count   INT,
+            PRIMARY KEY (incident_uid) NOT ENFORCED
+        ) WITH (
+            'bucket.num' = '3'
+        )
+    """)
+    print("[INFO] Fluss tables ready: hot_violence_alerts (v2) + hot_violence_incidents.")
 
     # dim_camera — versioned primary key table for temporal joins (schema unchanged)
     t_env.execute_sql("""
@@ -86,16 +108,18 @@ def main():
     # proc_time AS PROCTIME() is required for temporal join with Fluss primary key table.
     t_env.execute_sql(f"""
         CREATE TEMPORARY TABLE kafka_valid_alerts (
-            event_id    STRING,
-            camera_id   STRING,
-            `timestamp` STRING,
-            risk_score  DOUBLE,
-            confidence  DOUBLE,
-            is_violent  BOOLEAN,
-            event_type  STRING,
-            location    STRING,
-            metadata    STRING,
-            is_valid    BOOLEAN,
+            event_id     STRING,
+            incident_uid STRING,
+            camera_id    STRING,
+            `timestamp`  STRING,
+            risk_score   DOUBLE,
+            confidence   DOUBLE,
+            is_violent   BOOLEAN,
+            event_type   STRING,
+            location     STRING,
+            people_count INT,
+            metadata     STRING,
+            is_valid     BOOLEAN,
             row_time  AS TO_TIMESTAMP(SUBSTR(REPLACE(REPLACE(`timestamp`, 'T', ' '), 'Z', ''), 1, 23)),
             proc_time AS PROCTIME(),
             WATERMARK FOR row_time AS row_time - INTERVAL '5' SECOND
@@ -105,19 +129,23 @@ def main():
             'properties.bootstrap.servers' = '{kafka_broker}',
             'properties.group.id'          = 'fluss-enriched-sink-group',
             'scan.startup.mode'            = 'latest-offset',
-            'format'                       = 'json'
+            'format'                       = 'json',
+            'json.ignore-parse-errors'     = 'true'
         )
     """)
     print("[INFO] Kafka source table ready.")
 
-    # ── 4. Insert into Fluss with temporal join enrichment ───────────────────────
-    # Temporal join: enriches each event with dim_camera state AT event processing time.
-    # COALESCE ensures fallback to Kafka's raw location if dim_camera lookup misses.
-    print("[INFO] Starting Flink job: Kafka → Temporal Join dim_camera → Fluss HOT (enriched)...")
-    t_env.execute_sql("""
+    # ── 4. StatementSet: events + incidents trong 1 Flink job ────────────────────
+    # (a) Event grain: temporal join dim_camera (location tại thời điểm xử lý),
+    #     COALESCE fallback về location thô từ Kafka nếu dim_camera miss.
+    # (b) Incident grain: GROUP BY incident_uid → upsert vào Fluss PK table;
+    #     mỗi event mới của vụ cập nhật last_ts/event_count/max_risk (changelog upsert).
+    stmt = t_env.create_statement_set()
+    stmt.add_insert_sql("""
         INSERT INTO `fluss`.`security`.`hot_violence_alerts`
         SELECT
             a.event_id                                  AS incident_id,
+            a.incident_uid,
             a.camera_id,
             a.row_time                                  AS `timestamp`,
             a.risk_score,
@@ -126,13 +154,40 @@ def main():
             a.event_type,
             COALESCE(c.location, a.location, 'Unknown') AS location,
             COALESCE(c.ward_id,  'Unknown')             AS ward_id,
-            COALESCE(c.district, 'Unknown')             AS district
+            COALESCE(c.district, 'Unknown')             AS district,
+            COALESCE(a.people_count, 0)                 AS people_count
         FROM kafka_valid_alerts AS a
         LEFT JOIN `fluss`.`security`.`dim_camera`
             FOR SYSTEM_TIME AS OF a.proc_time AS c
         ON a.camera_id = c.camera_id
         WHERE a.is_valid = true
     """)
+    stmt.add_insert_sql("""
+        INSERT INTO `fluss`.`security`.`hot_violence_incidents`
+        SELECT
+            a.incident_uid,
+            a.camera_id,
+            MIN(a.row_time)                                   AS start_ts,
+            MAX(a.row_time)                                   AS last_ts,
+            COUNT(*)                                          AS event_count,
+            MAX(a.risk_score)                                 AS max_risk_score,
+            AVG(a.confidence)                                 AS avg_confidence,
+            MAX(a.event_type)                                 AS event_type,
+            COALESCE(MAX(c.location), MAX(a.location), 'Unknown') AS location,
+            COALESCE(MAX(c.ward_id),  'Unknown')              AS ward_id,
+            COALESCE(MAX(c.district), 'Unknown')              AS district,
+            MAX(COALESCE(a.people_count, 0))                  AS people_count
+        FROM kafka_valid_alerts AS a
+        LEFT JOIN `fluss`.`security`.`dim_camera`
+            FOR SYSTEM_TIME AS OF a.proc_time AS c
+        ON a.camera_id = c.camera_id
+        WHERE a.is_valid = true
+          AND a.incident_uid IS NOT NULL
+        GROUP BY a.incident_uid, a.camera_id
+    """)
+
+    print("[INFO] Starting Flink job: Kafka → Fluss HOT (events + incidents)...")
+    stmt.execute()
 
 
 if __name__ == "__main__":

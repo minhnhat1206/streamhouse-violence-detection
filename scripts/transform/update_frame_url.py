@@ -57,6 +57,7 @@ def main():
     t_env.execute_sql(f"""
         CREATE TEMPORARY TABLE kafka_frames_uploaded (
             event_id          STRING,
+            incident_uid      STRING,
             camera_id         STRING,
             `timestamp`       STRING,
             risk_score        DOUBLE,
@@ -64,6 +65,8 @@ def main():
             is_violent        BOOLEAN,
             event_type        STRING,
             location          STRING,
+            people_count      INT,
+            people_json       STRING,
             metadata          STRING,
             is_valid          BOOLEAN,
             frame_url         STRING,
@@ -79,19 +82,21 @@ def main():
             'properties.bootstrap.servers'  = '{kafka_broker}',
             'properties.group.id'           = 'paimon-frame-update-group',
             'scan.startup.mode'             = 'latest-offset',
-            'format'                        = 'json'
+            'format'                        = 'json',
+            'json.ignore-parse-errors'      = 'true'
         )
     """)
 
     # ── 3. UPSERT into Paimon ─────────────────────────────────────────────────
-    # merge-engine='deduplicate' → latest record per incident_id wins.
-    # This INSERT replaces the earlier row (frame_url=NULL) written by
-    # sink_to_paimon.py with this row that has the real MinIO URL.
+    # merge-engine='partial-update' (v2) → mỗi cột non-NULL mới nhất thắng.
+    # Dòng tiering (frame_url=NULL) đến sau KHÔNG còn xoá URL đã ghi ở đây
+    # (fix bug clobber của bản deduplicate cũ).
     print("[INFO] Starting Flink job: frame_url UPSERT → Paimon...", flush=True)
     t_env.execute_sql("""
         INSERT INTO paimon.security.violence_incidents
         SELECT
             event_id            AS incident_id,
+            incident_uid,
             camera_id,
             row_time            AS `timestamp`,
             risk_score,
@@ -102,7 +107,9 @@ def main():
             CAST(false AS BOOLEAN) AS is_deleted,
             frame_url,
             thumbnail_b64,
-            frame_capture_ts
+            frame_capture_ts,
+            people_json,
+            people_count
         FROM kafka_frames_uploaded
         WHERE is_valid = true
           AND frame_url IS NOT NULL

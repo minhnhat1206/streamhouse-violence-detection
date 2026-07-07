@@ -53,6 +53,16 @@ ACTIVE_CAMERAS = set(_active_env.split(",")) if _active_env else None
 HEARTBEAT_INTERVAL = 5.0
 ALERT_INTERVAL = 0.5
 
+# Sessionization: một VỤ (incident) = chuỗi event violent liên tục của 1 camera.
+# incident_uid sinh khi violence bắt đầu, giữ nguyên đến khi hết violent liên tục
+# INCIDENT_GAP_SECONDS (chống flapping score quanh threshold). Downstream (Fluss/
+# Paimon/Iceberg) GROUP BY incident_uid để đếm đúng số vụ thay vì đếm raw event.
+INCIDENT_GAP_SECONDS = float(os.getenv("INCIDENT_GAP_SECONDS", "30"))
+
+# Kích thước ảnh evidence: to khi đang violent (thấy rõ bbox), nhỏ cho heartbeat.
+VIOLENT_FRAME_SCALE = os.getenv("VIOLENT_FRAME_SCALE", "640:360")
+NORMAL_FRAME_SCALE = os.getenv("NORMAL_FRAME_SCALE", "160:90")
+
 PROB_START_VIOLENCE = 0.02  # Probability of starting violence event
 PROB_STOP_VIOLENCE = 0.10
 
@@ -85,14 +95,16 @@ def load_camera_registry(csv_path: str) -> dict:
 
 # ================= FRAME CAPTURE (ffmpeg) =================
 
-def capture_jpeg(rtsp_url: str, timeout_s: int = RTSP_TIMEOUT_S) -> tuple[bool, str]:
+def capture_jpeg(rtsp_url: str, timeout_s: int = RTSP_TIMEOUT_S,
+                 scale: str = NORMAL_FRAME_SCALE) -> tuple[bool, str]:
     """
     Capture one JPEG frame from an RTSP stream using ffmpeg.
-    Resizes inline to 160x90 — no OpenCV or numpy needed.
-    Fallback: generate solid-color fake frame if RTSP unavailable (for testing).
+    Resizes inline theo `scale` (violent: 640x360 để thấy rõ bbox; heartbeat: 160x90).
 
     Returns:
         (success, base64_jpeg_string)
+        success=False khi ffmpeg thất bại → caller fallback từ stream _bbox về raw.
+        Khi semaphore đầy trả (True, fake) để pipeline không nghẽn.
     """
     # Fake JPEG for development/testing (when RTSP unavailable)
     fake_jpeg_hex = "ffd8ffe000104a46494600010100000100010000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffdb00430109090909090c0b0c0c0c0c190d0d1932211c213232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232ffc0000b080160010101110200ffc4000b0001010000000000000000ffda00080101000000003f00d2cf2075eb4e06ffd9"
@@ -120,7 +132,7 @@ def capture_jpeg(rtsp_url: str, timeout_s: int = RTSP_TIMEOUT_S) -> tuple[bool, 
                 # Note: -stimeout removed in ffmpeg 5+; we rely on proc.wait(timeout=)
                 "-i",              rtsp_url,
                 "-vframes",        "1",
-                "-vf",             "scale=160:90",
+                "-vf",             f"scale={scale}",
                 tmppath,
             ],
             stdin=subprocess.DEVNULL,
@@ -131,15 +143,15 @@ def capture_jpeg(rtsp_url: str, timeout_s: int = RTSP_TIMEOUT_S) -> tuple[bool, 
         if proc.returncode == 0 and _os.path.getsize(tmppath) > 0:
             with open(tmppath, "rb") as fh:
                 return True, base64.b64encode(fh.read()).decode("utf-8")
-        return True, fake_jpeg_b64
+        return False, fake_jpeg_b64
 
     except subprocess.TimeoutExpired:
         if proc:
             proc.kill()
             proc.wait()
-        return True, fake_jpeg_b64
+        return False, fake_jpeg_b64
     except Exception:
-        return True, fake_jpeg_b64
+        return False, fake_jpeg_b64
     finally:
         _capture_semaphore.release()
         try:
@@ -206,6 +218,9 @@ class CameraWorker(threading.Thread):
         self.is_violent = False
         self.last_sent = 0.0
         self._last_thumbnail = ""  # cache — reused between sends
+        # Episode (vụ) đang mở của camera này — None khi không có bạo lực
+        self.incident_uid = None
+        self._last_violent_ts = 0.0
 
     # (removed _update_state as it's now queried from the real visualizer status)
 
@@ -218,12 +233,14 @@ class CameraWorker(threading.Thread):
         kafka_sent_at = time.time()
         payload = {
             "event_id": str(uuid.uuid4()),
+            "incident_uid": self.incident_uid,
             "camera_id": self.cam_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "is_violent": result["is_violent"],
             "risk_score": result["risk_score"],
             "confidence": result["confidence"],
             "event_type": result["event_type"],
+            "people_count": len(result.get("people", [])),
             "location": {
                 "city": self.meta.get("city", ""),
                 "district": self.meta.get("district", ""),
@@ -290,12 +307,14 @@ class CameraWorker(threading.Thread):
                 # Convert e.g., rtsp://localhost:8554/cam_01 to rtsp://localhost:8554/cam_01_bbox
                 capture_url = self.rtsp_url + "_bbox"
 
-            success, thumbnail_b64 = capture_jpeg(capture_url, RTSP_TIMEOUT_S)
+            # Violent (theo kết quả vòng trước) → ảnh 640x360 để bbox nhìn rõ trong evidence
+            frame_scale = VIOLENT_FRAME_SCALE if self.is_violent else NORMAL_FRAME_SCALE
+            success, thumbnail_b64 = capture_jpeg(capture_url, RTSP_TIMEOUT_S, scale=frame_scale)
             if not success and capture_url != self.rtsp_url:
                 # Fallback to raw stream if bbox capture failed
                 print(f"[{self.cam_id}] Bbox stream capture failed, falling back to raw stream...", flush=True)
                 capture_url = self.rtsp_url
-                success, thumbnail_b64 = capture_jpeg(capture_url, RTSP_TIMEOUT_S)
+                success, thumbnail_b64 = capture_jpeg(capture_url, RTSP_TIMEOUT_S, scale=frame_scale)
 
             if not success:
                 if connected:
@@ -318,6 +337,19 @@ class CameraWorker(threading.Thread):
             result["bbox_status"] = bbox_status
             result["people"] = people_list
             self.is_violent = result["is_violent"]
+
+            # Sessionization: mở/đóng vụ (incident) theo trạng thái violent.
+            # uid giữ nguyên qua các dip ngắn (< INCIDENT_GAP_SECONDS) để 1 vụ
+            # không bị tách thành nhiều vụ khi score dao động quanh threshold.
+            now_t = time.time()
+            if self.is_violent:
+                if self.incident_uid is None:
+                    self.incident_uid = str(uuid.uuid4())
+                    print(f"[{self.cam_id}] Incident OPEN: {self.incident_uid}", flush=True)
+                self._last_violent_ts = now_t
+            elif self.incident_uid and (now_t - self._last_violent_ts) > INCIDENT_GAP_SECONDS:
+                print(f"[{self.cam_id}] Incident CLOSE: {self.incident_uid}", flush=True)
+                self.incident_uid = None
 
             if self._should_send():
                 self._publish(result)
