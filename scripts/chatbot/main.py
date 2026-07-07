@@ -42,14 +42,14 @@ try:
     _g_hot_rows      = Gauge("streamhouse_hot_rows_total",     "HOT layer row count")
     _g_warm_rows     = Gauge("streamhouse_warm_rows_total",    "WARM layer row count")
     _g_cold_rows     = Gauge("streamhouse_cold_rows_total",    "COLD layer row count")
-    # ── E2E Pipeline Latency Gauges ───────────────────────────────────────
+    # ── E2E Pipeline Latency Gauges (đo thật từ sample Kafka, không hardcode) ──
     _g_e2e_kafka_to_fluss_ms = Gauge(
         "streamhouse_e2e_kafka_to_fluss_ms",
-        "Avg E2E latency Kafka send → Fluss HOT write (ms), sampled from recent events"
+        "Avg latency producer send → Kafka broker append (ms), sampled from recent events"
     )
     _g_e2e_inference_ms = Gauge(
         "streamhouse_inference_latency_ms",
-        "Avg StreamViD-A model inference latency per clip (ms)"
+        "Avg StreamViD-A model inference latency per clip (ms), from metadata.inference_ms"
     )
     _g_pipeline_events_rate = Gauge(
         "streamhouse_pipeline_events_per_min",
@@ -167,6 +167,73 @@ class HealthResponse(BaseModel):
 # Startup & Shutdown
 # ============================================================================
 
+def _sample_pipeline_latency(max_msgs: int = 200) -> dict:
+    """Đo latency pipeline THẬT từ N message gần nhất của hot-violence-alerts-valid.
+
+    - avg_inference_ms: trung bình metadata.inference_ms (đo tại visualize_stream).
+    - avg_producer_to_broker_ms: broker append time − metadata.kafka_sent_at.
+    - events_per_min: throughput từ span timestamp của sample.
+    Trả {} nếu Kafka không đọc được (metric giữ giá trị cũ, không bịa số).
+    """
+    out: dict = {}
+    try:
+        from kafka import KafkaConsumer, TopicPartition
+
+        kafka_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+        topic = "hot-violence-alerts-valid"
+        consumer = KafkaConsumer(
+            bootstrap_servers=kafka_servers,
+            value_deserializer=lambda v: json.loads(v.decode("utf-8")) if v else {},
+            auto_offset_reset="latest",
+            consumer_timeout_ms=3000,
+            group_id=None,
+        )
+        partitions = consumer.partitions_for_topic(topic) or set()
+        tps = [TopicPartition(topic, p) for p in partitions]
+        if not tps:
+            consumer.close()
+            return out
+        consumer.assign(tps)
+        end_offsets = consumer.end_offsets(tps)
+        per_part = max(1, max_msgs // max(len(tps), 1))
+        for tp in tps:
+            consumer.seek(tp, max(0, end_offsets[tp] - per_part))
+
+        inference_vals, send_lag_vals, broker_ts = [], [], []
+        for msg in consumer:
+            broker_ts.append(msg.timestamp or 0)
+            meta = (msg.value or {}).get("metadata") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except json.JSONDecodeError:
+                    meta = {}
+            inf = meta.get("inference_ms")
+            if isinstance(inf, (int, float)) and inf > 0:
+                inference_vals.append(float(inf))
+            sent_at = meta.get("kafka_sent_at")
+            if isinstance(sent_at, (int, float)) and sent_at > 0 and msg.timestamp:
+                lag = msg.timestamp - sent_at * 1000.0
+                if 0 <= lag < 60_000:  # bỏ outlier clock-skew
+                    send_lag_vals.append(lag)
+            if len(broker_ts) >= max_msgs:
+                break
+        consumer.close()
+
+        if inference_vals:
+            out["avg_inference_ms"] = round(sum(inference_vals) / len(inference_vals), 2)
+        if send_lag_vals:
+            out["avg_producer_to_broker_ms"] = round(sum(send_lag_vals) / len(send_lag_vals), 2)
+        valid_ts = [t for t in broker_ts if t > 0]
+        if len(valid_ts) >= 2:
+            span_min = (max(valid_ts) - min(valid_ts)) / 60000.0
+            if span_min > 0:
+                out["events_per_min"] = round(len(valid_ts) / span_min, 2)
+    except Exception as e:
+        logger.debug("[metrics] _sample_pipeline_latency skipped: %s", e)
+    return out
+
+
 async def _refresh_dashboard_metrics():
     """Query Paimon/Fluss and update Prometheus Gauges for Grafana dashboard panels."""
     if not _PROM_ENABLED:
@@ -175,22 +242,24 @@ async def _refresh_dashboard_metrics():
     try:
         import asyncio as _asyncio
 
-        # ── KPI aggregates ────────────────────────────────────────────────
+        # ── KPI aggregates — đếm SỐ VỤ từ fact (grain=1 vụ), không đếm raw events ──
         rows = await _asyncio.gather(
-            _trino_query("SELECT COUNT(*) FROM paimon.security.violence_incidents WHERE is_violent=TRUE AND timestamp>=NOW()-INTERVAL '1' DAY", timeout=15.0),
-            _trino_query("SELECT COUNT(*) FROM paimon.security.violence_incidents WHERE is_violent=TRUE AND timestamp>=NOW()-INTERVAL '7' DAY", timeout=15.0),
-            _trino_query("SELECT COUNT(DISTINCT camera_id) FROM paimon.security.violence_incidents WHERE timestamp>=NOW()-INTERVAL '1' DAY", timeout=15.0),
-            _trino_query("SELECT ROUND(AVG(risk_score),3) FROM paimon.security.violence_incidents WHERE is_violent=TRUE AND timestamp>=NOW()-INTERVAL '1' DAY", timeout=15.0),
+            _trino_query("SELECT COUNT(*) FROM paimon.security.fact_violence_incident WHERE start_ts>=NOW()-INTERVAL '1' DAY", timeout=15.0),
+            _trino_query("SELECT COUNT(*) FROM paimon.security.fact_violence_incident WHERE start_ts>=NOW()-INTERVAL '7' DAY", timeout=15.0),
+            _trino_query("SELECT COUNT(DISTINCT camera_id) FROM paimon.security.fact_violence_incident WHERE start_ts>=NOW()-INTERVAL '1' DAY", timeout=15.0),
+            _trino_query("SELECT ROUND(AVG(max_risk_score),3) FROM paimon.security.fact_violence_incident WHERE start_ts>=NOW()-INTERVAL '1' DAY", timeout=15.0),
         )
         _g_violent_24h.set(int(rows[0][0][0]) if rows[0] and rows[0][0][0] else 0)
         _g_violent_7d.set(int(rows[1][0][0]) if rows[1] and rows[1][0][0] else 0)
         _g_cameras.set(int(rows[2][0][0]) if rows[2] and rows[2][0][0] else 0)
         _g_risk.set(float(rows[3][0][0]) if rows[3] and rows[3][0][0] else 0.0)
 
-        # ── By event type ─────────────────────────────────────────────────
+        # ── By event type (join dim_event_type — fact chỉ giữ FK) ─────────
         type_rows = await _trino_query(
-            "SELECT event_type, COUNT(*) FROM paimon.security.violence_incidents "
-            "WHERE event_type IS NOT NULL AND timestamp>=NOW()-INTERVAL '7' DAY GROUP BY event_type",
+            "SELECT COALESCE(et.event_code, 'UNKNOWN'), COUNT(*) "
+            "FROM paimon.security.fact_violence_incident f "
+            "LEFT JOIN paimon.security.dim_event_type et ON f.event_type_id = et.event_type_id "
+            "WHERE f.start_ts>=NOW()-INTERVAL '7' DAY GROUP BY 1",
             timeout=15.0,
         )
         for r in (type_rows or []):
@@ -199,8 +268,8 @@ async def _refresh_dashboard_metrics():
 
         # ── By camera ─────────────────────────────────────────────────────
         cam_rows = await _trino_query(
-            "SELECT camera_id, COUNT(*) FROM paimon.security.violence_incidents "
-            "WHERE is_violent=TRUE AND camera_id IS NOT NULL AND timestamp>=NOW()-INTERVAL '7' DAY "
+            "SELECT camera_id, COUNT(*) FROM paimon.security.fact_violence_incident "
+            "WHERE camera_id IS NOT NULL AND start_ts>=NOW()-INTERVAL '7' DAY "
             "GROUP BY camera_id ORDER BY 2 DESC LIMIT 15",
             timeout=15.0,
         )
@@ -208,11 +277,14 @@ async def _refresh_dashboard_metrics():
             if r[0] and str(r[0]).strip():
                 _g_by_camera.labels(camera_id=str(r[0]).strip()).set(int(r[1] or 0))
 
-        # ── By location ───────────────────────────────────────────────────
+        # ── By location (join dim_camera SCD2 bản hiện hành) ──────────────
         loc_rows = await _trino_query(
-            "SELECT location, COUNT(*) FROM paimon.security.violence_incidents "
-            "WHERE location IS NOT NULL AND timestamp>=NOW()-INTERVAL '7' DAY "
-            "GROUP BY location ORDER BY 2 DESC LIMIT 10",
+            "SELECT c.street, COUNT(*) "
+            "FROM paimon.security.fact_violence_incident f "
+            "LEFT JOIN paimon.security.dim_camera c "
+            "  ON f.camera_id = c.camera_id AND c.is_current = true "
+            "WHERE f.start_ts>=NOW()-INTERVAL '7' DAY "
+            "GROUP BY c.street ORDER BY 2 DESC LIMIT 10",
             timeout=15.0,
         )
         for r in (loc_rows or []):
@@ -227,18 +299,22 @@ async def _refresh_dashboard_metrics():
         if hot is not None:
             _g_hot_rows.set(hot)
 
-        # ── E2E inference latency from HOT layer (last 5 min) ─────────────
+        # ── Pipeline latency ĐO THẬT từ sample Kafka gần nhất ──────────────
+        # (bản cũ set số cứng 794.71/500ms + random — đã xoá)
         try:
-            import random
-            # Set baseline benchmark latency metrics with slight random fluctuation for realism
-            _g_e2e_inference_ms.set(round(794.71 + random.uniform(-15.0, 15.0), 2))
-            _g_e2e_kafka_to_fluss_ms.set(round(500.0 + random.uniform(-25.0, 25.0), 2))
-            
-            # Compute throughput rate from Fluss HOT row count (TTL retention window is ~90 minutes)
-            if hot is not None:
+            import asyncio as _aio
+            sample = await _aio.get_event_loop().run_in_executor(
+                None, _sample_pipeline_latency
+            )
+            if sample.get("avg_inference_ms") is not None:
+                _g_e2e_inference_ms.set(sample["avg_inference_ms"])
+            if sample.get("avg_producer_to_broker_ms") is not None:
+                _g_e2e_kafka_to_fluss_ms.set(sample["avg_producer_to_broker_ms"])
+            if sample.get("events_per_min") is not None:
+                _g_pipeline_events_rate.set(sample["events_per_min"])
+            elif hot is not None:
+                # Fallback: suy từ số row HOT trên cửa sổ retention ~90 phút
                 _g_pipeline_events_rate.set(round(float(hot) / 90.0, 2))
-            else:
-                _g_pipeline_events_rate.set(0.0)
         except Exception as e:
             logger.warning("[metrics] Failed to refresh E2E pipeline metrics: %s", e)
 
@@ -274,6 +350,22 @@ async def lifespan(app: FastAPI):
         )
         app_state["trino_client"] = trino_client
         logger.info("✓ Trino Client initialized")
+
+        # Introspect schema thật từ Trino → registry động (thêm bảng/cột mới là
+        # chatbot tự thấy, không còn hardcode chết như v1). Fail → dùng static fallback.
+        try:
+            from .components.schema_registry import refresh_from_trino
+
+            def _registry_rows(sql: str):
+                return [
+                    tuple(r.values()) if isinstance(r, dict) else tuple(r)
+                    for r in trino_client._query_trino(sql, catalog="paimon", timeout=20)
+                ]
+
+            n = refresh_from_trino(_registry_rows)
+            logger.info(f"✓ Schema registry: {n} tables introspected from Trino")
+        except Exception as e:
+            logger.warning(f"Schema registry refresh failed (static fallback): {e}")
 
         # Initialize SQL Generator
         logger.info("Initializing SQL Generator...")
@@ -623,11 +715,8 @@ async def _trino_query(sql: str, timeout: float = 20.0) -> list:
 
     # Convert backticks to double quotes
     sql = _re.sub(r'`([^`]+)`', r'"\1"', sql)
-    # Rewrite raw events tables to use sessionized views
-    sql = _re.sub(r'\bpaimon\.security\.violence_incidents\b', 'iceberg.default.violence_incidents_sessionized', sql, flags=_re.IGNORECASE)
-    sql = _re.sub(r'(?<![.\w])violence_incidents\b', 'iceberg.default.violence_incidents_sessionized', sql, flags=_re.IGNORECASE)
-    sql = _re.sub(r'\biceberg\.security\.historical_violence_incidents\b', 'iceberg.default.historical_violence_incidents_sessionized', sql, flags=_re.IGNORECASE)
-    sql = _re.sub(r'(?<![.\w])historical_violence_incidents\b', 'iceberg.default.historical_violence_incidents_sessionized', sql, flags=_re.IGNORECASE)
+    # v2: không còn rewrite sang view *_sessionized — các endpoint đã query thẳng
+    # fact_violence_incident (grain = 1 vụ) nên số liệu đúng ngay từ nguồn.
 
     trino_host = os.getenv("TRINO_HOST", "trino-coordinator")
     trino_port = os.getenv("TRINO_PORT", "8080")
@@ -725,27 +814,41 @@ async def get_recent_incidents(
     camera_id: str | None = None,
     location: str | None = None,
 ):
-    """Latest violent incidents from Paimon, with MinIO frame_url.
+    """Latest violent incidents (grain = 1 VỤ) from fact + dims, with MinIO frame_url.
     Optional filters: camera_id, location (partial match).
     """
-    where_parts = ["is_violent = TRUE"]
+    import re as _re2
+    where_parts = ["1 = 1"]
     if camera_id:
-        where_parts.append(f"camera_id = '{camera_id}'")
+        # Chống SQL injection: camera_id chỉ được là dạng cam_XX
+        if not _re2.match(r'^cam_\d{1,4}$', camera_id):
+            raise HTTPException(status_code=400, detail=f"Invalid camera_id: {camera_id}")
+        where_parts.append(f"f.camera_id = '{camera_id}'")
     if location:
-        # Partial match, case-insensitive
-        where_parts.append(f"LOWER(location) LIKE '%{location.lower()}%'")
+        # Escape single quotes + bỏ ký tự comment (chống injection)
+        loc = location.lower().replace("'", "''").replace("--", "").replace("/*", "")[:80]
+        where_parts.append(f"LOWER(c.street) LIKE '%{loc}%'")
 
     where_clause = " AND ".join(where_parts)
+    limit = max(1, min(int(limit), 500))
     sql = f"""
     SELECT
-        incident_id, camera_id,
-        CAST(timestamp AS VARCHAR) AS timestamp,
-        risk_score, event_type, location,
-        is_violent,
-        CAST(DATE(timestamp) AS VARCHAR) AS incident_date
-    FROM paimon.security.violence_incidents
+        f.incident_id, f.camera_id,
+        CAST(f.start_ts AS VARCHAR) AS timestamp,
+        f.max_risk_score AS risk_score,
+        COALESCE(et.event_code, 'UNKNOWN') AS event_type,
+        COALESCE(c.street, f.camera_id) AS location,
+        f.is_violent,
+        CAST(f.date_id AS VARCHAR) AS incident_date,
+        f.frame_url,
+        f.duration_sec, f.event_count, f.people_count
+    FROM paimon.security.fact_violence_incident f
+    LEFT JOIN paimon.security.dim_camera c
+        ON f.camera_id = c.camera_id AND c.is_current = true
+    LEFT JOIN paimon.security.dim_event_type et
+        ON f.event_type_id = et.event_type_id
     WHERE {where_clause}
-    ORDER BY timestamp DESC
+    ORDER BY f.start_ts DESC
     LIMIT {limit}
     """
     try:
@@ -755,22 +858,26 @@ async def get_recent_incidents(
         raise HTTPException(status_code=503, detail=f"Trino unavailable: {e}")
 
     minio_external = os.getenv("MINIO_EXTERNAL_URL", "http://localhost:9000")
-    evidence_bucket = os.getenv("S3_BUCKET", "evidence-frames")
 
-    def build_frame_url(incident_id: str, camera_id: str, date_str: str) -> str:
-        """Build MinIO URL: {camera_id}/{YYYY-MM-DD}/{incident_id}.jpg"""
-        # date_str is already YYYY-MM-DD from DATE(timestamp) cast
-        clean_date = (date_str or "").split(" ")[0].split("T")[0]
-        return f"{minio_external}/{evidence_bucket}/{camera_id}/{clean_date}/{incident_id}.jpg"
+    def public_frame_url(url: str | None) -> str | None:
+        """frame_url trong fact là URL MinIO nội bộ — đổi host sang URL public."""
+        if not url:
+            return None
+        if url.startswith("http"):
+            # thay host nội bộ (http://minio:9000 / localhost) bằng external URL
+            parts = url.split("/", 3)
+            return f"{minio_external}/{parts[3]}" if len(parts) == 4 else url
+        return f"{minio_external}/{url.lstrip('/')}"
 
     return [
         {
             "event_id": r[0], "camera_id": r[1], "timestamp": r[2],
             "violence_score": float(r[3]) if r[3] is not None else 0.0,
             "label": r[4] or "Anomaly", "location": r[5] or r[1],
-            "model_version": "VioMobileNet v2.1", "clip_link": "#",
+            "model_version": "StreamViD-A (sva_03)", "clip_link": "#",
             "status": "Unreviewed" if r[6] else "False Alarm",
-            "frame_url": build_frame_url(r[0], r[1], r[7]) if r[7] else None,
+            "frame_url": public_frame_url(r[8]),
+            "duration_sec": r[9], "event_count": r[10], "people_count": r[11],
         }
         for r in rows
     ]
@@ -781,33 +888,34 @@ async def get_stats():
     """Aggregated analytics from Iceberg for the dashboard."""
     hours_sql = """
     SELECT
-        CAST(CAST(timestamp AS DATE) AS VARCHAR) AS hour_label,
+        CAST(date_id AS VARCHAR) AS hour_label,
         COUNT(*) AS alert_count
-    FROM paimon.security.violence_incidents
-    WHERE is_violent = TRUE AND timestamp >= NOW() - INTERVAL '7' DAY
-    GROUP BY CAST(timestamp AS DATE)
-    ORDER BY CAST(timestamp AS DATE)
+    FROM paimon.security.fact_violence_incident
+    WHERE start_ts >= NOW() - INTERVAL '7' DAY
+    GROUP BY date_id
+    ORDER BY date_id
     """
     loc_sql = """
-    SELECT location, COUNT(*) AS cnt
-    FROM paimon.security.violence_incidents
-    WHERE is_violent = TRUE
-    GROUP BY location ORDER BY cnt DESC LIMIT 5
+    SELECT COALESCE(c.street, f.camera_id) AS location, COUNT(*) AS cnt
+    FROM paimon.security.fact_violence_incident f
+    LEFT JOIN paimon.security.dim_camera c
+        ON f.camera_id = c.camera_id AND c.is_current = true
+    GROUP BY COALESCE(c.street, f.camera_id) ORDER BY cnt DESC LIMIT 5
     """
     type_sql = """
-    SELECT event_type, COUNT(*) AS cnt
-    FROM paimon.security.violence_incidents
-    WHERE is_violent = TRUE
-    GROUP BY event_type
+    SELECT COALESCE(et.event_code, 'UNKNOWN') AS event_type, COUNT(*) AS cnt
+    FROM paimon.security.fact_violence_incident f
+    LEFT JOIN paimon.security.dim_event_type et
+        ON f.event_type_id = et.event_type_id
+    GROUP BY COALESCE(et.event_code, 'UNKNOWN')
     """
     score_sql = """
     SELECT
-        date_format(CAST(timestamp AS DATE), '%b %d') AS day_label,
-        AVG(risk_score) AS avg_score
-    FROM paimon.security.violence_incidents
-    WHERE is_violent = TRUE
-    GROUP BY CAST(timestamp AS DATE)
-    ORDER BY CAST(timestamp AS DATE)
+        date_format(date_id, '%b %d') AS day_label,
+        AVG(max_risk_score) AS avg_score
+    FROM paimon.security.fact_violence_incident
+    GROUP BY date_id
+    ORDER BY date_id
     """
     import asyncio as _asyncio
     results = await _asyncio.gather(
@@ -1021,23 +1129,23 @@ async def grafana_stats():
     async def _violence_counts():
         try:
             rows_24h = await _trino_query(
-                "SELECT COUNT(*) FROM paimon.security.violence_incidents "
-                "WHERE is_violent = TRUE AND timestamp >= NOW() - INTERVAL '1' DAY",
+                "SELECT COUNT(*) FROM paimon.security.fact_violence_incident "
+                "WHERE start_ts >= NOW() - INTERVAL '1' DAY",
                 timeout=15.0,
             )
             rows_7d = await _trino_query(
-                "SELECT COUNT(*) FROM paimon.security.violence_incidents "
-                "WHERE is_violent = TRUE AND timestamp >= NOW() - INTERVAL '7' DAY",
+                "SELECT COUNT(*) FROM paimon.security.fact_violence_incident "
+                "WHERE start_ts >= NOW() - INTERVAL '7' DAY",
                 timeout=15.0,
             )
             cameras = await _trino_query(
-                "SELECT COUNT(DISTINCT camera_id) FROM paimon.security.violence_incidents "
-                "WHERE timestamp >= NOW() - INTERVAL '1' DAY",
+                "SELECT COUNT(DISTINCT camera_id) FROM paimon.security.fact_violence_incident "
+                "WHERE start_ts >= NOW() - INTERVAL '1' DAY",
                 timeout=15.0,
             )
             avg_score = await _trino_query(
-                "SELECT ROUND(AVG(risk_score), 3) FROM paimon.security.violence_incidents "
-                "WHERE is_violent = TRUE AND timestamp >= NOW() - INTERVAL '1' DAY",
+                "SELECT ROUND(AVG(max_risk_score), 3) FROM paimon.security.fact_violence_incident "
+                "WHERE start_ts >= NOW() - INTERVAL '1' DAY",
                 timeout=15.0,
             )
             return {
@@ -1099,26 +1207,26 @@ async def grafana_kpi(field: str):
 
 
 async def _get_violence_counts():
-    """Internal helper — fetch violence aggregates from Paimon via Trino."""
+    """Internal helper — số VỤ từ fact (grain=1 vụ) qua Trino."""
     try:
         rows_24h = await _trino_query(
-            "SELECT COUNT(*) FROM paimon.security.violence_incidents "
-            "WHERE is_violent = TRUE AND timestamp >= NOW() - INTERVAL '1' DAY",
+            "SELECT COUNT(*) FROM paimon.security.fact_violence_incident "
+            "WHERE start_ts >= NOW() - INTERVAL '1' DAY",
             timeout=15.0,
         )
         rows_7d = await _trino_query(
-            "SELECT COUNT(*) FROM paimon.security.violence_incidents "
-            "WHERE is_violent = TRUE AND timestamp >= NOW() - INTERVAL '7' DAY",
+            "SELECT COUNT(*) FROM paimon.security.fact_violence_incident "
+            "WHERE start_ts >= NOW() - INTERVAL '7' DAY",
             timeout=15.0,
         )
         cameras = await _trino_query(
-            "SELECT COUNT(DISTINCT camera_id) FROM paimon.security.violence_incidents "
-            "WHERE timestamp >= NOW() - INTERVAL '1' DAY",
+            "SELECT COUNT(DISTINCT camera_id) FROM paimon.security.fact_violence_incident "
+            "WHERE start_ts >= NOW() - INTERVAL '1' DAY",
             timeout=15.0,
         )
         avg_score = await _trino_query(
-            "SELECT ROUND(AVG(risk_score), 3) FROM paimon.security.violence_incidents "
-            "WHERE is_violent = TRUE AND timestamp >= NOW() - INTERVAL '1' DAY",
+            "SELECT ROUND(AVG(max_risk_score), 3) FROM paimon.security.fact_violence_incident "
+            "WHERE start_ts >= NOW() - INTERVAL '1' DAY",
             timeout=15.0,
         )
         return {
@@ -1151,9 +1259,10 @@ async def grafana_cameras():
     """Top cameras by incident count (7 days) — Infinity barchart datasource."""
     try:
         rows = await _trino_query(
-            "SELECT camera_id, COUNT(*) AS incident_count, ROUND(AVG(risk_score), 3) AS avg_risk "
-            "FROM paimon.security.violence_incidents "
-            "WHERE is_violent = TRUE AND timestamp >= NOW() - INTERVAL '7' DAY "
+            "SELECT camera_id, COUNT(*) AS incident_count, "
+            "ROUND(AVG(max_risk_score), 3) AS avg_risk "
+            "FROM paimon.security.fact_violence_incident "
+            "WHERE start_ts >= NOW() - INTERVAL '7' DAY "
             "GROUP BY camera_id ORDER BY incident_count DESC LIMIT 15",
             timeout=15.0,
         )
@@ -1190,7 +1299,7 @@ async def get_latency():
         t0 = time_module.time()
         try:
             await _trino_query(
-                "SELECT incident_id FROM paimon.security.violence_incidents LIMIT 1",
+                "SELECT incident_id FROM paimon.security.fact_violence_incident LIMIT 1",
                 timeout=15.0,
             )
             return {"latency_ms": round((time_module.time() - t0) * 1000), "ok": True, "error": None}

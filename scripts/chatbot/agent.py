@@ -39,7 +39,9 @@ from .logger import setup_logger, log_agent_node
 from .components.trino_client import TrinoClient, DataLayer
 from .components.sql_generator import SQLGenerator
 from .components.evidence_service import EvidenceService
-from .components.schema_registry import get_schema_for_prompt, get_full_table_ref
+from .components.schema_registry import (
+    get_schema_for_prompt, get_full_table_ref, get_all_schemas_for_prompt, table_for,
+)
 
 logger = setup_logger(__name__)
 
@@ -181,14 +183,15 @@ def _detect_evidence_intent(query: str) -> bool:
 
 async def understand_query(state: AgentState) -> AgentState:
     """
-    Node 1: Extract intent from Vietnamese natural language query.
+    Node 1: MỘT lần gọi Gemini cho cả intent + table + SQL (thay vì 3 call/câu hỏi
+    như bản cũ: intent → SQL → tổng hợp). Giảm latency ~2/3.
 
-    Parses user question to extract:
-    - time_period: "hôm nay", "tuần trước", "1 tháng trước"
-    - location: "quận 1", "phường X", "đường Y"
-    - metric: "count", "average", "sum"
-    - intent_type: "aggregate_count", "time_series", "comparison"
-    - wants_evidence: True if user asks for frame images
+    Gemini nhận TOÀN BỘ schema registry (đã introspect từ Trino lúc startup) +
+    quy tắc routing 3 tầng, trả JSON:
+      {time_period, location, metric, intent_type, query_confidence, table, sql}
+
+    select_data_layer sau đó verify table bằng rule tất định — nếu lệch thì
+    generate_sql sẽ sinh lại SQL cho đúng bảng (hiếm khi xảy ra).
     """
     log_agent_node(logger, state["request_id"], "understand_query", "started")
 
@@ -203,27 +206,37 @@ async def understand_query(state: AgentState) -> AgentState:
             state["intent"] = intent
             return state
 
-        # Use Gemini to parse Vietnamese intent
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
 
-        prompt = f"""
-Phân tích câu hỏi tiếng Việt này và trích xuất ý định người dùng.
-Trả về JSON với 5 trường: time_period, location, metric, intent_type, query_confidence
+        today_str = datetime.utcnow().strftime("%Y-%m-%d")
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-Câu hỏi: "{user_query}"
+        prompt = f"""Bạn là chuyên gia SQL cho hệ thống giám sát bạo lực đô thị (Streamhouse 3 tầng).
+Phân tích câu hỏi tiếng Việt và trả về MỘT JSON duy nhất gồm intent + bảng + SQL.
 
-Hướng dẫn:
-- time_period: "hôm nay", "hôm qua", "tuần trước", "tháng trước", "7 ngày", hoặc kiểu thời gian khác
-- location: Tên quận/huyện hoặc null nếu toàn thành phố
-- metric: "count", "average", "max", "min", "list"
-- intent_type: "statistics", "query_recent", "trend", "comparison", "evidence_lookup"
-- query_confidence: [0.0-1.0] độ tin cậy trong việc hiểu ý định
+## Câu hỏi
+"{user_query}"
 
-Ví dụ JSON:
-{{"time_period": "hôm nay", "location": "quận 1", "metric": "count", "intent_type": "statistics", "query_confidence": 0.95}}
+## Các bảng có sẵn
+{get_all_schemas_for_prompt()}
 
-Trả về CHỈ JSON, không có giải thích.
-        """.strip()
+## Quy tắc routing (BẮT BUỘC)
+- Thời gian < 1 giờ / "bây giờ" / "hiện tại" → tầng HOT (fluss.*)
+- 1 giờ – 7 ngày (hôm nay/hôm qua/tuần này) → tầng WARM (paimon.*)
+- > 7 ngày / tháng / năm → tầng COLD (iceberg.*)
+- Câu hỏi ĐẾM SỐ VỤ / thống kê → bảng grain=incident (1 dòng = 1 vụ)
+- Câu hỏi xem ảnh/bằng chứng/chi tiết event → bảng grain=event (có frame_url)
+
+## Quy tắc SQL (Trino dialect; với bảng fluss.* dùng Flink dialect)
+- Chỉ dùng cột có trong schema ở trên. Reserved word bọc double-quote: "timestamp".
+- Hôm nay: {today_str} | Bây giờ (UTC): {now_str}. Time filter dùng TIMESTAMP literal.
+- Với bảng fluss.*: KHÔNG dùng COUNT()/SUM() — SELECT các cột với LIMIT 200 (đếm ở client).
+- LIMIT 50 cho SELECT chi tiết; COUNT/AVG không cần LIMIT.
+
+## JSON trả về (CHỈ JSON, không giải thích, không markdown fence)
+{{"time_period": "...", "location": null, "metric": "count|average|max|min|list",
+  "intent_type": "statistics|query_recent|trend|comparison|evidence_lookup",
+  "query_confidence": 0.95, "table": "<tên bảng không kèm catalog>", "sql": "SELECT ..."}}"""
 
         response = model.generate_content(prompt)
         response_text = response.text.strip()
@@ -240,6 +253,12 @@ Trả về CHỈ JSON, không có giải thích.
                 query_confidence=float(intent_dict.get("query_confidence", 0.8)),
                 wants_evidence=wants_evidence,
             )
+            # SQL + table từ cùng 1 call — select_data_layer sẽ verify
+            llm_sql = (intent_dict.get("sql") or "").strip()
+            if llm_sql:
+                state["generated_sql"] = _clean_sql(llm_sql)
+            state["options"] = {**(state.get("options") or {}),
+                                "llm_table": intent_dict.get("table")}
         else:
             logger.warning(f"Failed to parse Gemini response: {response_text[:100]}")
             intent = _parse_intent_keywords(user_query)
@@ -255,6 +274,7 @@ Trả về CHỈ JSON, không có giải thích.
                 "intent_type": state["intent"].intent_type,
                 "confidence": state["intent"].query_confidence,
                 "wants_evidence": state["intent"].wants_evidence,
+                "has_sql": bool(state.get("generated_sql")),
             }
         )
 
@@ -477,16 +497,27 @@ async def select_data_layer(state: AgentState) -> AgentState:
             extra={"request_id": state["request_id"], "action": "routing_decision"}
         )
 
-        # Set catalog and table based on selected layer
-        if selected_layer == LayerChoice.FLUSS:
-            state["trino_catalog"] = "fluss"
-            state["table_name"] = "hot_violence_alerts"
-        elif selected_layer == LayerChoice.PAIMON:
-            state["trino_catalog"] = "paimon"
-            state["table_name"] = "violence_incidents"
-        else:  # Iceberg
-            state["trino_catalog"] = "iceberg"
-            state["table_name"] = "historical_violence_incidents"
+        # Chọn bảng theo GRAIN (v2): đếm/thống kê SỐ VỤ → bảng incident (1 dòng = 1 vụ,
+        # đã sessionize); evidence/ảnh/chi tiết → bảng event (có frame_url/people_json).
+        intent_obj = state.get("intent")
+        purpose = "evidence" if (wants_evidence or (
+            intent_obj and intent_obj.intent_type == "evidence_lookup")) else "count"
+        state["trino_catalog"] = (
+            "fluss" if selected_layer == LayerChoice.FLUSS
+            else "paimon" if selected_layer == LayerChoice.PAIMON
+            else "iceberg"
+        )
+        state["table_name"] = table_for(state["trino_catalog"], purpose)
+
+        # Verify SQL sinh sẵn từ understand_query (1-call): nếu Gemini chọn bảng khác
+        # với routing tất định → bỏ SQL đó, generate_sql sẽ sinh lại cho đúng bảng.
+        pre_sql = state.get("generated_sql")
+        if pre_sql and state["table_name"] not in pre_sql:
+            logger.info(
+                f"[ROUTING] Discarding pre-generated SQL (targets wrong table; "
+                f"expected {state['table_name']})"
+            )
+            state["generated_sql"] = None
 
         state["selected_layer"] = selected_layer
         state["data_layer"] = selected_layer.value
@@ -543,6 +574,17 @@ async def generate_sql(state: AgentState) -> AgentState:
         layer = state["selected_layer"]
         full_ref = get_full_table_ref(table, schema)
         schema_str = get_schema_for_prompt(table)
+
+        # SQL đã sinh từ understand_query (1-call) và trúng bảng routing → dùng luôn,
+        # tiết kiệm 1 lần gọi Gemini. (Bị xoá ở select_data_layer nếu lệch bảng.)
+        if state.get("generated_sql") and state["retry_count"] == 0:
+            if not _sql_generator or _sql_generator.validate_sql(state["generated_sql"]):
+                log_agent_node(
+                    logger, state["request_id"], "generate_sql", "completed",
+                    {"source": "one-call", "catalog": catalog, "table": table},
+                )
+                return state
+            state["generated_sql"] = None  # fail validation → sinh lại bên dưới
 
         today_str = datetime.utcnow().strftime("%Y-%m-%d")
         now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -804,29 +846,28 @@ async def execute_query(state: AgentState) -> AgentState:
             # Run a simple HOT scan and merge results so the answer covers the full day.
             if state.get("also_query_hot") and _trino_client:
                 try:
+                    # v2: quét bảng INCIDENT (1 dòng = 1 vụ) — không cộng raw events
+                    # (0.5s/event) vào số vụ như bản cũ.
                     hot_sql = (
-                        "SELECT incident_id, camera_id, timestamp, risk_score, "
-                        "is_violent, event_type, location "
-                        "FROM hot_violence_alerts "
-                        "LIMIT 50"
+                        "SELECT incident_uid AS incident_id, camera_id, "
+                        "start_ts, last_ts, event_count, max_risk_score AS risk_score, "
+                        "event_type, location "
+                        "FROM hot_violence_incidents "
+                        "LIMIT 100"
                     )
-                    logger.info("[DUAL-LAYER] Running supplementary HOT scan...")
+                    logger.info("[DUAL-LAYER] Running supplementary HOT incident scan...")
                     hot_results = _trino_client.route_query(
                         sql=hot_sql,
                         layer=LayerChoice.FLUSS,
                         timeout=45,
                     )
-                    # Filter violent events in Python (HOT SQL can't guarantee complex WHERE)
-                    violent_hot = [
-                        r for r in (hot_results or [])
-                        if str(r.get("is_violent", "false")).lower() in ("true", "1")
-                    ]
+                    violent_hot = list(hot_results or [])
                     state["hot_query_result"] = QueryResult(
                         success=True,
                         data=violent_hot,
                         row_count=len(violent_hot),
                     )
-                    logger.info(f"[DUAL-LAYER] HOT supplementary: {len(violent_hot)} violent rows")
+                    logger.info(f"[DUAL-LAYER] HOT supplementary: {len(violent_hot)} incidents")
 
                     if violent_hot and state["query_result"].success:
                         primary_data = state["query_result"].data or []
@@ -1043,7 +1084,45 @@ async def generate_response(state: AgentState) -> AgentState:
                         f"Hãy thông báo ngắn gọn có {len(frame_urls)} ảnh và sẽ hiển thị bên dưới."
                     )
 
-                if genai:
+                # Kết quả aggregate 1 dòng toàn số (COUNT/AVG/MAX...) → trả lời bằng
+                # template, KHÔNG tốn thêm 1 call Gemini (call thứ 3 của bản cũ).
+                _first = results[0] if results else {}
+                simple_aggregate = (
+                    row_count == 1
+                    and isinstance(_first, dict)
+                    and not frame_urls
+                    and all(not isinstance(v, (list, dict)) for v in _first.values())
+                    and any(any(t in k.lower() for t in
+                                ("count", "total", "avg", "max", "min", "sum"))
+                            for k in _first)
+                )
+                if simple_aggregate:
+                    src = state['source_table']
+                    dlayer = state['data_layer']
+                    count_key = next(
+                        (k for k in _first if "count" in k.lower() or "total" in k.lower()),
+                        None,
+                    )
+                    lines = []
+                    if count_key is not None and len(_first) == 1:
+                        lines.append(
+                            f"Ghi nhận {_first[count_key]} vụ trong khoảng thời gian "
+                            f"'{state['time_period']}'."
+                        )
+                    else:
+                        pretty = ", ".join(
+                            f"{k} = {round(v, 4) if isinstance(v, float) else v}"
+                            for k, v in _first.items() if v is not None
+                        )
+                        lines.append(
+                            f"Kết quả cho khoảng thời gian '{state['time_period']}': {pretty}."
+                        )
+                    lines.append(f"Nguồn: {src} ({dlayer}), {row_count} hàng")
+                    state["final_answer"] = "\n".join(lines)
+                    state["response_confidence"] = (
+                        state["intent"].query_confidence if state["intent"] else 0.8
+                    )
+                elif genai:
                     try:
                         model = genai.GenerativeModel("gemini-2.5-flash")
                         src = state['source_table']
