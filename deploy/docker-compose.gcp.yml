@@ -620,7 +620,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256m
+          memory: 1g
           cpus: "0.25"
     networks:
       - violence-detection-net

@@ -1,0 +1,425 @@
+{
+  "__inputs": [
+    {"name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource", "pluginId": "prometheus"}
+  ],
+  "__requires": [
+    {"type": "datasource", "id": "prometheus", "version": "1.0.0"}
+  ],
+  "id": null,
+  "uid": "streamhouse-thesis",
+  "title": "Streamhouse — Thesis Evaluation Dashboard",
+  "tags": ["streamhouse", "violence-detection", "thesis"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-24h", "to": "now"},
+  "templating": {"list": []},
+  "annotations": {"list": []},
+  "panels": [
+    {
+      "id": 1,
+      "title": "📊 KPI — Violent Incidents (24h)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 10},
+            {"color": "red", "value": 30}
+          ]},
+          "unit": "short",
+          "displayName": "Vụ bạo lực (24h)"
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
+      "targets": [{"expr": "violence_incidents_24h_total", "legendFormat": "24h", "refId": "A"}]
+    },
+    {
+      "id": 2,
+      "title": "📅 KPI — Violent Incidents (7 days)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 50},
+            {"color": "red", "value": 100}
+          ]},
+          "unit": "short",
+          "displayName": "Vụ bạo lực (7d)"
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "background"},
+      "targets": [{"expr": "violence_incidents_7d_total", "legendFormat": "7d", "refId": "A"}]
+    },
+    {
+      "id": 3,
+      "title": "📷 Active Cameras",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "fixed", "fixedColor": "blue"},
+          "unit": "short",
+          "displayName": "Cameras"
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "auto", "colorMode": "background"},
+      "targets": [{"expr": "violence_cameras_active", "legendFormat": "cameras", "refId": "A"}]
+    },
+    {
+      "id": 4,
+      "title": "⚠️ Avg Risk Score (24h)",
+      "type": "gauge",
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 0.5},
+            {"color": "red", "value": 0.75}
+          ]},
+          "min": 0, "max": 1,
+          "unit": "percentunit",
+          "displayName": "Avg Risk Score"
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "showThresholdLabels": false, "showThresholdMarkers": true},
+      "targets": [{"expr": "violence_avg_risk_score", "legendFormat": "risk", "refId": "A"}]
+    },
+    {
+      "id": 5,
+      "title": "💾 Data Layer Row Counts (HOT / WARM / COLD)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 0},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "palette-classic"}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "HOT"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]},
+          {"matcher": {"id": "byName", "options": "WARM"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#5794F2"}}]},
+          {"matcher": {"id": "byName", "options": "COLD"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "purple"}}]}
+        ]
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "horizontal", "textMode": "auto", "colorMode": "value"},
+      "targets": [
+        {"expr": "streamhouse_hot_rows_total", "legendFormat": "HOT", "refId": "A"},
+        {"expr": "streamhouse_warm_rows_total", "legendFormat": "WARM", "refId": "B"},
+        {"expr": "streamhouse_cold_rows_total", "legendFormat": "COLD", "refId": "C"}
+      ]
+    },
+    {
+      "id": 10,
+      "title": "📈 Incidents by Camera (7 days) — Sessionized",
+      "type": "bargauge",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 4},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "unit": "short",
+          "min": 0
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      },
+      "targets": [
+        {"expr": "violence_incidents_by_camera", "legendFormat": "{{camera_id}}", "refId": "A"}
+      ]
+    },
+    {
+      "id": 11,
+      "title": "📍 Incidents by Location (7 days) — Sessionized",
+      "type": "bargauge",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 4},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "unit": "short",
+          "min": 0
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      },
+      "targets": [
+        {"expr": "violence_incidents_by_location", "legendFormat": "{{location}}", "refId": "A"}
+      ]
+    },
+    {
+      "id": 12,
+      "title": "🔷 Incidents by Event Type",
+      "type": "piechart",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 4},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "color": {"mode": "palette-classic"}}
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "pieType": "donut",
+        "displayLabels": ["name", "percent"],
+        "legend": {"displayMode": "table", "placement": "right", "values": ["value", "percent"]}
+      },
+      "targets": [
+        {"expr": "violence_incidents_by_type", "legendFormat": "{{event_type}}", "refId": "A"}
+      ]
+    },
+    {
+      "id": 20,
+      "title": "⏱️ Chatbot Query Duration by Layer (histogram)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "unit": "s",
+          "custom": {"lineWidth": 2, "fillOpacity": 10}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "min"]},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {"expr": "rate(chatbot_query_duration_seconds_sum[5m]) / rate(chatbot_query_duration_seconds_count[5m])", "legendFormat": "{{layer}} avg latency", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, rate(chatbot_query_duration_seconds_bucket[10m]))", "legendFormat": "P95 all layers", "refId": "B"}
+      ]
+    },
+    {
+      "id": 21,
+      "title": "📊 Chatbot Query Volume per Layer",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "unit": "reqps",
+          "custom": {"lineWidth": 2, "fillOpacity": 10}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["sum"]},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {"expr": "rate(chatbot_queries_total[5m])", "legendFormat": "{{layer}} qps", "refId": "A"},
+        {"expr": "chatbot_queries_total", "legendFormat": "{{layer}} total", "refId": "B"}
+      ]
+    },
+    {
+      "id": 30,
+      "title": "🚀 Pipeline E2E Latency — Kafka → Fluss HOT (ms)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "fixed", "fixedColor": "orange"},
+          "unit": "ms",
+          "custom": {"lineWidth": 2, "fillOpacity": 15},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 500},
+            {"color": "red", "value": 2000}
+          ]}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"]},
+        "tooltip": {"mode": "single"}
+      },
+      "targets": [
+        {"expr": "streamhouse_e2e_kafka_to_fluss_ms", "legendFormat": "Kafka → Fluss HOT (ms)", "refId": "A"}
+      ]
+    },
+    {
+      "id": 31,
+      "title": "🧠 StreamViD-A Inference Latency (ms/clip)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "fixed", "fixedColor": "#5794F2"},
+          "unit": "ms",
+          "custom": {"lineWidth": 2, "fillOpacity": 15},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "yellow", "value": 100},
+            {"color": "red", "value": 500}
+          ]}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "min"]},
+        "tooltip": {"mode": "single"}
+      },
+      "targets": [
+        {"expr": "streamhouse_inference_latency_ms", "legendFormat": "Inference latency (ms)", "refId": "A"}
+      ]
+    },
+    {
+      "id": 40,
+      "title": "🔄 Flink Job Health — Job Manager",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "unit": "short",
+          "custom": {"lineWidth": 2}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"]},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {"expr": "flink_jobmanager_numRunningJobs", "legendFormat": "Running Jobs", "refId": "A"},
+        {"expr": "flink_jobmanager_numRegisteredTaskManagers", "legendFormat": "TaskManagers", "refId": "B"},
+        {"expr": "flink_jobmanager_job_numRestarts", "legendFormat": "Restarts", "refId": "C"}
+      ]
+    },
+    {
+      "id": 41,
+      "title": "⚡ Pipeline Throughput (events/min)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "fixed", "fixedColor": "green"},
+          "unit": "short",
+          "displayName": "events/min",
+          "custom": {"lineWidth": 2, "fillOpacity": 15}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"]},
+        "tooltip": {"mode": "single"}
+      },
+      "targets": [
+        {"expr": "streamhouse_pipeline_events_per_min", "legendFormat": "Events/min to HOT", "refId": "A"}
+      ]
+    },
+    {
+      "id": 50,
+      "title": "🖥️ Resource Usage — CPU",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "unit": "percentunit",
+          "custom": {"lineWidth": 2, "fillOpacity": 10},
+          "min": 0, "max": 1
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {"expr": "rate(process_cpu_seconds_total{job=\"chatbot\"}[1m])", "legendFormat": "chatbot CPU", "refId": "A"},
+        {"expr": "flink_taskmanager_Status_JVM_CPU_Load", "legendFormat": "flink-taskmanager CPU", "refId": "B"}
+      ]
+    },
+    {
+      "id": 51,
+      "title": "💾 Resource Usage — Memory (MB)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "unit": "decmbytes",
+          "custom": {"lineWidth": 2, "fillOpacity": 10}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {"expr": "process_resident_memory_bytes{job=\"chatbot\"} / 1024 / 1024", "legendFormat": "chatbot RAM (MB)", "refId": "A"},
+        {"expr": "flink_taskmanager_Status_JVM_Memory_Heap_Used / 1024 / 1024", "legendFormat": "Flink heap (MB)", "refId": "B"}
+      ]
+    },
+    {
+      "id": 60,
+      "title": "📝 Sessionization Efficiency (Raw → Incidents)",
+      "description": "Shows ratio of raw HOT frames vs sessionized WARM incidents. A ratio > 1 confirms sessionization is grouping frames correctly.",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 44},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "red", "value": null},
+            {"color": "yellow", "value": 5},
+            {"color": "green", "value": 20}
+          ]},
+          "unit": "short",
+          "displayName": "Compression Ratio (HOT:WARM)"
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "auto", "colorMode": "background"},
+      "targets": [
+        {"expr": "streamhouse_hot_rows_total / clamp_min(streamhouse_warm_rows_total, 1)", "legendFormat": "HOT:WARM ratio", "refId": "A"}
+      ]
+    },
+    {
+      "id": 61,
+      "title": "📉 Data Reduction Rate",
+      "description": "Percentage reduction from raw HOT events to sessionized WARM incidents. Target: >90% reduction.",
+      "type": "gauge",
+      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 44},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "red", "value": null},
+            {"color": "yellow", "value": 0.7},
+            {"color": "green", "value": 0.9}
+          ]},
+          "min": 0, "max": 1,
+          "unit": "percentunit",
+          "displayName": "Data Reduction"
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "showThresholdMarkers": true},
+      "targets": [
+        {"expr": "1 - (streamhouse_warm_rows_total / clamp_min(streamhouse_hot_rows_total, 1))", "legendFormat": "reduction %", "refId": "A"}
+      ]
+    },
+    {
+      "id": 62,
+      "title": "🕐 Incidents Timeline (24h)",
+      "description": "Shows when violent incidents occurred over the last 24h across all cameras.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 48},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "unit": "short",
+          "custom": {"lineWidth": 2, "fillOpacity": 20, "pointSize": 8, "showPoints": "always"}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right", "calcs": ["sum", "max"]},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {"expr": "violence_incidents_by_camera", "legendFormat": "{{camera_id}}", "refId": "A"}
+      ]
+    }
+  ]
+}
