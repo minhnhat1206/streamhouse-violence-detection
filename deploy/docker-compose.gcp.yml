@@ -410,13 +410,14 @@ services:
     image: trino-with-paimon
     ports:
       - "8082:8080"
+    # MinIO creds lấy từ env_file (.env.gcp). KHÔNG khai báo lại trong environment:
+    # — environment: đè env_file, và khi shell không nạp .env.gcp lúc `compose up`
+    # thì ${MINIO_ROOT_USER:-minio} bake default sai vào container (sự cố 2026-07-06:
+    # Trino 403 với MinIO, toàn bộ WARM/COLD federation gãy).
     env_file:
       - .env.gcp
     volumes:
       - ../config/trino/coordinator/etc:/etc/trino
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-mypassword}
     depends_on:
       hive-metastore:
         condition: service_healthy
