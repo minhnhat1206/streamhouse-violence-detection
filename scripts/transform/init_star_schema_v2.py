@@ -178,6 +178,21 @@ def _create_paimon_dims(t_env: TableEnvironment) -> None:
             'bucket'       = '1'
         )
     """)
+    # v1 dùng tên dim_time cho chiều NGÀY (date_id/year/...); v2 dim_time là chiều
+    # GIỜ. Nếu bảng cũ còn (có cột date_id) → rename backup trước khi tạo bản v2.
+    try:
+        with t_env.execute_sql(
+            "DESCRIBE `paimon`.`security`.`dim_time`"
+        ).collect() as rs:
+            old_cols = {r[0] for r in rs}
+        if "date_id" in old_cols:
+            print("[INFO] dim_time v1 (date grain) detected — renaming to dim_time_v1_backup...")
+            t_env.execute_sql(
+                "ALTER TABLE `paimon`.`security`.`dim_time` RENAME TO `dim_time_v1_backup`"
+            )
+    except Exception:
+        pass  # bảng chưa tồn tại → tạo mới bên dưới
+
     t_env.execute_sql("""
         CREATE TABLE IF NOT EXISTS `paimon`.`security`.`dim_time` (
             time_id      INT,
