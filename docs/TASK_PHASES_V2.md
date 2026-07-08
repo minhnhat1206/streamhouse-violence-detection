@@ -52,6 +52,26 @@
 | Metric thật (hết bịa) | ✓ inference 1.607ms/clip (5 stream đồng thời/A4000), producer→broker 2.379ms, 43.6 events/min |
 | Ghi chú kịch bản | cam_04 (hard-negative) 26 vụ > thiết kế 8 → false alarm thật của model trên hard negatives — SỐ LIỆU TỐT cho phân tích §4.x; cam_05 cao điểm 25 vụ < 60 do INCIDENT_GAP 30s gộp event gần nhau |
 
+### Bổ sung nghiệm thu vòng 2 (08/07 chiều — 4 mục "chưa verify" đã đóng)
+- **HOT route chatbot** ✓: fix `_adapt_sql_for_flink_hot` strip time-filter cả
+  `start_ts/last_ts` (bảng incidents v2) — trước đó filter giữ lại làm Fluss rơi vào
+  unbounded streaming scan (0 rows + treo 60s). Sau fix: "Hiện có 100 vụ" 14,6s.
+- **COLD** ✓: hive-metastore CŨNG dính bệnh creds 06/07 (env RỖNG → 403 khi tạo bảng).
+  Recreate với --env-file → chạy archival `ARCHIVE_INTERVAL_DAYS=0` (INSERT-only) →
+  `historical_incident_facts` = 217 vụ (129 có frame_url). Lịch 02:00 daily giữ nguyên.
+- **Web UI trên Vast** ✓ (instance mới): Node 20; template chiếm port (Jupyter 8080,
+  Caddy 1111/8384, TensorBoard 6006) → kill Jupyter (supervisor EXITED, không respawn),
+  vite chạy 8080 → external **http://202.122.49.242:62040**. Kiến trúc 1-port:
+  vite proxy `/api/v1`→Express local :5000, `/api`→chatbot GCP :5002,
+  `/grafana-proxy`→GCP :3001, `/cam_*`→HLS :8888; `constants.js` API_BASE_URL="/api"
+  (HẾT hardcode IP). ⚠️ KHÔNG dùng `pkill -f vite` qua SSH (tự kill session).
+- **Grafana** ✓ xem bằng mắt qua UI iframe: KPI 188 vụ/24h + 229/7d + trend spike
+  08/07 + phân bố FIGHTING. Screenshot demo lưu tại
+  `vastVidStream/thesis_report/figures/demo_v2/` (ui_command_center, ui_livestreams,
+  grafana_in_ui) — Live Streams 4-5/5 phát LIVE với ALERT + score bar (HLS thi thoảng
+  buffer xoay vòng từng cam, endpoint vẫn 200).
+- Visualizer bọc vòng auto-restart trong tmux (1 lần chết hàng loạt do ffmpeg pipe đứt).
+
 ### Ghi chú thi công Phase 1–3 (08/07/2026)
 - **Phase 1 root cause:** KHÔNG phải plugin — trino-coordinator được recreate 06/07 mà shell
   không nạp `.env.gcp` → block `environment: ${MINIO_ROOT_USER:-minio}` (đè `env_file`)
