@@ -17,6 +17,7 @@ Idempotent: PK incident_id, chạy lại chỉ upsert giá trị mới.
 """
 import json
 import os
+import time
 from datetime import datetime, timedelta
 
 from pyflink.table import EnvironmentSettings, TableEnvironment
@@ -179,6 +180,9 @@ def main() -> None:
     _register_paimon(t_env)
 
     build_facts(t_env)
+    # Chờ TaskManager nhả network buffers của job fact trước khi chạy bridge
+    # (buffer pool giải phóng async sau khi job kết thúc).
+    time.sleep(20)
     build_bridge(t_env)
     print("[SUCCESS] Incident facts build complete.")
 
