@@ -17,10 +17,15 @@ Idempotent: PK incident_id, chạy lại chỉ upsert giá trị mới.
 """
 import json
 import os
+from datetime import datetime, timedelta
 
 from pyflink.table import EnvironmentSettings, TableEnvironment
 
 BUILD_LOOKBACK_HOURS = int(os.getenv("BUILD_LOOKBACK_HOURS", "48"))
+# TIMESTAMP literal thay vì INTERVAL 'N' HOUR — Flink giới hạn HOUR(2) ≤ 99
+CUTOFF_TS = (datetime.utcnow() - timedelta(hours=BUILD_LOOKBACK_HOURS)).strftime(
+    "%Y-%m-%d %H:%M:%S"
+)
 
 
 def _register_paimon(t_env: TableEnvironment) -> None:
@@ -49,7 +54,7 @@ def build_facts(t_env: TableEnvironment) -> None:
             SELECT *
             FROM `paimon`.`security`.`violence_incidents`
             WHERE incident_uid IS NOT NULL
-              AND `timestamp` >= LOCALTIMESTAMP - INTERVAL '{BUILD_LOOKBACK_HOURS}' HOUR
+              AND `timestamp` >= TIMESTAMP '{CUTOFF_TS}'
         ),
         peak AS (
             SELECT incident_uid, frame_url, people_count,
@@ -114,7 +119,7 @@ def build_bridge(t_env: TableEnvironment) -> None:
                 FROM `paimon`.`security`.`violence_incidents`
                 WHERE incident_uid IS NOT NULL
                   AND people_json IS NOT NULL
-                  AND `timestamp` >= LOCALTIMESTAMP - INTERVAL '{BUILD_LOOKBACK_HOURS}' HOUR
+                  AND `timestamp` >= TIMESTAMP '{CUTOFF_TS}'
             ) WHERE rn = 1
         """).collect() as rs:
             for r in rs:
