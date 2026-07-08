@@ -295,7 +295,9 @@ services:
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
-        taskmanager.numberOfTaskSlots: 4
+        # 6 slot: 4 streaming job v2 (validator, hot sink, gold agg, update_frame_url)
+        # + 2 slot trống cho batch định kỳ (tiering, build_incident_facts, archival)
+        taskmanager.numberOfTaskSlots: 6
         taskmanager.memory.process.size: 2304m
         # 4 streaming job v2 chiếm ~4600 buffers; batch job (build fact mỗi 30')
         # cần thêm 512 → mặc định 10%≈160MB (5079 buffers) không đủ.
