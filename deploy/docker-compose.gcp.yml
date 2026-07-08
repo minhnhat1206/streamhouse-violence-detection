@@ -353,8 +353,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512m
-          cpus: "0.25"
+          # 1g: flink CLI (JVM) + PyFlink driver cho batch job (init/migrate/build fact)
+          # chạy trong container này — 512m bị OOM-kill (exit 137)
+          memory: 1g
+          cpus: "0.50"
     networks:
       - violence-detection-net
     restart: unless-stopped
