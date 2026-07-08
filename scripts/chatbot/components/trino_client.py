@@ -396,12 +396,14 @@ class TrinoClient:
             result = re.sub(rf'\b{_col}\b\s*,\s*', '', result, flags=re.IGNORECASE)
             result = re.sub(rf'\bWHERE\s+{_col}\b', 'WHERE 1=1', result, flags=re.IGNORECASE)
 
-        # Strip time-based WHERE clauses (backtick-quoted timestamp first, then plain)
-        # Pattern: WHERE/AND `timestamp`/<timestamp> OP expr INTERVAL ... DAY/HOUR/MIN
-        # We remove the entire condition (it's redundant — Fluss only holds recent data)
+        # Strip time-based WHERE clauses (backtick-quoted first, then plain).
+        # v2: bảng hot_violence_incidents dùng start_ts/last_ts — phải strip cả 2,
+        # nếu giữ filter thời gian Fluss chuyển sang unbounded streaming scan
+        # (chỉ thấy record TƯƠNG LAI) → trả 0 rows + treo tới timeout.
+        _TS_COLS = r"(?:`timestamp`|\"timestamp\"|timestamp|`start_ts`|\"start_ts\"|start_ts|`last_ts`|\"last_ts\"|last_ts)"
         _time_filter = re.compile(
             r"(?:WHERE\s+|AND\s+)"
-            r"(?:`timestamp`|timestamp)\s*[><=!]+\s*"
+            + _TS_COLS + r"\s*[><=!]+\s*"
             r"(?:LOCALTIMESTAMP|NOW\(\)|CURRENT_TIMESTAMP)"
             r"(?:\s*[-+]\s*INTERVAL\s*'[^']+'\s*\w+)?",
             re.IGNORECASE,
@@ -410,10 +412,10 @@ class TrinoClient:
 
         # Also strip standalone TIMESTAMP literal comparisons, including arithmetic expressions:
         # e.g. AND `timestamp` >= TIMESTAMP '2026-05-18 13:23:36'
-        # e.g. AND `timestamp` >= (TIMESTAMP '2026-05-18 13:23:36' - INTERVAL '30' MINUTE)
+        # e.g. AND start_ts >= (TIMESTAMP '2026-05-18 13:23:36' - INTERVAL '30' MINUTE)
         _ts_literal = re.compile(
             r"(?:WHERE\s+|AND\s+)"
-            r"(?:`timestamp`|\"timestamp\"|timestamp)\s*[><=!]+\s*"
+            + _TS_COLS + r"\s*[><=!]+\s*"
             r"\(?"                                          # optional opening paren
             r"\s*TIMESTAMP\s*'[^']+'"                       # TIMESTAMP 'literal'
             r"(?:\s*[-+]\s*INTERVAL\s*'[^']+'\s*\w+)?"     # optional - INTERVAL 'N' UNIT
@@ -425,7 +427,7 @@ class TrinoClient:
         # Strip BETWEEN timestamp range filters (e.g. WHERE timestamp BETWEEN TIMESTAMP '...' AND TIMESTAMP '...')
         _ts_between = re.compile(
             r"(?:WHERE\s+|AND\s+)"
-            r"(?:`timestamp`|\"timestamp\"|timestamp)\s+BETWEEN\s+"
+            + _TS_COLS + r"\s+BETWEEN\s+"
             r"\(?\s*TIMESTAMP\s*'[^']+'\s*\)?"
             r"\s+AND\s+"
             r"\(?\s*TIMESTAMP\s*'[^']+'\s*\)?",
