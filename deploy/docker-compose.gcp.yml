@@ -298,11 +298,11 @@ services:
         # 6 slot: 4 streaming job v2 (validator, hot sink, gold agg, update_frame_url)
         # + 2 slot trống cho batch định kỳ (tiering, build_incident_facts, archival)
         taskmanager.numberOfTaskSlots: 6
-        taskmanager.memory.process.size: 2304m
-        # 4 streaming job v2 chiếm ~4600 buffers; batch job (build fact mỗi 30')
-        # cần thêm 512 → mặc định 10%≈160MB (5079 buffers) không đủ.
-        taskmanager.memory.network.min: 320mb
-        taskmanager.memory.network.max: 320mb
+        taskmanager.memory.process.size: 2688m
+        # 4 streaming job v2 ngốn ~10k buffers; batch (tiering/fact) cần thêm
+        # 128-512/partition → 512MB = 16384 buffers mới đủ đồng thời.
+        taskmanager.memory.network.min: 512mb
+        taskmanager.memory.network.max: 512mb
         # Batch sort-shuffle mặc định đòi 512 buffer/partition — 4 streaming job
         # chiếm gần hết pool nên batch fail; 128 là đủ cho job p=1 dữ liệu nhỏ
         taskmanager.network.sort-shuffle.min-buffers: 128
@@ -325,7 +325,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2500m
+          memory: 3000m
           cpus: "2.00"
     networks:
       - violence-detection-net
