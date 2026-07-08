@@ -54,6 +54,16 @@ def _column_exists(t_env: TableEnvironment, table: str, column: str) -> bool:
         return False
 
 
+def _count(t_env: TableEnvironment, table: str) -> int:
+    try:
+        with t_env.execute_sql(f"SELECT COUNT(*) FROM `{table}`").collect() as rs:
+            for r in rs:
+                return int(r[0])
+    except Exception:
+        return -1
+    return -1
+
+
 def main() -> None:
     settings = EnvironmentSettings.in_batch_mode()
     t_env = TableEnvironment.create(settings)
@@ -63,8 +73,19 @@ def main() -> None:
     _register_paimon(t_env)
 
     # ── 0. Idempotency guard ─────────────────────────────────────────────────
-    if _column_exists(t_env, "violence_incidents", "incident_uid"):
-        print("[INFO] violence_incidents already has incident_uid — migration already done.")
+    # "Đã migrate" = có cột incident_uid VÀ dữ liệu đã copy đủ từ backup
+    # (lần chạy trước có thể fail giữa backfill sau khi rename+create xong).
+    schema_done = _column_exists(t_env, "violence_incidents", "incident_uid")
+    backup_exists = _table_exists(t_env, "violence_incidents_v1_backup")
+    data_done = True
+    if schema_done and backup_exists:
+        n_backup = _count(t_env, "violence_incidents_v1_backup")
+        n_v2 = _count(t_env, "violence_incidents")
+        data_done = n_v2 >= n_backup > 0 or n_backup == 0
+        print(f"[INFO] Row check: v2={n_v2}, backup={n_backup} → data_done={data_done}")
+
+    if schema_done and data_done:
+        print("[INFO] violence_incidents already migrated (schema + data) — skip.")
     else:
         # ── 1. Backup old table ──────────────────────────────────────────────
         if _table_exists(t_env, "violence_incidents_v1_backup"):
