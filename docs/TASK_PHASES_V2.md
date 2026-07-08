@@ -14,12 +14,31 @@
 | Phase | Nội dung | Chạy ở đâu | Cần GPU? | Trạng thái |
 |:-----:|----------|------------|:--------:|:----------:|
 | 0 | Code refactor (pipeline + chatbot + UI) | local/git | ✗ | ✅ XONG |
-| 1 | Fix Trino federation (Paimon + Iceberg) | GCP | ✗ | ⬜ **BLOCKING** |
-| 2 | Deploy schema v2 + migrate dữ liệu cũ | GCP | ✗ | ⬜ |
-| 3 | Redeploy services (pipeline-manager, chatbot, Grafana) | GCP | ✗ | ⬜ |
+| 1 | Fix Trino federation (Paimon + Iceberg) | GCP | ✗ | ✅ XONG 08/07 |
+| 2 | Deploy schema v2 + migrate dữ liệu cũ | GCP | ✗ | ✅ XONG 08/07 |
+| 3 | Redeploy services (pipeline-manager, chatbot, Grafana) | GCP | ✗ | ✅ XONG 08/07 |
 | 4 | Producer mới + bboxAPI trên Vast.ai | Vast.ai | ✔ | ⬜ |
 | 5 | Nghiệm thu E2E (số vụ đúng, ảnh có bbox, chatbot) | cả 2 | ✔ | ⬜ |
 | 6 | Đồng bộ báo cáo + slide + Grafana panel | local | ✗ | ⬜ |
+
+### Ghi chú thi công Phase 1–3 (08/07/2026)
+- **Phase 1 root cause:** KHÔNG phải plugin — trino-coordinator được recreate 06/07 mà shell
+  không nạp `.env.gcp` → block `environment: ${MINIO_ROOT_USER:-minio}` (đè `env_file`)
+  bake creds default `minio/mypassword`, trong khi MinIO chạy `minioadmin` → S3 403.
+  Fix: bỏ override khỏi compose + recreate với `--env-file .env.gcp`. **Rule vận hành:
+  MỌI lệnh `docker compose` trên GCP phải kèm `--env-file .env.gcp`.**
+- VM local hotfixes (Grafana subpath/1g, node_exporter, thesis_evaluation.json, hack
+  FLUSS→Paimon trong chatbot cũ) đã backup branch local `wip/vm-local-20260708` (db9da76),
+  phần cần giữ đã port vào branch. VM không có creds GitHub → deploy code bằng
+  **git bundle qua `gcloud compute scp`** (xem lịch sử /tmp/r*.bundle).
+- Lỗi đã fix khi chạy batch v2: network buffers (taskmanager.memory.network 160→320MB),
+  OOM pipeline-manager (512m→1g), Paimon sink vs Adaptive Parallelism (tắt),
+  `INTERVAL HOUR(2)` ≤99 (đổi TIMESTAMP literal), EXTRACT trả BIGINT (CAST INT),
+  dim_time v1 (date grain) trùng tên (rename `dim_time_v1_backup`).
+- `update_frame_url` trước đây KHÔNG được job nào submit (frame_url không bao giờ ghi
+  → giải thích backup có **0/4446 dòng frame_url**) — đã thêm vào watchdog pipeline-manager.
+- Kafka `hot-violence-alerts-valid` cũ không còn message đọc được → gauge latency = 0
+  (trung thực, không bịa) — sẽ có số khi producer chạy lại ở Phase 4.
 
 **Thứ tự bắt buộc:** 1 → 2 → 3 → 4 → 5. Phase 6 làm sau khi 5 chốt số liệu.
 Phase 1–3 làm được NGAY (không cần bật GPU). Phase 4–5 chờ thuê/bật GPU Vast.
@@ -255,10 +274,14 @@ theo `VASTAI_SETUP_GUIDE.md` mục 2–3).
 3. HOT: ephemeral, mất cũng không sao (tier lại từ Kafka/producer).
 4. Trino config: revert commit Phase 1, `up -d --force-recreate trino-coordinator`.
 
-## Số liệu đối chiếu (điền ở Phase 2.7 / 5)
+## Số liệu đối chiếu (đo 08/07/2026, dữ liệu tích luỹ đến 05/07)
 
 | Chỉ số | v1 (raw events) | v2 (số vụ) | Ghi chú |
 |---|---|---|---|
-| WARM total violent | _(điền)_ | _(điền)_ | |
-| COLD total | _(điền)_ | _(điền)_ | |
-| Chatbot latency câu COUNT | _(điền)_ | _(điền)_ | 3 call → 1 call |
+| WARM events (tổng / violent) | 4.446 / 1.902 | — (giữ event grain ở violence_incidents) | |
+| **WARM số vụ** | 1.902 (đếm sai) | **88** | giảm **21,6×**; khớp CHÍNH XÁC view sessionized cũ (88) |
+| Số vụ 7 ngày gần nhất | — | 41 | `violent_7d` gauge + /chat đều khớp |
+| COLD | 0 | 0 | archival chưa từng chạy thành công; sẽ chạy 02:00 daily |
+| frame_url còn trong Paimon | **0/4446** (bug NULL-clobber) | fix bằng partial-update + update_frame_url được quản lý | ảnh gốc vẫn trong MinIO |
+| Chatbot câu COUNT | 3 call Gemini (+ self-correct loop) | 1 call + template answer, ~9–10s E2E | "Ghi nhận 41 vụ..." đúng |
+| Dims | camera hardcode 4 nơi | dim_camera 15 (CSV) + dim_date 730 + dim_time 24 + dim_event_type 5 | |
