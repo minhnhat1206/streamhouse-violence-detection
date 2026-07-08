@@ -430,6 +430,8 @@ def main():
     # batch shuffle đòi >512 buffers → "Insufficient number of network buffers".
     t_env.get_config().set("parallelism.default", "1")
     t_env.get_config().set("table.exec.resource.default-parallelism", "1")
+    # Paimon sink không hỗ trợ Adaptive Parallelism của batch scheduler
+    t_env.get_config().set("execution.batch.adaptive.auto-parallelism.enabled", "false")
 
     _register_catalogs(t_env)
     _create_fluss_tables(t_env)
