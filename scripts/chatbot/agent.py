@@ -232,6 +232,7 @@ Phân tích câu hỏi tiếng Việt và trả về MỘT JSON duy nhất gồm
 - Hôm nay: {today_str} | Bây giờ (UTC): {now_str}. Time filter dùng TIMESTAMP literal.
 - Với bảng fluss.*: KHÔNG dùng COUNT()/SUM() — SELECT các cột với LIMIT 200 (đếm ở client).
 - LIMIT 50 cho SELECT chi tiết; COUNT/AVG không cần LIMIT.
+- Aggregate LUÔN đặt alias rõ nghĩa: COUNT(*) AS incident_count, AVG(x) AS avg_risk_score.
 
 ## JSON trả về (CHỈ JSON, không giải thích, không markdown fence)
 {{"time_period": "...", "location": null, "metric": "count|average|max|min|list",
