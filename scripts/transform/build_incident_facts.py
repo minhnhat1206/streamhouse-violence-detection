@@ -105,28 +105,32 @@ def build_facts(t_env: TableEnvironment) -> None:
 
 
 def build_bridge(t_env: TableEnvironment) -> None:
-    """Parse people_json của event peak → fact_incident_person (bounded, Python-side)."""
+    """Parse people_json của event peak → fact_incident_person (bounded, Python-side).
+
+    KHÔNG dùng ROW_NUMBER window — sort-shuffle của nó đòi >=128 network buffers
+    trong khi 4 streaming job đã chiếm gần hết pool. Scan phẳng (chained, không
+    cần buffer) rồi chọn peak theo risk_score ở Python.
+    """
     print("[INFO] Building fact_incident_person bridge from peak-event bbox...")
-    rows = []
+    peak: dict = {}  # incident_uid -> (risk_score, ts, people_json)
     try:
         with t_env.execute_sql(f"""
-            SELECT incident_uid, people_json FROM (
-                SELECT incident_uid, people_json,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY incident_uid
-                           ORDER BY risk_score DESC, `timestamp` DESC
-                       ) AS rn
-                FROM `paimon`.`security`.`violence_incidents`
-                WHERE incident_uid IS NOT NULL
-                  AND people_json IS NOT NULL
-                  AND `timestamp` >= TIMESTAMP '{CUTOFF_TS}'
-            ) WHERE rn = 1
+            SELECT incident_uid, people_json, risk_score, `timestamp`
+            FROM `paimon`.`security`.`violence_incidents`
+            WHERE incident_uid IS NOT NULL
+              AND people_json IS NOT NULL
+              AND people_json <> '[]'
+              AND `timestamp` >= TIMESTAMP '{CUTOFF_TS}'
         """).collect() as rs:
             for r in rs:
-                rows.append((r[0], r[1]))
+                uid, pj, risk, ts = r[0], r[1], float(r[2] or 0.0), r[3]
+                cur = peak.get(uid)
+                if cur is None or (risk, ts) > (cur[0], cur[1]):
+                    peak[uid] = (risk, ts, pj)
     except Exception as e:
         print(f"[WARN] Could not read peak people_json: {e}")
         return
+    rows = [(uid, v[2]) for uid, v in peak.items()]
 
     values = []
     for incident_uid, people_json in rows:
