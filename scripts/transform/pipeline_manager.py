@@ -73,6 +73,13 @@ STREAMING_JOBS: dict[str, dict] = {
         "description":    "Paimon CDC → daily_incident_stats + camera_stats (WARM gold)",
         "submit_timeout": 400,
     },
+    # Key = tên bảng đầy đủ để không match nhầm job hot sink
+    # (tên job kia chứa "hot_violence_incidents").
+    "paimon.security.violence_incidents": {
+        "script":         f"{SCRIPTS_DIR}/update_frame_url.py",
+        "description":    "Kafka frames-uploaded → Paimon events (frame_url/people upsert)",
+        "submit_timeout": 400,
+    },
 }
 
 # ── Periodic tiering job: Fluss HOT → Paimon WARM ──────────────────────────────
