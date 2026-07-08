@@ -303,6 +303,9 @@ services:
         # cần thêm 512 → mặc định 10%≈160MB (5079 buffers) không đủ.
         taskmanager.memory.network.min: 320mb
         taskmanager.memory.network.max: 320mb
+        # Batch sort-shuffle mặc định đòi 512 buffer/partition — 4 streaming job
+        # chiếm gần hết pool nên batch fail; 128 là đủ cho job p=1 dữ liệu nhỏ
+        taskmanager.network.sort-shuffle.min-buffers: 128
         state.backend: rocksdb
         state.checkpoints.dir: s3://paimon/flink-checkpoints
         s3.endpoint: http://minio:9000
