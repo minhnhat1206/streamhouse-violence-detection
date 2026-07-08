@@ -83,7 +83,7 @@ def build_facts(t_env: TableEnvironment) -> None:
             a.incident_uid                                        AS incident_id,
             a.camera_id,
             CAST(a.start_ts AS DATE)                              AS date_id,
-            EXTRACT(HOUR FROM a.start_ts)                         AS time_id,
+            CAST(EXTRACT(HOUR FROM a.start_ts) AS INT)            AS time_id,
             COALESCE(et.event_type_id, 0)                         AS event_type_id,
             a.start_ts,
             a.end_ts,
