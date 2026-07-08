@@ -329,8 +329,13 @@ class CameraWorker(threading.Thread):
                 connected = True
                 print(f"[{self.cam_id}] RTSP connected: {capture_url}")
 
-            # Cache latest frame — reused when sending faster than capture rate
-            self._last_thumbnail = thumbnail_b64
+            # Cache latest frame — reused when sending faster than capture rate.
+            # Chỉ cache frame THẬT (fake placeholder ~292 bytes khi semaphore bận
+            # không được đè lên frame thật đã có — evidence phải là ảnh thật).
+            if success and len(thumbnail_b64) > 1000:
+                self._last_thumbnail = thumbnail_b64
+            elif not self._last_thumbnail:
+                self._last_thumbnail = thumbnail_b64
 
             # Get real inference result from status file
             result = real_inference(self.cam_id, self._last_thumbnail)
