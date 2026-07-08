@@ -17,9 +17,40 @@
 | 1 | Fix Trino federation (Paimon + Iceberg) | GCP | ✗ | ✅ XONG 08/07 |
 | 2 | Deploy schema v2 + migrate dữ liệu cũ | GCP | ✗ | ✅ XONG 08/07 |
 | 3 | Redeploy services (pipeline-manager, chatbot, Grafana) | GCP | ✗ | ✅ XONG 08/07 |
-| 4 | Producer mới + bboxAPI trên Vast.ai | Vast.ai | ✔ | ⬜ |
-| 5 | Nghiệm thu E2E (số vụ đúng, ảnh có bbox, chatbot) | cả 2 | ✔ | ⬜ |
+| 4 | Producer mới + bboxAPI trên Vast.ai | Vast.ai | ✔ | ✅ XONG 08/07 |
+| 5 | Nghiệm thu E2E (số vụ đúng, ảnh có bbox, chatbot) | cả 2 | ✔ | ✅ XONG 08/07 |
 | 6 | Đồng bộ báo cáo + slide + Grafana panel | local | ✗ | ⬜ |
+
+### Ghi chú thi công Phase 4–5 (08/07/2026 — Vast instance MỚI, dựng từ 0)
+- Setup theo VASTAI_SETUP_GUIDE, các điểm lệch phải nhớ:
+  - `/venv/main` có sẵn TF 2.19 → phải cài đè TF 2.15; `tensorflow[and-cuda]==2.15.0`
+    FAIL vì `tensorrt-libs 8.6.1` bị gỡ khỏi PyPI → cài `tensorflow==2.15.0` + bộ
+    `nvidia-*-cu12` wheels tường minh (không cần tensorrt). Pin thêm
+    `tensorflow-metadata==1.14.0` (bản mới đòi protobuf 5.x xung đột TF 2.15);
+    `opencv-python-headless==4.8.1.78` (pin cũ 4.8.1.5 không tồn tại).
+  - Playlist/schedule dùng path container `/app/...` → tạo symlink
+    `ln -s /root/streamhouse/data /app/data` + `mkdir /app/tmp`.
+  - rtsp_pusher cần `FIGHT_DIR/NON_FIGHT_DIR` trỏ `SCVD_converted/Train/{Violence,Normal}`.
+  - bboxAPI: `/streams/start` phải kèm `output_rtsp_url: rtsp://.../{cam}_bbox`
+    thì mới publish stream có vẽ box (không phải env).
+  - Cài đặt dài chạy trong **tmux** (SSH Vast hay rớt); pip dùng `--no-cache-dir` (disk 16GB).
+- Flink GCP khi thêm job streaming thứ 4 (update_frame_url): slot 4→6, network 512MB,
+  `sort-shuffle.min-buffers: 64`, bridge bỏ ROW_NUMBER (chọn peak ở Python) + sleep 20s
+  giữa fact và bridge (buffer release async).
+- visualize_stream.py: + đo `inference_ms` thật vào status JSON (đã mirror về
+  `vastVidStream/serverBuildAPI/`).
+
+### Kết quả nghiệm thu E2E (08/07/2026, sau ~2h chạy)
+| Mục | Kết quả |
+|---|---|
+| Sessionization E2E | ✓ Incident OPEN/CLOSE; events cùng vụ chung incident_uid từ Kafka → fact |
+| Số vụ 2h theo camera | cam_01: 20, cam_02: 31, cam_03: 27, cam_04: 26, cam_05: 25 (tổng 129) |
+| Chatbot vs SQL tay | ✓ "Ghi nhận 129 vụ" — khớp TUYỆT ĐỐI, template path, ~6.8s |
+| frame_url | ✓ 100% events violent mới có URL; fact có peak frame |
+| Ảnh evidence | ✓ `{cam}/{date}/{incident_uid}/{event}.jpg`, 640×360 CÓ BBOX (frame đầu vụ 160×90 — lag 1 vòng) |
+| Bridge bbox | ✓ fact_incident_person: 460 người / 110 vụ, det_score max 0.928 |
+| Metric thật (hết bịa) | ✓ inference 1.607ms/clip (5 stream đồng thời/A4000), producer→broker 2.379ms, 43.6 events/min |
+| Ghi chú kịch bản | cam_04 (hard-negative) 26 vụ > thiết kế 8 → false alarm thật của model trên hard negatives — SỐ LIỆU TỐT cho phân tích §4.x; cam_05 cao điểm 25 vụ < 60 do INCIDENT_GAP 30s gộp event gần nhau |
 
 ### Ghi chú thi công Phase 1–3 (08/07/2026)
 - **Phase 1 root cause:** KHÔNG phải plugin — trino-coordinator được recreate 06/07 mà shell
