@@ -857,10 +857,12 @@ async def execute_query(state: AgentState) -> AgentState:
                         "LIMIT 100"
                     )
                     logger.info("[DUAL-LAYER] Running supplementary HOT incident scan...")
+                    # Best-effort: timeout ngắn — treo 45s làm câu 'hôm nay' chậm
+                    # vô lý trong khi phần WARM đã có kết quả đúng.
                     hot_results = _trino_client.route_query(
                         sql=hot_sql,
                         layer=LayerChoice.FLUSS,
-                        timeout=45,
+                        timeout=12,
                     )
                     violent_hot = list(hot_results or [])
                     state["hot_query_result"] = QueryResult(
