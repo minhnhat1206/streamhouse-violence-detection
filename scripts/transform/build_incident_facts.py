@@ -162,6 +162,9 @@ def build_bridge(t_env: TableEnvironment) -> None:
 def main() -> None:
     settings = EnvironmentSettings.in_batch_mode()
     t_env = TableEnvironment.create(settings)
+    # Tránh "Insufficient number of network buffers" trên TaskManager nhỏ
+    t_env.get_config().set("parallelism.default", "1")
+    t_env.get_config().set("table.exec.resource.default-parallelism", "1")
     _register_paimon(t_env)
 
     build_facts(t_env)

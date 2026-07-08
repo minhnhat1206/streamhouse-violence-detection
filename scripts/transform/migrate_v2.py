@@ -57,6 +57,9 @@ def _column_exists(t_env: TableEnvironment, table: str, column: str) -> bool:
 def main() -> None:
     settings = EnvironmentSettings.in_batch_mode()
     t_env = TableEnvironment.create(settings)
+    # Tránh "Insufficient number of network buffers" trên TaskManager nhỏ
+    t_env.get_config().set("parallelism.default", "1")
+    t_env.get_config().set("table.exec.resource.default-parallelism", "1")
     _register_paimon(t_env)
 
     # ── 0. Idempotency guard ─────────────────────────────────────────────────

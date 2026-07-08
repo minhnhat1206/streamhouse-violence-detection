@@ -411,6 +411,10 @@ def _seed_dim_event_type(t_env: TableEnvironment) -> None:
 def main():
     settings = EnvironmentSettings.in_batch_mode()
     t_env = TableEnvironment.create(settings)
+    # TaskManager nhỏ (network buffers hạn chế) — parallelism mặc định cao làm
+    # batch shuffle đòi >512 buffers → "Insufficient number of network buffers".
+    t_env.get_config().set("parallelism.default", "1")
+    t_env.get_config().set("table.exec.resource.default-parallelism", "1")
 
     _register_catalogs(t_env)
     _create_fluss_tables(t_env)
