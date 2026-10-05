@@ -1,4 +1,4 @@
 services:
   rtsp-inference-mock:
     environment:
-      KAFKA_BROKER: "<REDACTED_IP>:9093"
+      KAFKA_BROKER: "${GCP_VM_EXTERNAL_IP:?set GCP_VM_EXTERNAL_IP}:9093"

@@ -48,7 +48,7 @@ if [ -d "$HOME/streamhouse/deploy" ]; then
     echo "⚠️  EDIT .env.gcp before running docker compose:"
     echo "    nano ~/streamhouse/deploy/.env.gcp"
     echo "    → Set GEMINI_API_KEY=<your-key>"
-    echo "    → Verify GCP_VM_EXTERNAL_IP=<REDACTED_IP>"
+    echo "    → Verify GCP_VM_EXTERNAL_IP=<VM_EXTERNAL_IP>"
     echo ""
   else
     echo ".env.gcp already exists — skipping"

@@ -16,7 +16,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     env_file:
-      - kafka-bridge.env        # Kafka + MinIO connection to Oracle Cloud
+      - kafka-bridge.env        # Kafka + MinIO connection to the cloud VM
     volumes:
       - ./models:/app/models    # Pre-downloaded model weights
       - viomovinet-logs:/app/logs

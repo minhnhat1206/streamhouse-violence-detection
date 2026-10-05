@@ -1,546 +1,295 @@
-# Realtime Violence Detection — Streamhouse Architecture
+<div align="center">
 
-**Khóa luận tốt nghiệp** — Nguyễn Ngọc Minh Nhật & Nguyễn Quốc Huy  
-**Thesis project** — Smart security monitoring system for realtime violence detection from RTSP cameras.
+# Streamhouse Violence Detection
 
-[![Stack](https://img.shields.io/badge/Stack-Flink%20%7C%20Fluss%20%7C%20Paimon%20%7C%20Iceberg-blue)]()
-[![Latency](https://img.shields.io/badge/HOT%20latency-%3C100ms-green)]()
-[![Tests](https://img.shields.io/badge/E2E%20tests-22%2F23%20PASS-brightgreen)]()
+### Real-time violence detection and large-scale video analytics on a **Streamhouse** data platform
 
----
+**Apache Fluss · Paimon · Iceberg** on **Flink** — with **StreamViD-A**, a causal two-stream deep-learning model, and a Vietnamese **Agentic RAG** analyst
 
-## Table of Contents
+![Flink](https://img.shields.io/badge/Apache%20Flink-1.18-E6526F?logo=apacheflink&logoColor=white)
+![Kafka](https://img.shields.io/badge/Apache%20Kafka-4.0-231F20?logo=apachekafka&logoColor=white)
+![Fluss](https://img.shields.io/badge/Apache%20Fluss-0.9-0A66C2)
+![Paimon](https://img.shields.io/badge/Apache%20Paimon-0.8-1E88E5)
+![Iceberg](https://img.shields.io/badge/Apache%20Iceberg-1.5-00B8D9)
+![Trino](https://img.shields.io/badge/Trino-440-DD00A1?logo=trino&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10-3776AB?logo=python&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker%20Compose-ready-2496ED?logo=docker&logoColor=white)
 
-1. [System Architecture](#system-architecture)
-2. [Tech Stack](#tech-stack)
-3. [Prerequisites](#prerequisites)
-4. [Quick Start](#quick-start)
-5. [Running the Full Pipeline](#running-the-full-pipeline)
-6. [Service Profiles](#service-profiles)
-7. [Verifying the Setup](#verifying-the-setup)
-8. [Using the Chatbot](#using-the-chatbot)
-9. [Project Structure](#project-structure)
-10. [Key Ports](#key-ports)
-11. [Stopping Services](#stopping-services)
-12. [Troubleshooting](#troubleshooting)
-13. [Documentation](#documentation)
+<img src="docs/images/system-architecture.png" alt="5-layer system architecture: ingestion, processing, tiered storage, query, intelligence" width="100%">
+
+</div>
+
+> Graduation thesis, Faculty of Information Technology, **HCMC University of Technology and Education (HCMUTE)**, June 2026.
+> *"Optimizing the ELT pipeline and deep-learning model on a Lakehouse architecture for large-scale violent-video analytics."*
 
 ---
 
-## System Architecture
+## Highlights
 
-The system implements a **Streamhouse Trio** — three storage layers with automatic tiering:
+| | Result | Measured on |
+|---|---|---|
+| **HOT query latency** | **~100 ms** (target < 100 ms) — Apache Fluss | GCP `e2-standard-4`, no GPU |
+| **WARM query latency** | **5.9 s** (target < 10 s) — Paimon via Trino | same |
+| **COLD query latency** | **9.5 s** (target < 30 s) — Iceberg via Trino | same |
+| **WARM speed-up** | **14–23×** vs. querying Paimon through Flink SQL Gateway (3–5 min → 5.9–13 s), by building the `paimon-trino-440` connector from source | same |
+| **vs. Medallion** | HOT path **~300×** faster than a ~30 s micro-batch Bronze→Silver→Gold hop, with each record stored once instead of three times | same |
+| **Exactly-once** | **100 / 100** records correct (none lost, none duplicated) under Flink failure injection | same |
+| **Data contract** | 6 shift-left rules; **97.1 %** of events valid, **2.9 %** quarantined before they reach storage | 15-camera stream |
+| **Model accuracy** | **StreamViD-A: 82.5 % accuracy, 0.903 AUC-ROC** — highest AUC of 46 experiments; **+15 pts** over I3D and ResNet50+LSTM | 378-clip balanced test set |
+| **Model efficiency** | Only **252 K trainable** of 8.54 M parameters; ~190 MB VRAM per stream → **~70 concurrent cameras on one 16 GB RTX A4000** | NVIDIA A4000 |
+| **Sessionization** | A 30 s session window cuts the records to process by **97.6 %** | Flink job |
+| **Footprint** | Whole data platform in **~8.5 GB RAM**; **22 / 23** end-to-end test cases passed | GCP VM |
+
+All figures come from the thesis experiments (Chapter 4). The 15 cameras are simulated RTSP feeds built from public datasets (see [Limitations](#limitations--future-work)).
+
+---
+
+## Why Streamhouse?
+
+Classic Lakehouse stacks (Lambda, Medallion) copy every event through Bronze → Silver → Gold, which adds latency and storage duplication. A **Streamhouse** keeps the *streaming* store and the *lake* in one design: data is **written once** into a real-time table and **tiered automatically** into the lake, while one SQL engine queries every tier.
+
+<div align="center">
+<img src="docs/images/streamhouse-trio.png" alt="The Streamhouse trio: Fluss, Paimon, Iceberg" width="62%">
+</div>
+
+| Tier | Engine | Data age | Latency (measured) | Role |
+|------|--------|----------|--------------------|------|
+| 🔥 **HOT** | **Apache Fluss** | < 1 h | ~100 ms | Real-time columnar table store; live alerts and the command center |
+| 🟠 **WARM** | **Apache Paimon** | 1 h – 7 d | 5.9 s | LSM-tree lakehouse table, ACID, CDC; analytics and aggregations |
+| 🧊 **COLD** | **Apache Iceberg** | > 7 d | 9.5 s | Parquet archive with time-travel for audits and history |
+
+A **Pipeline Manager** supervises everything: it initialises schemas, seeds the camera dimension, submits and watches the Flink jobs, tiers HOT → WARM every 30 minutes and archives WARM → COLD daily at 02:00 UTC.
+
+## Architecture
 
 ```
-Camera (RTSP / RWF-2000 dataset)
-        │
-        ▼  rtsp_pusher → MediaMTX → rtsp-inference-mock
-Kafka: urban-safety-alerts  (raw inference events from VioMobileNet)
-        │
-        ▼  [Flink: data_contract_validator]
-        ├── valid   → hot-violence-alerts-valid
-        └── invalid → urban-safety-quarantine
-
-[Flink: sink_to_fluss_enriched]          [Flink: aggregate_paimon]
-        │                                         │
-        ▼                                         ▼
-   Fluss HOT                               Paimon WARM
-   (<100ms, 1-2h)    ──tier every 30min──  (minutes latency, 7-30d)
-                                                  │
-                                         archive daily at 02:00
-                                                  ▼
-                                          Iceberg COLD
-                                          (Trino, years)
-                                                  │
-                                                  ▼
-                              Agentic RAG Chatbot (LangGraph + Gemini 2.0)
-                                                  │
-                                                  ▼
-                              React Dashboard (Violence-Urban-Safety-UI)
+Camera (RTSP) ─► MediaMTX ─► StreamViD-A inference ─► Kafka (urban-safety-alerts)
+                                                          │
+                                  Flink: Data Contract Validator (DC-01 … DC-06)
+                                     ├─ valid ───► Fluss  HOT  ─(tier 30 min)─► Paimon WARM ─(daily)─► Iceberg COLD
+                                     └─ invalid ─► quarantine topic (dead-letter)
+                                                          │
+                              Trino (federated SQL over Paimon + Iceberg) · Flink SQL Gateway (Fluss)
+                                                          │
+                        Agentic RAG chatbot (LangGraph · Gemini · ChromaDB) ─► React command-center dashboard
 ```
 
-### Data Tiering (True Streamhouse — no dual-write)
+<div align="center">
+<img src="docs/images/data-flow.png" alt="End-to-end data flow from camera to dashboard" width="100%">
+</div>
 
-| Layer | Technology | Write | Retention | Query latency | Use when |
-|-------|-----------|-------|-----------|---------------|---------|
-| HOT   | Fluss     | Flink streaming | ~1-2h | <100ms | Last hour real-time |
-| WARM  | Paimon    | Periodic tiering from Fluss | 7-30d | 1-5min | 1h → 7d |
-| COLD  | Iceberg   | Daily batch archive | Forever | <5s (Trino) | >7d history |
+**Design decisions worth knowing**
+
+- **Shift-left data quality.** Six data-contract rules (DC-01…DC-06: schema, nulls, value ranges, freshness, de-duplication, camera whitelist) run inside Flink; bad events go to a quarantine topic and never touch storage.
+- **Exactly-once end to end.** Flink checkpointing (30 s) plus transactional Paimon/Iceberg commits; verified by killing the job mid-stream.
+- **Star schema in the WARM layer.** `fact_violence_incident` joined to `dim_camera`, `dim_date`, `dim_time`, `dim_event_type`.
+- **Evidence frames** (JPEG with bounding boxes) are stored in MinIO and linked from incident rows, so every alert can be backed by an image.
+
+<details>
+<summary><b>More diagrams</b> — shift-left validation, star schema, pipeline manager, hybrid deployment</summary>
+
+<br>
+
+<img src="docs/images/shift-left-validation.png" alt="Shift-left validation" width="100%">
+<img src="docs/images/star-schema.png" alt="Star schema" width="70%">
+<img src="docs/images/pipeline-manager.png" alt="Pipeline manager state machine" width="100%">
+<img src="docs/images/hybrid-deployment.png" alt="Hybrid GPU + cloud deployment" width="100%">
+
+</details>
 
 ---
 
-## Tech Stack
+## AI model — StreamViD-A
 
-| Layer | Technology | Version | Purpose |
-|-------|-----------|---------|---------|
-| Message Broker | Apache Kafka (KRaft) | 4.0.1 | Event streaming, no ZooKeeper |
-| Compute | Apache Flink | 1.18.1 | Streaming, exactly-once semantics |
-| HOT Storage | Apache Fluss | 0.9.0 | Real-time columnar store, <100ms |
-| WARM Storage | Apache Paimon | 0.8.2 | ACID, CDC, LSM-tree |
-| COLD Storage | Apache Iceberg | 1.5.2 | Historical, Parquet, time-travel |
-| Object Store | MinIO | Latest | S3-compatible, all warehouse data |
-| Query Engine | Trino | 476 | Federated SQL across all layers |
-| AI/LLM | Google Gemini 2.0 Flash | Latest | Text-to-SQL, Agentic RAG |
-| Vector DB | ChromaDB | Latest | RAG schema context retrieval |
-| ML Model | VioMobileNet (mock) | — | Violence detection (mock for demo) |
-| Frontend | React + Tailwind CSS | — | Command center dashboard |
-| Monitoring | Prometheus + Grafana | — | Metrics & dashboards |
-| Orchestration | Apache Airflow | 2.9.1 | DAG scheduling (optional) |
+Violence detection has to run on **endless RTSP streams**, so the model must be **temporal**, **causal** (past frames only) and **light enough to share one GPU across dozens of cameras**. StreamViD-A is a *causal two-stream* network built on that constraint:
 
----
+- **Appearance stream** — a **frozen MoViNet-A3** (Kinetics-600 pre-trained, 744-d features) that keeps constant per-stream memory through streaming "external states".
+- **Motion stream** — **CausalFrameDiff** (difference of consecutive frames — no optical flow) → small 2D CNN encoder → **causal temporal attention** (4 heads, lower-triangular mask).
+- **Head** — concatenated 808-d vector → `Dense(256)` → `Dropout(0.3)` → softmax (Fight / No-Fight).
 
-## Prerequisites
+Only **252,130 of 8,540,116** parameters are trained (≈ 3 %).
 
-### Hardware
+<div align="center">
+<img src="docs/images/streamvid-a-architecture.png" alt="StreamViD-A architecture" width="46%">
+</div>
 
-| Resource | Minimum | Recommended |
-|----------|---------|-------------|
-| RAM | 12GB free | 16GB total machine |
-| CPU | 4 cores | 8 cores |
-| Disk | 30GB free | 50GB free |
-| OS | Windows 10/11 (WSL2) or Linux | — |
+Trained on a merged three-source dataset — **RWF-2000 + VioPeru + SCFD, 2,556 clips** — across **46 experiments**. Evaluated on a balanced 378-clip test set:
 
-> **Note:** The ML model (VioMobileNet) runs on a **separate machine**. This repo uses a mock inference service by default.
+| Model | Test Acc | F1 (macro) | AUC-ROC |
+|-------|:-------:|:----------:|:-------:|
+| **StreamViD-A (`sva_03`, deployed)** | **0.8254** | **0.8254** | **0.9029** |
+| MoViNet-A3 (fine-tuned) | 0.8122 | 0.8116 | — |
+| MoViNet-A2 | 0.7937 | 0.7699 | 0.7698 |
+| MoViNet-A1 | 0.7778 | 0.8067 | 0.8069 |
+| ResNet50 + LSTM | 0.6746 | 0.6746 | 0.7367 |
+| I3D | 0.6720 | 0.6715 | 0.7290 |
 
-### Software
+The best-accuracy variant (A3 + light augmentation) reaches **0.8439**; `sva_03` was chosen for deployment because it has the best AUC-ROC (the most reliable score ranking for threshold-based alerting).
 
-- **Docker Desktop** 24+ with WSL2 backend (Windows) or Docker Engine 24+ (Linux)
-- **Git** with submodule support
-- **Google Gemini API key** (free tier works) — [Get one here](https://aistudio.google.com/app/apikey)
-- Optional: Node.js 18+ (for running the frontend locally)
+<div align="center">
+<img src="docs/images/model-comparison-heatmap.png" alt="Model comparison heatmap" width="49%">
+<img src="docs/images/model-pareto-vram.png" alt="Accuracy versus VRAM per stream" width="49%">
+</div>
 
-### Dataset (optional — only for RTSP streaming profile)
-
-Download [RWF-2000 dataset](https://github.com/mchengny/RWF2000-Video-Database-for-Violence-Detection) and place at:
-
-```
-data/raw/RWF-2000/
-├── norTrain/
-│   ├── Fight/      ← used by rtsp_pusher for live RTSP simulation
-│   └── NonFight/
-└── train/
-```
-
-Without the dataset, the system uses `inference-mock` (generates synthetic data — fully functional for testing).
+> **Scope note.** This repository contains the **data platform, pipelines, chatbot and deployment** code. The model is trained and served on a separate GPU node (`deploy/viomovinet/` has its compose file and Kafka bridge). The default streaming profile here uses `rtsp_inference_mock.py` — a drop-in placeholder with the same event schema — so the whole platform can be reproduced without a GPU.
 
 ---
 
-## Quick Start
+## Agentic RAG analyst (Vietnamese)
+
+Operators ask questions in plain Vietnamese; a **LangGraph** agent turns them into SQL on the *right* tier and answers with citations.
+
+<div align="center">
+<img src="docs/images/agentic-rag-graph.png" alt="LangGraph agent graph" width="100%">
+</div>
+
+- **Layer routing** from the time range in the question: < 1 h → Fluss, 1 h – 7 d → Paimon, > 7 d → Iceberg.
+- **Text-to-SQL** with Gemini 2.0 Flash, grounded in schema metadata retrieved from **ChromaDB** (no invented tables or columns).
+- **Self-correction**: failed SQL is repaired and retried up to 3 times; if it still fails the user is told why.
+- **Evidence retrieval**: asks like *"show me the latest incident photo"* return the stored frames.
 
 ```bash
-# 1. Clone with submodules
-git clone --recurse-submodules https://github.com/minhnhat1206/realtime-violence-detection.git
-cd realtime-violence-detection
+curl -X POST http://localhost:5002/chat -H "Content-Type: application/json" \
+  -d '{"query": "Trong 30 phút qua có bao nhiêu vụ bạo lực?"}'      # → HOT  (Fluss)
+```
 
-# 2. Configure environment
-cp docker/.env.example docker/.env
-# Edit docker/.env — at minimum set GEMINI_API_KEY
+## Dashboard & observability
 
-# 3. Create Docker network
+The React dashboard lives in the [`Violence-Urban-Safety-UI`](https://github.com/minhnhat1206/Violence-Urban-Safety-UI) submodule (Command Center, Live Streams, Alerts, Analytics, Vigilance Terminal chatbot). Grafana covers pipeline health and per-tier latency.
+
+<div align="center">
+<img src="docs/images/ui-stream-detail-bbox.png" alt="Live stream with detected-violence bounding boxes" width="49%">
+<img src="docs/images/ui-live-streams.png" alt="15-camera live grid" width="49%">
+<img src="docs/images/ui-command-center.png" alt="Command center with HOT/WARM/COLD status" width="49%">
+<img src="docs/images/ui-chatbot-evidence.png" alt="Chatbot answering with evidence frames" width="49%">
+<img src="docs/images/ui-alerts.png" alt="Alerts dashboard" width="49%">
+<img src="docs/images/ui-analytics.png" alt="Analytics dashboard" width="49%">
+<img src="docs/images/grafana-storage-latency.png" alt="Grafana: per-tier query latency" width="49%">
+<img src="docs/images/grafana-pipeline-health.png" alt="Grafana: pipeline throughput and Flink job health" width="49%">
+</div>
+
+---
+
+## Quick start
+
+**Requirements:** Docker 24+ (Compose v2), ~12 GB RAM for containers, ~30 GB disk, a free [Gemini API key](https://aistudio.google.com/app/apikey). Optional: the [RWF-2000](https://github.com/mchengny/RWF2000-Video-Database-for-Violence-Detection) videos for the RTSP simulator (`data/raw/RWF-2000/`).
+
+```bash
+git clone --recurse-submodules https://github.com/minhnhat1206/streamhouse-violence-detection.git
+cd streamhouse-violence-detection
+
+cp docker/.env.example docker/.env          # set GEMINI_API_KEY and change the default passwords
 docker network create violence-detection-net
 
-# 4. Start core stack
-cd docker && docker compose up -d
+# Core platform + RTSP simulator + Flink SQL Gateway (needed for HOT queries and dimension seeding)
+docker compose -f docker/docker-compose.yml --profile streaming --profile gateway up -d
 
-# 5. Wait ~3 minutes for pipeline-manager to init tables and submit Flink jobs
-docker logs -f pipeline-manager
-
-# 6. Open dashboard
-# Frontend: http://localhost:5173 (after npm install in Violence-Urban-Safety-UI/)
-# Chatbot API: http://localhost:5002/docs
-# Flink UI: http://localhost:8081
+docker logs -f pipeline-manager             # first start takes ~5 min while catalogs initialise and Flink jobs are submitted
 ```
 
-### Frontend setup
+Then open the Flink UI (`:8081`), MinIO (`:9001`), the chatbot Swagger (`:5002/docs`), or start the dashboard:
 
 ```bash
-git submodule update --init --recursive
-cd Violence-Urban-Safety-UI
-npm install
-npm run dev   # http://localhost:5173
+cd Violence-Urban-Safety-UI/frontend && npm install && npm run dev
 ```
 
----
+### Compose profiles
 
-## Running the Full Pipeline
+| Profile | Adds | Purpose |
+|---------|------|---------|
+| *(default)* | Kafka, MinIO, Flink, Fluss, MySQL, Hive Metastore, Trino, chatbot, pipeline-manager, frame-extractor | Core platform |
+| `streaming` | MediaMTX, `rtsp_pusher`, `rtsp-inference-mock` | Simulated 15-camera RTSP feed |
+| `gateway` | Flink SQL Gateway | HOT (Fluss) queries, `dim_camera` seeding |
+| `monitoring` | Prometheus, Grafana, node-exporter | Dashboards |
+| `ui` | Kafka UI | Browse topics |
+| `scaling` | 2 Trino workers | Faster federated queries |
+| `admin` | Admin API | Operations helpers |
 
-### Core services (always on)
+### Ports
+
+| Service | Port | | Service | Port |
+|---|---|---|---|---|
+| Flink UI | 8081 | | Chatbot API | 5002 |
+| Trino | 8082 | | Grafana | 3001 |
+| MinIO console / S3 | 9001 / 9000 | | Prometheus | 9090 |
+| Kafka (host) | 19092 | | MediaMTX (RTSP) | 8554 |
+| Fluss coordinator | 9123 | | Kafka UI | 18085 |
+
+### Verify
 
 ```bash
-cd docker
-docker compose up -d
+curl http://localhost:5002/health
+curl http://localhost:5002/api/layer-counts     # rows per tier (WARM fills after the first 30-min tiering run)
+curl http://localhost:5002/api/latency          # per-tier query latency
 ```
 
-Starts: kafka, minio, mysql, hive-metastore, fluss-zookeeper, fluss-coordinator, fluss-tablet, jobmanager, taskmanager, trino-coordinator, chatbot, pipeline-manager, inference-mock, frame-extractor.
+### Stop the simulators gracefully
 
-The `pipeline-manager` container automatically:
-1. Waits for Flink JobManager to be ready
-2. Creates Kafka topics via `create-topics.sh`
-3. Initializes Fluss, Paimon, Iceberg table schemas
-4. Seeds `dim_camera` (15 HCMC cameras) via Flink SQL Gateway
-5. Submits 3 streaming Flink jobs:
-   - **Contract Validator** — validates events, routes to valid/quarantine
-   - **Fluss HOT Sink** — Kafka → temporal join → Fluss (real-time, enriched with location)
-   - **Paimon Aggregation** — CDC → `daily_incident_stats` + `camera_stats`
-6. Runs periodic tiering (every 30min): Fluss HOT → Paimon WARM
-7. Runs daily archival (02:00 UTC): Paimon WARM → Iceberg COLD
-
-### With RTSP streaming (real video frames)
+`rtsp-inference-mock` and `rtsp_pusher` loop forever. Stop them before shutting the stack down:
 
 ```bash
-docker compose --profile streaming up -d
+docker exec rtsp-inference-mock touch /app/tmp/STOP
+docker exec rtsp_pusher touch /app/tmp/STOP
+docker compose -f docker/docker-compose.yml down        # add -v to also delete data volumes
 ```
 
-Adds: mediamtx (RTSP relay), rtsp_pusher (pushes RWF-2000 video), rtsp-inference-mock (reads frames, mocks AI inference).
+<details>
+<summary><b>Troubleshooting</b></summary>
 
-> **Important:** When streaming profile is active, stop the default mock to avoid duplicate data:
-> ```bash
-> docker exec inference-mock touch /app/tmp/STOP
-> ```
+- **`network violence-detection-net not found`** → `docker network create violence-detection-net`.
+- **No Flink jobs after start** → watch `docker logs pipeline-manager`; Fluss/Paimon catalog init takes 3–5 min on first boot.
+- **WARM returns 0 rows** → Paimon is filled by tiering every 30 min; check `/api/layer-counts` (`hot > 0` first).
+- **Fluss `COUNT(*)` is 0** → streaming aggregates only count new events; use `/api/layer-counts` for a reliable HOT count.
+- **Out of memory** → every service has a memory/CPU limit; keep optional profiles off on a 16 GB machine.
+</details>
 
-### After machine restart
-
-Flink jobs are lost on restart. The `pipeline-manager` container automatically resubmits them on startup. Just run:
-
-```bash
-cd docker && docker compose up -d
-```
-
----
-
-## Service Profiles
-
-Profiles control optional services to manage memory usage (16GB machine):
-
-| Profile | Services added | RAM added | Use case |
-|---------|---------------|-----------|---------|
-| `streaming` | mediamtx, rtsp_pusher, rtsp-inference-mock | ~640MB | Real RTSP video frames |
-| `ui` | kafka-ui, flink-sql-gateway | ~768MB | Browse Kafka topics, query Paimon via SQL |
-| `monitoring` | prometheus, grafana, node-exporter | ~576MB | Metrics dashboards |
-| `orchestration` | airflow | ~768MB | DAG scheduling (Airflow on port 8089) |
-| `scaling` | trino-worker-1, trino-worker-2 | ~2GB | Faster Trino queries |
-
-```bash
-# Multiple profiles
-docker compose --profile streaming --profile monitoring up -d
-
-# All optional services (except scaling)
-docker compose --profile streaming --profile monitoring --profile ui --profile orchestration up -d
-```
-
----
-
-## Verifying the Setup
-
-### 1. All containers healthy
-
-```bash
-docker compose ps
-# All STATUS should be: Up (healthy) or Up
-```
-
-### 2. Flink has 3 running jobs
-
-Open **http://localhost:8081** → Running Jobs should show:
-- `Contract Validator Job`
-- `Flink job: Kafka to Fluss HOT Sink`
-- `Flink job: Paimon Aggregation`
-
-### 3. Data flowing through Kafka
-
-```bash
-docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 \
-  --topic hot-violence-alerts-valid \
-  --max-messages 3
-```
-
-### 4. HOT layer has data (Fluss)
-
-```bash
-# Via Flink SQL Gateway (requires --profile ui)
-curl -X POST http://localhost:8083/v1/sessions \
-  -H "Content-Type: application/json" \
-  -d '{"sessionName":"test"}'
-# Use returned sessionHandle to query:
-# SELECT COUNT(*) FROM fluss.`security`.`hot_violence_alerts` LIMIT 1
-```
-
-### 5. WARM layer has data (Paimon)
-
-```bash
-# Wait ~30 minutes for first tiering cycle, then:
-docker exec minio_client mc ls \
-  minio/warehouse/paimon/security.db/violence_incidents/snapshot/
-```
-
-### 6. API endpoints
-
-```bash
-curl http://localhost:5002/api/layer-counts
-# Expected: {"hot": N, "warm": M, "cold": 0}  (cold=0 until 7 days of data)
-
-curl http://localhost:5002/api/latency
-# Expected: {"hot_latency_ms": ~35, "warm_latency_ms": ~180000}
-```
-
-### 7. Data contract validation
-
-```bash
-# Inject an invalid event
-docker exec kafka /opt/kafka/bin/kafka-console-producer.sh \
-  --bootstrap-server localhost:9092 \
-  --topic urban-safety-alerts << 'EOF'
-{"event_id":"test-bad","camera_id":"INVALID","timestamp":"2099-01-01T00:00:00Z","is_violent":true,"risk_score":1.5,"confidence":0.9}
-EOF
-
-# Should appear in quarantine with violations listed
-docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 \
-  --topic urban-safety-quarantine \
-  --max-messages 3 --from-beginning
-```
-
----
-
-## Using the Chatbot
-
-The chatbot automatically routes queries to the correct storage layer based on time period:
-
-| Query time range | Layer | Table |
-|-----------------|-------|-------|
-| < 1 hour | Fluss HOT | `hot_violence_alerts` |
-| 1 hour – 7 days | Paimon WARM | `violence_incidents` |
-| > 7 days | Iceberg COLD | `historical_violence_incidents` |
-
-### Example queries (Vietnamese)
-
-```bash
-# HOT layer — last 30 minutes
-curl -X POST http://localhost:5002/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Trong 30 phút qua có bao nhiêu vụ bạo lực?"}'
-
-# WARM layer — today  
-curl -X POST http://localhost:5002/api/chat \
-  -d '{"query": "Hôm nay camera nào ghi nhận nhiều vụ nhất?"}'
-
-# HOT layer — recent alerts
-curl -X POST http://localhost:5002/api/chat \
-  -d '{"query": "Cảnh báo nào được phát ra trong 30 phút qua?"}'
-
-# Evidence retrieval
-curl -X POST http://localhost:5002/api/chat \
-  -d '{"query": "Cho tôi xem ảnh bằng chứng của sự cố gần nhất"}'
-```
-
-### API endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/chat` | POST | Main chatbot — `{"query": "..."}` |
-| `/api/layer-counts` | GET | Row counts: HOT / WARM / COLD |
-| `/api/latency` | GET | Query latency per layer (ms) |
-| `/api/recent-incidents` | GET | Last 20 incidents with frame URLs |
-| `/api/evidence` | GET | `?camera_id=cam_01&date=YYYY-MM-DD` |
-| `/docs` | GET | FastAPI Swagger UI |
-
----
-
-## Project Structure
+## Repository layout
 
 ```
-realtime-violence-detection/
 ├── scripts/
-│   ├── streaming/                  # Data producers
-│   │   ├── inference_mock.py       # Default: synthetic events (no video needed)
-│   │   ├── rtsp_inference_mock.py  # Profile streaming: reads MediaMTX frames
-│   │   └── rtsp_pusher.py          # Profile streaming: pushes RWF-2000 to MediaMTX
-│   ├── transform/                  # Flink streaming jobs
-│   │   ├── pipeline_manager.py     # Orchestrates all jobs + tiering + archival
-│   │   ├── data_contract_validator.py  # Validates events, routes valid/quarantine
-│   │   ├── sink_to_fluss_enriched.py   # Kafka → Fluss HOT (with location enrichment)
-│   │   ├── tier_fluss_to_paimon.py     # HOT → WARM tiering (runs every 30min)
-│   │   ├── archive_to_iceberg.py       # WARM → COLD archival (runs daily at 02:00)
-│   │   ├── aggregate_paimon.py         # CDC → daily_incident_stats + camera_stats
-│   │   ├── setup_star_schema.py        # Creates dim_camera (Fluss) + fact tables (Paimon)
-│   │   ├── frame_extractor_sink.py     # Saves evidence frames to MinIO
-│   │   └── init_*_tables.py            # Table initialization scripts
-│   ├── chatbot/                    # Agentic RAG backend
-│   │   ├── app.py                  # FastAPI + LangGraph agent graph
-│   │   ├── ingest.py               # Schema metadata → ChromaDB
-│   │   ├── rag_store.py            # ChromaDB wrapper
-│   │   └── trino_client.py         # Trino + Flink SQL Gateway query routing
-│   └── setup/
-│       ├── create-topics.sh        # Creates Kafka topics
-│       └── start-pipeline.sh       # Manual pipeline start script
-├── docker/
-│   ├── docker-compose.yml          # Full stack definition
-│   ├── Dockerfile.flink            # Flink + PyFlink + Paimon/Fluss connectors
-│   ├── Dockerfile.chatbot          # Chatbot + ChromaDB + LangGraph
-│   ├── Dockerfile.producer         # Base image for streaming services
-│   ├── Dockerfile.hive             # Hive Metastore
-│   ├── Dockerfile.trino            # Trino + S3A + Iceberg connector
-│   ├── Dockerfile.rtsp-pusher      # RTSP video pusher
-│   ├── .env.example                # Template — copy to .env and fill in secrets
-│   └── airflow/dags/               # Airflow DAGs (optional orchestration)
-├── config/
-│   ├── kafka/                      # Producer config
-│   ├── mediamtx/                   # RTSP relay config
-│   ├── hive_metastore/             # Hive schema SQL
-│   ├── trino/                      # Trino catalog (Iceberg, Fluss disabled)
-│   └── prometheus/                 # Prometheus scrape config
-├── data/
-│   ├── metadata/
-│   │   └── camera_registry.csv     # 15 cameras: cam_01–cam_15, Quận 1 TP.HCM
-│   └── raw/RWF-2000/               # Video dataset (gitignored, optional)
-├── docs/
-│   ├── agent-guides/               # Detailed architecture documentation
-│   └── PROJECT_CONTEXT.md          # Current project status + decisions
-├── Violence-Urban-Safety-UI/       # React dashboard (git submodule)
-├── DEVELOPER_LOG.md                # Session-by-session development history
-└── CLAUDE.md                       # AI agent collaboration guide
+│   ├── streaming/    # RTSP pusher and mock inference (same event schema as the real model)
+│   ├── transform/    # Flink jobs: contract validator, Fluss sink, tiering, archival, aggregation, pipeline manager
+│   ├── chatbot/      # FastAPI + LangGraph agent, Text-to-SQL, Trino client, evidence service
+│   ├── admin/        # Operations API
+│   └── setup/        # Kafka topic creation, federated-query demos
+├── docker/           # docker-compose.yml, Dockerfiles, .env.example
+├── config/           # Trino, Hive, MediaMTX, Prometheus, Grafana provisioning
+├── deploy/           # GCP single-VM deployment, GPU inference node (viomovinet), nginx
+├── docs/             # Technical documentation + figures
+└── Violence-Urban-Safety-UI/   # React dashboard (git submodule)
 ```
-
----
-
-## Key Ports
-
-| Service | Port | Notes |
-|---------|------|-------|
-| Flink Web UI | 8081 | Monitor streaming jobs, logs |
-| MinIO Console | 9001 | Browse warehouse data visually |
-| MinIO API (S3) | 9000 | Trino catalog endpoint |
-| Trino | 8082 | SQL query engine (Iceberg COLD) |
-| Chatbot API | 5002 | FastAPI + Swagger at `/docs` |
-| Kafka | 19092 | External bootstrap server |
-| Fluss Coordinator | 9123 | Real-time HOT storage |
-| Fluss TabletServer | 9094 | Data plane |
-| Kafka UI | 18085 | Profile `ui` — browse topics |
-| Flink SQL Gateway | 8083 | Profile `ui` — query Paimon/Fluss via SQL |
-| MediaMTX (RTSP) | 8554 | Profile `streaming` |
-| Prometheus | 9090 | Profile `monitoring` |
-| Grafana | 3001 | Profile `monitoring` |
-| Airflow | 8089 | Profile `orchestration` (admin/admin) |
-
----
-
-## Stopping Services
-
-```bash
-# Graceful stop for infinite streaming loops first
-docker exec inference-mock touch /app/tmp/STOP
-docker exec rtsp-inference-mock touch /app/tmp/STOP  # if --profile streaming
-
-# Stop all services (keeps volumes / data)
-docker compose -f docker/docker-compose.yml down
-
-# Stop and delete all data (hard reset)
-docker compose -f docker/docker-compose.yml down -v
-```
-
----
-
-## Troubleshooting
-
-### "violence-detection-net not found"
-
-```bash
-docker network create violence-detection-net
-```
-
-### Flink jobs not starting
-
-```bash
-# Check pipeline-manager logs
-docker logs pipeline-manager
-
-# Check Flink JobManager
-docker logs jobmanager | tail -30
-
-# Flink UI shows no running jobs → pipeline-manager may need more time
-# Fluss + Paimon catalog init takes ~3-5 min on first start
-```
-
-### Paimon queries return 0 rows
-
-Paimon WARM layer is populated by tiering from Fluss every 30 minutes. Wait for:
-1. Fluss HOT has data: check `api/layer-counts` → `hot > 0`
-2. First tiering cycle: ~30 minutes after startup
-3. Then `api/layer-counts` → `warm > 0`
-
-### Chatbot returns wrong layer / old data
-
-```bash
-# Check layer routing
-curl http://localhost:5002/api/layer-counts
-
-# Restart chatbot to reload ChromaDB schema
-docker compose restart chatbot
-```
-
-### Flink SQL Gateway (Paimon/Fluss SQL queries) is slow
-
-Expected behavior: Flink SQL Gateway queries run as mini streaming jobs, taking 3-5 minutes. This is normal. For faster queries, use:
-- Trino on Iceberg COLD layer (< 5 seconds)
-- Direct Fluss HOT queries (< 100ms, bounded scan via LIMIT N)
-
-### MinIO data not persisting after restart
-
-```bash
-# Check volume exists
-docker volume ls | grep minio
-
-# If missing, volumes were deleted — normal after `docker compose down -v`
-# Data will re-populate as inference-mock sends events
-```
-
-### Chatbot cannot query Paimon (paimon.properties disabled)
-
-The Paimon-Trino connector JAR does not exist on Maven Central. Paimon queries route through Flink SQL Gateway instead:
-
-```bash
-# Start Flink SQL Gateway
-docker compose --profile ui up -d flink-sql-gateway
-
-# Chatbot auto-detects and routes warm queries there
-```
-
----
 
 ## Documentation
 
-| Doc | Description |
-|-----|-------------|
-| [Architecture](docs/agent-guides/architecture.md) | Streamhouse vs Lambda, flow diagrams, star schema |
-| [Storage Layers](docs/agent-guides/storage-layers.md) | HOT/WARM/COLD detailed specs + SQL examples |
-| [Data Contracts](docs/agent-guides/data-contracts.md) | Validation rules, quarantine flow |
-| [Agentic RAG](docs/agent-guides/agentic-rag.md) | LangGraph agent, Text-to-SQL, self-correction |
-| [Stop Mechanism](docs/agent-guides/stop-mechanism.md) | Graceful stop for streaming services |
-| [Roadmap](docs/agent-guides/roadmap.md) | 8-week plan, checklist, demo script |
-| [Project Context](docs/PROJECT_CONTEXT.md) | Current system state, decisions, known issues |
-| [Developer Log](DEVELOPER_LOG.md) | Session-by-session history (40 sessions) |
+> Most deep-dive documents are written in Vietnamese.
 
----
+| Document | Topic |
+|---|---|
+| [Architecture](docs/architecture.md) | Streamhouse vs. Lambda/Medallion, flow diagrams |
+| [Storage layers](docs/storage-layers.md) | HOT / WARM / COLD specs with SQL examples |
+| [Data contracts](docs/data-contracts.md) | Validation rules and quarantine flow |
+| [Flink architecture](docs/flink-architecture.md) · [Fluss guide](docs/fluss-guide.md) | Jobs, checkpointing, Fluss usage |
+| [Agentic RAG](docs/agentic-rag.md) · [Chatbot API](docs/chatbot-api.md) | Agent design and endpoints |
+| [Trino federation](docs/trino-query-federation.md) | Cross-tier queries, Paimon connector |
+| [Evidence frames](docs/frame-evidence-storage.md) | MinIO layout and retrieval |
+| [Streamhouse vs. traditional](docs/streamhouse-vs-traditional.md) | Comparison and trade-offs |
 
-## E2E Test Results
+## Limitations & future work
 
-Latest run: **Session 39 — 22/23 PASS** (2026-05-22)
+- Evaluated mostly on **one node**; multi-node scaling is untested.
+- Chatbot end-to-end latency is dominated by the external LLM (two Gemini calls); local LLMs or caching are the next step.
+- Test video comes from public datasets and simulated RTSP feeds — more real-camera data is needed.
+- Planned: WebSocket alert push, a lighter edge variant of StreamViD-A, multi-class violence types.
 
-```
-✅ S1: Data ingestion (Kafka → Fluss)
-✅ S2: HOT layer queries (<100ms latency)
-✅ S3: WARM layer tiering (Fluss → Paimon every 30min)
-✅ S4: COLD layer archival (Paimon → Iceberg daily)
-✅ S5: Trino federated queries (Iceberg)
-✅ S6: Chatbot routing (HOT/WARM/COLD based on time period)
-✅ S7: Data contract validation + quarantine
-✅ T6.1: "cảnh báo" not misrouted to evidence endpoint
-✅ T6.4: "45 phút"→Fluss, "2 giờ"→Paimon boundary routing
-```
+## Authors
 
-Full report: [E2E_TEST_REPORT_2026-05-22_SESSION39.md](docs/E2E_TEST_REPORT_2026-05-22_SESSION39.md)
+| | |
+|---|---|
+| **Nguyễn Ngọc Minh Nhật** — [@minhnhat1206](https://github.com/minhnhat1206) | Streamhouse data platform (Flink, Fluss, Paimon, Iceberg, Trino), Agentic RAG chatbot, backend API, monitoring, Docker/GCP deployment, end-to-end testing |
+| **Nguyễn Quốc Huy** — [@huy-dataguy](https://github.com/huy-dataguy) | StreamViD-A model (data, design, 46 training experiments, evaluation), React dashboard |
 
----
+Advisor: **Dr. Nguyễn Thanh Tuấn**, Faculty of Information Technology, HCMUTE.
 
-*Khóa luận tốt nghiệp, Khoa Công nghệ Thông tin — 2026*
+Built on open-source projects: Apache Flink, Kafka, Fluss, Paimon, Iceberg, Trino, MinIO, LangGraph, ChromaDB, MoViNet, MediaMTX. Training data: RWF-2000, VioPeru, SCFD.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for conventions.

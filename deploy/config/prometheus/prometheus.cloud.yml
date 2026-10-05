@@ -1,5 +1,5 @@
 # =============================================================================
-# Prometheus — Cloud Scrape Config (Oracle ARM64)
+# Prometheus — Cloud Scrape Config
 # Internal Docker hostnames — only reachable inside violence-detection-net
 # =============================================================================
 

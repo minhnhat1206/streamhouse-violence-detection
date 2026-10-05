@@ -5,7 +5,6 @@
 /pids/
 Violence-Urban-Safety-UI/frontend/node_modules
 Violence-Urban-Safety-UI/frontend/dist
-.claude/worktrees/
 package-lock.json
 .env
 docker/.env
@@ -29,16 +28,9 @@ tmp/
 *.pid
 pids/
 
-# Test files with hardcoded credentials — never commit
-scripts/chatbot/test_e2e_gemini.py
-
-# Internal dev docs — session logs, planning, stale notes (local only)
-docs/internal/
-
-# Claude Code - agent-specific (do not share)
-.claude/settings.local.json
-.claude/conversations/
-.claude/context/
-.claude/cache/
-.claude/agent-memory/
+# Local AI-assistant state
+.claude/
+.gemini/
+CLAUDE.md
+GEMINI.md
 CLAUDE.local.md
