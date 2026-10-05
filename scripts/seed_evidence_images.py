@@ -7,6 +7,7 @@ Usage:
 """
 
 import io
+import os
 import sys
 import requests
 import xml.etree.ElementTree as ET
@@ -14,8 +15,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ── Config ───────────────────────────────────────────────────────────────────
 MINIO_ENDPOINT = "http://localhost:9000"
-MINIO_ACCESS   = "minio"
-MINIO_SECRET   = "mypassword"
+MINIO_ACCESS   = os.getenv("MINIO_ROOT_USER", "minioadmin")
+MINIO_SECRET   = os.environ["MINIO_ROOT_PASSWORD"]
 BUCKET         = "evidence-frames"
 TRINO_HOST     = "localhost"
 TRINO_PORT     = 8082  # External port (container maps 8082->8080)

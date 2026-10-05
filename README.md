@@ -144,7 +144,7 @@ Operators ask questions in plain Vietnamese; a **LangGraph** agent turns them in
 </div>
 
 - **Layer routing** from the time range in the question: < 1 h → Fluss, 1 h – 7 d → Paimon, > 7 d → Iceberg.
-- **Text-to-SQL** with Gemini 2.0 Flash, grounded in schema metadata retrieved from **ChromaDB** (no invented tables or columns).
+- **Text-to-SQL** with Gemini Flash, grounded in schema metadata retrieved from **ChromaDB** (no invented tables or columns).
 - **Self-correction**: failed SQL is repaired and retried up to 3 times; if it still fails the user is told why.
 - **Evidence retrieval**: asks like *"show me the latest incident photo"* return the stored frames.
 
@@ -158,14 +158,14 @@ curl -X POST http://localhost:5002/chat -H "Content-Type: application/json" \
 The React dashboard lives in the [`Violence-Urban-Safety-UI`](https://github.com/minhnhat1206/Violence-Urban-Safety-UI) submodule (Command Center, Live Streams, Alerts, Analytics, Vigilance Terminal chatbot). Grafana covers pipeline health and per-tier latency.
 
 <div align="center">
-<img src="docs/images/ui-stream-detail-bbox.png" alt="Live stream with detected-violence bounding boxes" width="49%">
-<img src="docs/images/ui-live-streams.png" alt="15-camera live grid" width="49%">
-<img src="docs/images/ui-command-center.png" alt="Command center with HOT/WARM/COLD status" width="49%">
-<img src="docs/images/ui-chatbot-evidence.png" alt="Chatbot answering with evidence frames" width="49%">
-<img src="docs/images/ui-alerts.png" alt="Alerts dashboard" width="49%">
-<img src="docs/images/ui-analytics.png" alt="Analytics dashboard" width="49%">
-<img src="docs/images/grafana-storage-latency.png" alt="Grafana: per-tier query latency" width="49%">
-<img src="docs/images/grafana-pipeline-health.png" alt="Grafana: pipeline throughput and Flink job health" width="49%">
+<img src="docs/images/ui-stream-detail-bbox.jpg" alt="Live stream with detected-violence bounding boxes" width="49%">
+<img src="docs/images/ui-live-streams.jpg" alt="15-camera live grid" width="49%">
+<img src="docs/images/ui-command-center.jpg" alt="Command center with HOT/WARM/COLD status" width="49%">
+<img src="docs/images/ui-chatbot-evidence.jpg" alt="Chatbot answering with evidence frames" width="49%">
+<img src="docs/images/ui-alerts.jpg" alt="Alerts dashboard" width="49%">
+<img src="docs/images/ui-analytics.jpg" alt="Analytics dashboard" width="49%">
+<img src="docs/images/grafana-storage-latency.jpg" alt="Grafana: per-tier query latency" width="49%">
+<img src="docs/images/grafana-pipeline-health.jpg" alt="Grafana: pipeline throughput and Flink job health" width="49%">
 </div>
 
 ---
